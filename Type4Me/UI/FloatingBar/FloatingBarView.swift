@@ -347,7 +347,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
     private var glassBackground: some View {
         ZStack {
             Rectangle().fill(.ultraThinMaterial)
-            Color(white: 0.10, opacity: 0.45)
+            Color(red: 0.20, green: 0.15, blue: 0.09, opacity: 0.45)
         }
     }
 

@@ -163,7 +163,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
                 capsuleBackground
                     .clipShape(Capsule())
             }
-            .shadow(color: Color(white: 0.08, opacity: 0.5), radius: 5, x: 0, y: 0)
+            .shadow(color: .black.opacity(0.22), radius: 10, x: 0, y: 3)
             .animation(TF.springSnappy, value: state.barPhase)
     }
 
@@ -342,9 +342,18 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
     // MARK: - Background & Border
 
+    /// Dark frosted-glass fill shared by the capsule and the transcript popup.
+    /// Shape-agnostic: the caller clips it (Capsule / RoundedRectangle).
+    private var glassBackground: some View {
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial)
+            Color(white: 0.10, opacity: 0.45)
+        }
+    }
+
     private var capsuleBackground: some View {
         ZStack {
-            Color(white: 0.08, opacity: 0.88)
+            glassBackground
 
             if state.barPhase == .recording {
                 AudioRipple(meter: state.audioLevel, style: recordingVisualStyle)
@@ -380,13 +389,13 @@ struct FloatingBarView<S: FloatingBarState>: View {
     private var borderColor: Color {
         switch state.barPhase {
         case .preparing:
-            .white.opacity(0.04)
+            .white.opacity(0.08)
         case .recording:
-            .white.opacity(breathe ? 0.14 : 0.05)
+            .white.opacity(breathe ? 0.20 : 0.10)
         case .processing:
-            .white.opacity(0.07)
-        case .recovering:
             .white.opacity(0.12)
+        case .recovering:
+            .white.opacity(0.16)
         case .done:
             switch state.feedbackKind {
             case .macActionUnsure:
@@ -468,10 +477,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
             .frame(width: TF.barWidth)
-            .background(
-                RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous)
-                    .fill(Color(white: 0.08, opacity: 0.78))
-            )
+            .background(glassBackground)
             .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
             .shadow(color: Color.black.opacity(0.3), radius: 8, y: -2)
     }

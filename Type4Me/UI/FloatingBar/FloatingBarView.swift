@@ -470,16 +470,19 @@ struct FloatingBarView<S: FloatingBarState>: View {
     // MARK: - Transcript Popup View
 
     private var transcriptPopup: some View {
-        Text(state.transcriptionText)
-            .font(.system(size: 14, weight: .medium))
-            .foregroundStyle(.white)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .frame(width: TF.barWidth)
-            .background(glassBackground)
-            .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
-            .shadow(color: Color.black.opacity(0.3), radius: 8, y: -2)
+        ScrollView(.vertical) {
+            Text(state.transcriptionText)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+        }
+        .frame(width: TF.barWidth)
+        .frame(maxHeight: TF.transcriptPopupMaxHeight)
+        .background(glassBackground)
+        .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
+        .shadow(color: Color.black.opacity(0.3), radius: 8, y: -2)
     }
 }
 

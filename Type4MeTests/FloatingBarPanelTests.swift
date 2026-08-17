@@ -16,6 +16,23 @@ final class FloatingBarPanelTests: XCTestCase {
         XCTAssertEqual(hosting.sizingOptions, [])
     }
 
+    func testPanelUsesWiderLowerGeometry() throws {
+        let (controller, panel) = try makeControllerAndPanel()
+        defer { panel.orderOut(nil) }
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = try XCTUnwrap(
+            NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
+                ?? NSScreen.main
+                ?? NSScreen.screens.first
+        )
+
+        XCTAssertEqual(TF.barWidth, 600)
+        XCTAssertEqual(TF.barBottomOffset, 32)
+        XCTAssertEqual(panel.frame.width, 632, accuracy: 0.5)
+        XCTAssertEqual(panel.frame.minY, screen.visibleFrame.minY + 16, accuracy: 0.5)
+        withExtendedLifetime(controller) {}
+    }
+
     func testLongPinnedTranscriptKeepsPanelWithinReservedSize() throws {
         let (state, controller, panel) = try makeStateControllerAndPanel()
         defer { panel.orderOut(nil) }

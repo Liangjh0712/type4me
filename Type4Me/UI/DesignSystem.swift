@@ -76,10 +76,10 @@ enum TF {
 
     // MARK: Floating Bar
 
-    static let barWidth: CGFloat = 520
+    static let barWidth: CGFloat = 600
     static let barWidthCompact: CGFloat = 200
     static let barHeight: CGFloat = 40
-    static let barBottomOffset: CGFloat = 48
+    static let barBottomOffset: CGFloat = 32
 
     // MARK: Transcript Popup (hover preview above bar)
 

@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Cached font for text measurement (module-level to avoid generic-type static restriction).
 private let floatingBarFont = NSFont.systemFont(ofSize: 14, weight: .medium)
+private let expandedTranscriptLineHeight: CGFloat = 18
 
 // MARK: - FloatingBarState Protocol
 
@@ -17,6 +18,9 @@ protocol FloatingBarState: AnyObject, Observable {
     var transcriptionText: String { get }
     var recordingStartDate: Date? { get }
     var pinsTranscriptPopup: Bool { get }
+    var liveOptimizedText: String { get }
+    var liveOptimizationPhase: LiveOptimizationPhase { get }
+    var supportsLiveOptimizationPreview: Bool { get }
     /// True when recording without SenseVoice streaming (Qwen3-only).
     var isQwen3OnlyMode: Bool { get }
     var effectiveProcessingLabel: String { get }
@@ -40,7 +44,13 @@ struct FloatingBarView<S: FloatingBarState>: View {
     @State private var processingStartDate: Date?
     @State private var doneStartDate: Date?
     @State private var isHovered = false
-    @AppStorage("tf_hoverTranscriptPreview") private var hoverTranscriptPreview = true
+    @State private var rawFollowsLatest = true
+    @State private var optimizedFollowsLatest = true
+    @State private var rawHasNewContent = false
+    @State private var optimizedHasNewContent = false
+    @State private var rawScrollRequest = 0
+    @State private var optimizedScrollRequest = 0
+    @AppStorage(TranscriptDisplayMode.storageKey) private var transcriptDisplayModeValue = TranscriptDisplayMode.defaultValue
     @AppStorage(RecordingVisualStyle.storageKey) private var visualStyle = RecordingVisualStyle.defaultValue
 
     // MARK: - Transcript Popup
@@ -49,8 +59,20 @@ struct FloatingBarView<S: FloatingBarState>: View {
         RecordingVisualStyle(rawValue: visualStyle) ?? .timeline
     }
 
+    private var transcriptDisplayMode: TranscriptDisplayMode {
+        TranscriptDisplayMode(rawValue: transcriptDisplayModeValue) ?? .expanded
+    }
+
+    private var showExpandedRecording: Bool {
+        transcriptDisplayMode == .expanded
+            && recordingVisualStyle.showsRecordingPanel
+            && state.barPhase == .recording
+            && !state.segments.isEmpty
+    }
+
     private var shouldRenderCapsule: Bool {
         guard state.barPhase != .hidden else { return false }
+        if showExpandedRecording { return false }
         if !recordingVisualStyle.showsRecordingPanel,
            state.barPhase == .preparing || state.barPhase == .recording {
             return false
@@ -65,8 +87,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
         if state.barPhase == .recovering {
             return !state.segments.isEmpty
         }
-        guard recordingVisualStyle.showsRecordingPanel,
-              hoverTranscriptPreview,
+        guard transcriptDisplayMode == .compact,
+              recordingVisualStyle.showsRecordingPanel,
               isHovered,
               state.barPhase == .recording,
               !state.segments.isEmpty
@@ -107,6 +129,14 @@ struct FloatingBarView<S: FloatingBarState>: View {
                     ))
             }
 
+            if showExpandedRecording {
+                expandedRecordingCard
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.96, anchor: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+            }
+
             if shouldRenderCapsule {
                 capsuleBar
                 .transition(.asymmetric(
@@ -127,6 +157,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
         .animation(TF.springSnappy, value: state.barPhase != .hidden)
         .animation(TF.springSnappy, value: shouldRenderCapsule)
         .animation(TF.springSnappy, value: visualStyle)
+        .animation(TF.springSnappy, value: transcriptDisplayModeValue)
+        .animation(TF.springSnappy, value: showExpandedRecording)
         .animation(TF.springSnappy, value: showTranscriptPopup)
         .onChange(of: state.barPhase) { _, newPhase in
             handlePhaseChange(newPhase)
@@ -340,6 +372,184 @@ struct FloatingBarView<S: FloatingBarState>: View {
         }
     }
 
+    // MARK: - Expanded Live Transcript
+
+    private var usesDualTranscript: Bool {
+        state.supportsLiveOptimizationPreview
+            && state.liveOptimizationPhase.failureMessage == nil
+    }
+
+    private var expandedRecordingCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            rawTranscriptSection
+
+            if usesDualTranscript {
+                Rectangle()
+                    .fill(.white.opacity(0.08))
+                    .frame(height: 1)
+                optimizedTranscriptSection
+            } else if let message = state.liveOptimizationPhase.failureMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(message)
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(TF.amber.opacity(0.9))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(width: TF.barWidth)
+        .background {
+            ZStack {
+                glassBackground
+                LinearGradient(
+                    colors: [TF.recording.opacity(0.08), .clear],
+                    startPoint: .bottomLeading,
+                    endPoint: UnitPoint(x: 0.55, y: 0.45)
+                )
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous)
+                .stroke(.white.opacity(breathe ? 0.18 : 0.09), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.28), radius: 10, y: 3)
+    }
+
+    private var rawTranscriptSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                RecordingDot(meter: state.audioLevel)
+                    .scaleEffect(0.72)
+                    .frame(width: 16, height: 16)
+                Text(L("原始转写", "RAW TRANSCRIPT"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer(minLength: 8)
+                if !rawFollowsLatest {
+                    transcriptFollowButton(
+                        hasNewContent: rawHasNewContent,
+                        action: {
+                            rawScrollRequest &+= 1
+                            rawFollowsLatest = true
+                            rawHasNewContent = false
+                        }
+                    )
+                }
+            }
+
+            transcriptViewport(
+                text: state.transcriptionText,
+                maxLines: usesDualTranscript ? 2 : 6,
+                opacity: 0.82,
+                isFollowingLatest: $rawFollowsLatest,
+                hasNewContent: $rawHasNewContent,
+                scrollRequest: rawScrollRequest
+            )
+        }
+    }
+
+    private var optimizedTranscriptSection: some View {
+        let text = state.liveOptimizedText.isEmpty
+            ? L("停顿约 0.8 秒后显示优化结果", "Optimized text appears after a short pause")
+            : state.liveOptimizedText
+        let opacity: Double = switch state.liveOptimizationPhase {
+        case .stale, .updating: 0.72
+        default: state.liveOptimizedText.isEmpty ? 0.42 : 0.96
+        }
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(TF.amber.opacity(0.9))
+                Text(L("优化预览", "OPTIMIZED PREVIEW"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.white.opacity(0.58))
+                if let status = state.liveOptimizationPhase.statusLabel {
+                    Text("· \(status)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(TF.amber.opacity(0.78))
+                }
+                Spacer(minLength: 8)
+                if !optimizedFollowsLatest {
+                    transcriptFollowButton(
+                        hasNewContent: optimizedHasNewContent,
+                        action: {
+                            optimizedScrollRequest &+= 1
+                            optimizedFollowsLatest = true
+                            optimizedHasNewContent = false
+                        }
+                    )
+                }
+            }
+
+            transcriptViewport(
+                text: text,
+                maxLines: 4,
+                opacity: opacity,
+                isFollowingLatest: $optimizedFollowsLatest,
+                hasNewContent: $optimizedHasNewContent,
+                scrollRequest: optimizedScrollRequest
+            )
+        }
+
+    }
+
+    private func transcriptViewport(
+        text: String,
+        maxLines: Int,
+        opacity: Double,
+        isFollowingLatest: Binding<Bool>,
+        hasNewContent: Binding<Bool>,
+        scrollRequest: Int
+    ) -> some View {
+        FollowableTranscriptText(
+            text: text,
+            opacity: opacity,
+            isFollowingLatest: isFollowingLatest,
+            hasNewContent: hasNewContent,
+            scrollRequest: scrollRequest
+        )
+        .frame(height: transcriptViewportHeight(for: text, maxLines: maxLines))
+    }
+
+    private func transcriptViewportHeight(for text: String, maxLines: Int) -> CGFloat {
+        let width = TF.barWidth - 28
+        let bounds = (text as NSString).boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: floatingBarFont]
+        )
+        let lines = max(1, Int(ceil(bounds.height / expandedTranscriptLineHeight)))
+        return CGFloat(min(maxLines, lines)) * expandedTranscriptLineHeight
+    }
+
+    private func transcriptFollowButton(
+        hasNewContent: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                if hasNewContent {
+                    Circle()
+                        .fill(TF.amber)
+                        .frame(width: 4, height: 4)
+                    Text(L("有新内容", "New text"))
+                }
+                Text(L("回到最新", "Latest"))
+                Image(systemName: "arrow.down.to.line.compact")
+            }
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(.white.opacity(0.65))
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Background & Border
 
     /// Dark frosted-glass fill shared by the capsule and the transcript popup.
@@ -426,6 +636,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
             processingStartDate = nil
             doneStartDate = nil
             breathe = false
+            rawFollowsLatest = true
+            optimizedFollowsLatest = true
+            rawHasNewContent = false
+            optimizedHasNewContent = false
+            rawScrollRequest &+= 1
+            optimizedScrollRequest &+= 1
             withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
                 breathe = true
             }
@@ -483,6 +699,238 @@ struct FloatingBarView<S: FloatingBarState>: View {
         .background(glassBackground)
         .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
         .shadow(color: Color.black.opacity(0.3), radius: 8, y: -2)
+    }
+}
+
+private struct FollowableTranscriptText: NSViewRepresentable {
+    let text: String
+    let opacity: Double
+    @Binding var isFollowingLatest: Bool
+    @Binding var hasNewContent: Bool
+    let scrollRequest: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = TranscriptNSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.borderType = .noBorder
+
+        let textView = NSTextView(frame: .zero)
+        textView.drawsBackground = false
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.isRichText = false
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = false
+        scrollView.documentView = textView
+
+        context.coordinator.attach(scrollView: scrollView, textView: textView)
+        scrollView.layoutHandler = { [weak coordinator = context.coordinator] in
+            coordinator?.layoutDocumentAndFollowIfNeeded()
+        }
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.update(parent: self)
+    }
+
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject {
+        private var parent: FollowableTranscriptText
+        private weak var scrollView: NSScrollView?
+        private weak var textView: NSTextView?
+        private var lastText = ""
+        private var lastOpacity = -1.0
+        private var lastScrollRequest: Int
+        private var followingLatest: Bool
+        private var suppressBoundsObservation = false
+        private var isLayingOut = false
+
+        init(parent: FollowableTranscriptText) {
+            self.parent = parent
+            self.lastScrollRequest = parent.scrollRequest
+            self.followingLatest = parent.isFollowingLatest
+        }
+
+        func attach(scrollView: NSScrollView, textView: NSTextView) {
+            self.scrollView = scrollView
+            self.textView = textView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(boundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView
+            )
+            (scrollView as? TranscriptNSScrollView)?.userWillScrollHandler = { [weak self] in
+                self?.userWillScroll()
+            }
+            (scrollView as? TranscriptNSScrollView)?.userDidScrollHandler = { [weak self] in
+                self?.boundsDidChange()
+            }
+        }
+
+        func detach() {
+            (scrollView as? TranscriptNSScrollView)?.userWillScrollHandler = nil
+            (scrollView as? TranscriptNSScrollView)?.userDidScrollHandler = nil
+            NotificationCenter.default.removeObserver(self)
+            (scrollView as? TranscriptNSScrollView)?.layoutHandler = nil
+        }
+
+        func update(parent: FollowableTranscriptText) {
+            self.parent = parent
+            guard let textView else { return }
+
+            let textChanged = lastText != parent.text
+            let appearanceChanged = lastOpacity != parent.opacity
+            let requestedLatest = lastScrollRequest != parent.scrollRequest
+            let oldOrigin = scrollView?.contentView.bounds.origin ?? .zero
+            if !parent.isFollowingLatest {
+                followingLatest = false
+            }
+            if requestedLatest {
+                followingLatest = true
+            }
+
+            if textChanged || appearanceChanged {
+                textView.textStorage?.setAttributedString(NSAttributedString(
+                    string: parent.text,
+                    attributes: [
+                        .font: floatingBarFont,
+                        .foregroundColor: NSColor.white.withAlphaComponent(parent.opacity),
+                    ]
+                ))
+                lastText = parent.text
+                lastOpacity = parent.opacity
+            }
+
+            layoutDocument()
+
+            if followingLatest {
+                scrollToBottom()
+            } else if textChanged {
+                restoreScrollOrigin(oldOrigin)
+                if !parent.hasNewContent {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.parent.hasNewContent = true
+                    }
+                }
+            }
+            lastScrollRequest = parent.scrollRequest
+        }
+
+        func layoutDocumentAndFollowIfNeeded() {
+            guard !isLayingOut else { return }
+            layoutDocument()
+            if followingLatest {
+                scrollToBottom()
+            }
+        }
+
+        private func userWillScroll() {
+            followingLatest = false
+            if parent.isFollowingLatest {
+                parent.isFollowingLatest = false
+            }
+        }
+
+        private func layoutDocument() {
+            guard let scrollView, let textView, !isLayingOut else { return }
+            isLayingOut = true
+            defer { isLayingOut = false }
+
+            let width = max(1, scrollView.contentSize.width)
+            textView.textContainer?.containerSize = NSSize(
+                width: width,
+                height: .greatestFiniteMagnitude
+            )
+            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+            let usedHeight = textView.layoutManager?
+                .usedRect(for: textView.textContainer!)
+                .height ?? expandedTranscriptLineHeight
+            textView.frame = NSRect(
+                x: 0,
+                y: 0,
+                width: width,
+                height: max(scrollView.contentSize.height, ceil(usedHeight))
+            )
+        }
+
+        private func restoreScrollOrigin(_ origin: NSPoint) {
+            guard let scrollView else { return }
+            suppressBoundsObservation = true
+            scrollView.contentView.scroll(to: origin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            releaseBoundsObservation()
+        }
+
+        private func scrollToBottom() {
+            guard let scrollView, let documentView = scrollView.documentView else { return }
+            let y = max(0, documentView.bounds.height - scrollView.contentView.bounds.height)
+            suppressBoundsObservation = true
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            releaseBoundsObservation()
+        }
+
+        private func releaseBoundsObservation() {
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressBoundsObservation = false
+            }
+        }
+
+        @objc private func boundsDidChange() {
+            guard !suppressBoundsObservation, let scrollView,
+                  let documentView = scrollView.documentView
+            else { return }
+            let maximumY = max(0, documentView.bounds.height - scrollView.contentView.bounds.height)
+            let isAtBottom = scrollView.contentView.bounds.origin.y >= maximumY - 2
+            followingLatest = isAtBottom
+            if parent.isFollowingLatest != isAtBottom {
+                parent.isFollowingLatest = isAtBottom
+            }
+            if isAtBottom, parent.hasNewContent {
+                parent.hasNewContent = false
+            }
+        }
+    }
+}
+
+final class TranscriptNSScrollView: NSScrollView {
+    var layoutHandler: (() -> Void)?
+    var userWillScrollHandler: (() -> Void)?
+    var userDidScrollHandler: (() -> Void)?
+
+    func notifyUserWillScroll() {
+        userWillScrollHandler?()
+    }
+
+    private func notifyUserDidScroll() {
+        userDidScrollHandler?()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        notifyUserDidScroll()
+    }
+    override func layout() {
+        super.layout()
+        layoutHandler?()
     }
 }
 

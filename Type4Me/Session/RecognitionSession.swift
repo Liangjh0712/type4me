@@ -78,7 +78,7 @@ actor RecognitionSession {
         LLMRuntime.currentClient(isCloudMode: isCloudModeForLLM)
     }
 
-    /// Load LLM credentials from KeychainService.
+    /// Load LLM credentials from the per-user credentials file.
     private func loadEffectiveLLMConfig() -> LLMConfig? {
         LLMRuntime.currentConfig(isCloudMode: isCloudModeForLLM)
     }
@@ -98,7 +98,7 @@ actor RecognitionSession {
             return "\(providerName) · \(ModelManager.selectedStreamingModel.displayName)"
         }
 
-        guard let credentials = KeychainService.loadASRConfig(for: provider)?.toCredentials() else {
+        guard let credentials = CredentialStore.loadASRConfig(for: provider)?.toCredentials() else {
             return providerName
         }
 
@@ -158,7 +158,7 @@ actor RecognitionSession {
     private func pingASREndpoint() async {
         let endpoint: String
         #if HAS_CLOUD_SUBSCRIPTION
-        if KeychainService.selectedASRProvider == .cloud {
+        if CredentialStore.selectedASRProvider == .cloud {
             endpoint = CloudConfig.apiEndpoint + "/health"
         } else {
             endpoint = currentASREndpoint()
@@ -174,7 +174,7 @@ actor RecognitionSession {
     }
 
     private func currentASREndpoint() -> String {
-        let provider = KeychainService.selectedASRProvider
+        let provider = CredentialStore.selectedASRProvider
         switch provider {
         case .volcano:
             return "https://openspeech.bytedance.com"
@@ -270,6 +270,7 @@ actor RecognitionSession {
     private var speculativeLLMText: String = ""
     private var speculativeDebounceTask: Task<Void, Never>?
     private var speculativeThrottle = SpeculativeLLMThrottle()
+    private var speculativeLLMUnavailable = false
     /// Stores the last LLM error from the early/fresh LLM task, consumed once by stopRecording().
     private var pendingLLMError: Error?
     private var pendingSelectionAskConversationContext = ""
@@ -347,7 +348,7 @@ actor RecognitionSession {
 
         stoppedByMaxDuration = false
         targetBundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        let provider = KeychainService.selectedASRProvider
+        let provider = CredentialStore.selectedASRProvider
         activeProvider = provider
 
         #if HAS_CLOUD_SUBSCRIPTION
@@ -378,6 +379,7 @@ actor RecognitionSession {
         hasEmittedReadyForCurrentSession = false
         injectionAborted = false
         speculativeThrottle.reset()
+        speculativeLLMUnavailable = false
         pendingLLMError = nil
         lastStreamingError = nil
         state = .starting
@@ -387,7 +389,7 @@ actor RecognitionSession {
 
         if provider.isLocal {
             // Local providers: use default model directory if no saved config
-            if let savedConfig = KeychainService.loadASRConfig(for: provider) {
+            if let savedConfig = CredentialStore.loadASRConfig(for: provider) {
                 config = savedConfig
                 NSLog("[Session] Loaded %@ config from file store", provider.rawValue)
             } else if let defaultConfig = SherpaASRConfig(credentials: ["modelDir": ModelManager.defaultModelsDir]) {
@@ -410,7 +412,7 @@ actor RecognitionSession {
                 onASREvent?(.completed)
                 return
             }
-        } else if let savedConfig = KeychainService.loadASRConfig(for: provider) {
+        } else if let savedConfig = CredentialStore.loadASRConfig(for: provider) {
             config = savedConfig
             NSLog("[Session] Loaded %@ credentials from file store", provider.rawValue)
         } else if provider == .volcano,
@@ -419,7 +421,7 @@ actor RecognitionSession {
                   ) {
             // Env var fallback (volcano only, for dev convenience)
             do {
-                try KeychainService.saveASRCredentials(for: .volcano, values: volcConfig.toCredentials())
+                try CredentialStore.saveASRCredentials(for: .volcano, values: volcConfig.toCredentials())
                 NSLog("[Session] Loaded credentials from env vars and persisted to file")
             } catch {
                 NSLog("[Session] WARNING: env var credentials loaded but failed to persist: %@", String(describing: error))
@@ -597,10 +599,18 @@ actor RecognitionSession {
 
         DebugFileLogger.log("ASR pipeline live, flushed \(bufferedChunks.count) buffered chunks")
 
-        // Pre-warm LLM connection for modes with post-processing
-        if !currentMode.prompt.isEmpty, let llmConfig = loadEffectiveLLMConfig() {
-            let client = currentLLMClient()
-            Task { await client.warmUp(baseURL: llmConfig.baseURL) }
+        // Pre-warm the live optimizer, or tell the UI to use the full raw transcript area.
+        if !currentMode.prompt.isEmpty, currentMode.executionKind == .recording {
+            if canRunSpeculativeLLMForCurrentSession,
+               let llmConfig = loadEffectiveLLMConfig() {
+                let client = currentLLMClient()
+                Task { await client.warmUp(baseURL: llmConfig.baseURL) }
+            } else {
+                speculativeLLMUnavailable = true
+                onASREvent?(.liveOptimizationUnavailable(
+                    message: L("实时优化暂不可用", "Live optimization unavailable")
+                ))
+            }
         }
 
         // Safety: auto-stop after maxRecordingDuration to prevent unbounded memory use
@@ -775,7 +785,7 @@ actor RecognitionSession {
         )
         DebugFileLogger.log("""
         selectionAsk LLM request
-        provider=\(KeychainService.selectedLLMProvider.rawValue)
+        provider=\(CredentialStore.selectedLLMProvider.rawValue)
         model=\(llmConfig.model)
         contextSource=\(contextSource.rawValue)
         question=\(question)
@@ -1332,7 +1342,7 @@ actor RecognitionSession {
                 asrProvider: activeProvider.displayName,
                 asrModel: currentASRModelLabel(for: activeProvider)
             ))
-            KeychainService.addASRUsage(seconds: duration)
+            CredentialStore.addASRUsage(seconds: duration)
 
             // Note: injectionAborted and llmFailed info is already conveyed
             // through the .finalized event's InjectionOutcome / completionMessage.
@@ -1470,7 +1480,7 @@ actor RecognitionSession {
                 isFinal: true
             )
             await saveRecoveryHistory(status: "stream_recovered", finalText: recovered)
-            KeychainService.addASRUsage(seconds: recoveryDuration)
+            CredentialStore.addASRUsage(seconds: recoveryDuration)
             onASREvent?(.recoverySucceeded(
                 text: recovered,
                 message: L("已恢复完整识别", "Full recognition recovered")
@@ -1479,7 +1489,7 @@ actor RecognitionSession {
         } else {
             if !recoveryPartialText.isEmpty {
                 await saveRecoveryHistory(status: "stream_partial_saved", finalText: recoveryPartialText)
-                KeychainService.addASRUsage(seconds: recoveryDuration)
+                CredentialStore.addASRUsage(seconds: recoveryDuration)
             }
             onASREvent?(.recoveryFailed(text: recoveryPartialText, message: failureMessage))
             DebugFileLogger.log("recovery failed, partial=\(recoveryPartialText.count) chars")
@@ -1624,8 +1634,10 @@ actor RecognitionSession {
                 }
             }
 
-        case .processingResult, .processingLabelOverride, .recoveryStarted,
-             .recoveryPrompt, .recoverySucceeded, .recoveryFailed,
+        case .processingResult, .processingLabelOverride,
+             .liveOptimizationStarted, .liveOptimizationResult,
+             .liveOptimizationUnavailable, .liveOptimizationFailed,
+             .recoveryStarted, .recoveryPrompt, .recoverySucceeded, .recoveryFailed,
              .recoveryInterrupted, .finalized, .macActionResult,
              .selectionAskStarted, .selectionAskAnswerDelta, .selectionAskAnswerCompleted:
             break
@@ -1751,7 +1763,7 @@ actor RecognitionSession {
     // MARK: - Speculative LLM
 
     private var isSpeculativeLLMEnabled: Bool {
-        let provider = KeychainService.selectedLLMProvider
+        let provider = CredentialStore.selectedLLMProvider
         guard provider.supportsSpeculativeProcessing else { return false }
         if let override = UserDefaults.standard.object(forKey: "tf_enableSpeculativeLLM") as? Bool {
             return override
@@ -1759,14 +1771,21 @@ actor RecognitionSession {
         return true
     }
 
+    private var canRunSpeculativeLLMForCurrentSession: Bool {
+        guard isSpeculativeLLMEnabled else { return false }
+        #if HAS_CLOUD_SUBSCRIPTION
+        guard !isCloudMode else { return false }
+        #endif
+        return true
+    }
+
     /// Debounce: after each transcript update, wait 800ms of silence before
     /// speculatively sending current text to LLM. If the user is still
     /// speaking, the timer resets.
     private func scheduleSpeculativeLLM() {
-        guard isSpeculativeLLMEnabled else { return }
-        #if HAS_CLOUD_SUBSCRIPTION
-        if isCloudMode { return }
-        #endif
+        guard canRunSpeculativeLLMForCurrentSession,
+              !speculativeLLMUnavailable
+        else { return }
         var text = currentTranscript.composedText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         text = SnippetStorage.applyEffective(to: text, bundleId: targetBundleId)
@@ -1811,35 +1830,69 @@ actor RecognitionSession {
     private func fireSpeculativeLLM(text: String) async {
         guard speculativeThrottle.beginDebouncedRequest(for: text) else { return }
         guard let llmConfig = loadEffectiveLLMConfig() else {
+            speculativeLLMUnavailable = true
             _ = speculativeThrottle.requestCompleted(input: text)
+            onASREvent?(.liveOptimizationUnavailable(
+                message: L("实时优化暂不可用", "Live optimization unavailable")
+            ))
             return
         }
 
         speculativeLLMText = text
         let prompt = promptContext.expandContextVariables(currentMode.prompt)
-
         let client = currentLLMClient()
+        let rawSourceText = currentTranscript.composedText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestGeneration = sessionGeneration
+        onASREvent?(.liveOptimizationStarted(sourceText: rawSourceText))
         DebugFileLogger.log("speculative LLM: firing mode=\(currentMode.name) model=\(llmConfig.model) with \(text.count) chars")
+
         speculativeLLMTask = Task {
             do {
                 let result = try await client.process(
                     text: text, prompt: prompt, config: llmConfig
                 )
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled, requestGeneration == self.sessionGeneration else {
                     _ = self.speculativeThrottle.requestCompleted(input: text)
                     return nil
                 }
-                DebugFileLogger.log("speculative LLM: done \(result.count) chars")
-                if let pending = self.speculativeThrottle.requestCompleted(input: text),
-                   self.state == .recording {
-                    self.scheduleSpeculativeLLM(text: pending)
+
+                let cleaned = result.collapsingExtraSpaces
+                DebugFileLogger.log("speculative LLM: done \(cleaned.count) chars")
+                let pending = self.speculativeThrottle.requestCompleted(input: text)
+                if self.state == .recording {
+                    if cleaned.isEmpty {
+                        self.onASREvent?(.liveOptimizationFailed(
+                            message: L("实时优化失败", "Live optimization failed"),
+                            sourceText: rawSourceText
+                        ))
+                    } else {
+                        self.onASREvent?(.liveOptimizationResult(
+                            text: cleaned,
+                            sourceText: rawSourceText
+                        ))
+                    }
+                    if let pending {
+                        self.scheduleSpeculativeLLM(text: pending)
+                    }
                 }
                 return result
             } catch {
-                _ = self.speculativeThrottle.requestCompleted(input: text)
-                guard !Task.isCancelled else { return nil }
+                let pending = self.speculativeThrottle.requestCompleted(input: text)
+                guard !Task.isCancelled, requestGeneration == self.sessionGeneration else {
+                    return nil
+                }
                 DebugFileLogger.log("speculative LLM: failed \(error)")
                 self.setPendingLLMError(error)
+                if self.state == .recording {
+                    self.onASREvent?(.liveOptimizationFailed(
+                        message: L("实时优化失败", "Live optimization failed"),
+                        sourceText: rawSourceText
+                    ))
+                    if let pending {
+                        self.scheduleSpeculativeLLM(text: pending)
+                    }
+                }
                 return nil
             }
         }
@@ -1862,6 +1915,7 @@ actor RecognitionSession {
         speculativeLLMTask = nil
         speculativeLLMText = ""
         speculativeThrottle.reset()
+        speculativeLLMUnavailable = false
     }
 
     // MARK: - Timeout Helper

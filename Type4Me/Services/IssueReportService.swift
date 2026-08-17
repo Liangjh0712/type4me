@@ -17,8 +17,8 @@ struct IssueReportEnvironment: Equatable {
             macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             architecture: runtimeArchitecture,
             variant: buildVariant,
-            asrProvider: KeychainService.selectedASRProvider.rawValue,
-            llmProvider: KeychainService.selectedLLMProvider.rawValue
+            asrProvider: CredentialStore.selectedASRProvider.rawValue,
+            llmProvider: CredentialStore.selectedLLMProvider.rawValue
         )
     }
 

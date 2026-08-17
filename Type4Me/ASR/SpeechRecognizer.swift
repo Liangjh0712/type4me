@@ -99,6 +99,10 @@ enum RecognitionEvent: Sendable {
     case completed
     case processingResult(text: String)
     case processingLabelOverride(String)
+    case liveOptimizationStarted(sourceText: String)
+    case liveOptimizationResult(text: String, sourceText: String)
+    case liveOptimizationUnavailable(message: String)
+    case liveOptimizationFailed(message: String, sourceText: String)
     case recoveryStarted(text: String, message: String)
     case recoveryPrompt(text: String, message: String)
     case recoverySucceeded(text: String, message: String)

@@ -6,7 +6,7 @@ enum LLMRuntime {
         if isCloudMode { return CloudLLMClient() }
         #endif
 
-        return LLMClientFactory.make(for: KeychainService.selectedLLMProvider)
+        return LLMClientFactory.make(for: CredentialStore.selectedLLMProvider)
     }
 
     static func currentConfig(isCloudMode: Bool = false) -> LLMConfig? {
@@ -14,6 +14,6 @@ enum LLMRuntime {
         if isCloudMode { return LLMConfig(apiKey: "", model: "cloud") }
         #endif
 
-        return KeychainService.loadLLMConfig()
+        return CredentialStore.loadLLMConfig()
     }
 }

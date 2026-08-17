@@ -71,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Show or hide Dock icon based on user preference
         let showDock = UserDefaults.standard.object(forKey: "tf_showDockIcon") as? Bool ?? true
         NSApp.setActivationPolicy(showDock ? .regular : .accessory)
-        KeychainService.migrateIfNeeded()
+        CredentialStore.migrateIfNeeded()
         HotwordStorage.migrateIfNeeded()
         SnippetStorage.migrateIfNeeded()
         AudioInputDevicePreferenceStore.migrateIfNeeded()
@@ -108,10 +108,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        let (asrEventStream, asrEventContinuation) = AsyncStream<RecognitionEvent>.makeStream()
         Task {
             await session.setOnASREvent { event in
-                Task { @MainActor in
-                    switch event {
+                asrEventContinuation.yield(event)
+            }
+        }
+        Task { @MainActor in
+            for await event in asrEventStream {
+                switch event {
                     case .ready:
                         NSLog("[Type4Me] ready event received")
                         DebugFileLogger.log("ready event received, current barPhase=\(String(describing: appState.barPhase))")
@@ -147,6 +152,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.safeResetHotkeyState()
                     case .processingLabelOverride(let label):
                         appState.processingLabelOverride = label
+                    case .liveOptimizationStarted(let sourceText):
+                        appState.beginLiveOptimization(sourceText: sourceText)
+                    case .liveOptimizationResult(let text, let sourceText):
+                        appState.showLiveOptimizationResult(text, sourceText: sourceText)
+                    case .liveOptimizationUnavailable(let message):
+                        appState.showLiveOptimizationUnavailable(message)
+                    case .liveOptimizationFailed(let message, let sourceText):
+                        appState.showLiveOptimizationFailure(message, sourceText: sourceText)
                     case .processingResult(let text):
                         appState.showProcessingResult(text)
                         self.hotkeyManager.isProcessing = true
@@ -196,7 +209,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.hotkeyManager.isProcessing = false
                         self.safeResetHotkeyState()
                     }
-                }
             }
         }
 
@@ -268,7 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Start SenseVoice Python server if local ASR is selected
-        let needsLocalServer = KeychainService.selectedASRProvider == .sherpa
+        let needsLocalServer = CredentialStore.selectedASRProvider == .sherpa
         if needsLocalServer {
             if ModelManager.isQwen3ASRBundled {
                 Task {
@@ -278,10 +290,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         NSLog("[App] SenseVoice server start failed: %@", String(describing: error))
                     }
                 }
-            } else if KeychainService.selectedASRProvider == .sherpa {
+            } else if CredentialStore.selectedASRProvider == .sherpa {
                 // Cloud-only build: local ASR not available, switch to default cloud provider
                 NSLog("[App] Local ASR not available (cloud build), switching to volcano")
-                KeychainService.selectedASRProvider = .volcano
+                CredentialStore.selectedASRProvider = .volcano
             }
         }
 
@@ -298,7 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshModeAvailability() {
-        let provider = KeychainService.selectedASRProvider
+        let provider = CredentialStore.selectedASRProvider
         appState.reconcileCurrentMode(for: provider)
         registerHotkeys(for: provider)
     }
@@ -339,7 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         NSLog("[Type4Me] >>> HOTKEY: recovery press")
                         DebugFileLogger.log("hotkey recovery press")
                         MainActor.assumeIsolated { self.hotkeyManager.resetActiveState() }
-                        let selectedProvider = KeychainService.selectedASRProvider
+                        let selectedProvider = CredentialStore.selectedASRProvider
                         let resolvedMode = ASRProviderRegistry.resolvedMode(for: capturedMode, provider: selectedProvider)
                         let effectiveMode = availableModes.first(where: { $0.id == resolvedMode.id }) ?? resolvedMode
                         Task {
@@ -363,7 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
 
-                    let selectedProvider = KeychainService.selectedASRProvider
+                    let selectedProvider = CredentialStore.selectedASRProvider
                     let resolvedMode = ASRProviderRegistry.resolvedMode(for: capturedMode, provider: selectedProvider)
                     let effectiveMode = availableModes.first(where: { $0.id == resolvedMode.id }) ?? resolvedMode
                     NSLog("[Type4Me] >>> HOTKEY: Record START (mode: %@)", effectiveMode.name)
@@ -416,7 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { _ = await self.session.handleRecoveryHotkeyPress() }
                 return
             }
-            let selectedProvider = KeychainService.selectedASRProvider
+            let selectedProvider = CredentialStore.selectedASRProvider
             let resolvedMode = ASRProviderRegistry.resolvedMode(for: newMode, provider: selectedProvider)
             let effectiveMode = availableModes.first(where: { $0.id == resolvedMode.id }) ?? resolvedMode
             NSLog("[Type4Me] >>> HOTKEY: Cross-mode stop → %@", effectiveMode.name)
@@ -484,7 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
 
-        let selectedProvider = KeychainService.selectedASRProvider
+        let selectedProvider = CredentialStore.selectedASRProvider
         let availableModes = appState.availableModes
         let resolvedMode = ASRProviderRegistry.resolvedMode(for: .selectionAsk, provider: selectedProvider)
         let effectiveMode = availableModes.first(where: { $0.id == resolvedMode.id }) ?? resolvedMode

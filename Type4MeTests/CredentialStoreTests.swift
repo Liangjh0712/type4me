@@ -1,85 +1,78 @@
 import XCTest
 @testable import Type4Me
 
-final class KeychainServiceTests: XCTestCase {
+final class CredentialStoreTests: XCTestCase {
 
     private var originalProvider: ASRProvider!
-    private var originalASRValues: [String: String]?
-    private var originalLLMValues: [String: String]?
     private var originalMigrationMarker: Any?
-    private let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        .appendingPathComponent("Type4Me", isDirectory: true)
-    private var credentialsURL: URL {
-        appSupportDir.appendingPathComponent("credentials.json")
-    }
+    private var temporaryDirectory: URL!
+    private var credentialsURL: URL!
 
-    override func setUp() {
-        super.setUp()
-        originalProvider = KeychainService.selectedASRProvider
-        originalASRValues = KeychainService.loadASRCredentials(for: .volcano)
-        originalLLMValues = KeychainService.loadLLMCredentials(for: .doubao)
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalProvider = CredentialStore.selectedASRProvider
         originalMigrationMarker = UserDefaults.standard.object(forKey: "tf_migratedFromTypeFlow")
+        temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CredentialStoreTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        credentialsURL = temporaryDirectory.appendingPathComponent("credentials.json")
+        CredentialStore.useCredentialsFileForTesting(credentialsURL)
     }
 
-    override func tearDown() {
-        KeychainService.delete(key: "test_key")
-        if let originalASRValues {
-            try? KeychainService.saveASRCredentials(for: .volcano, values: originalASRValues)
-        } else {
-            try? KeychainService.saveASRCredentials(for: .volcano, values: [:])
-        }
-        if let originalLLMValues {
-            try? KeychainService.saveLLMCredentials(for: .doubao, values: originalLLMValues)
-        } else {
-            try? KeychainService.saveLLMCredentials(for: .doubao, values: [:])
-        }
-        KeychainService.selectedASRProvider = originalProvider
+    override func tearDownWithError() throws {
+        CredentialStore.useCredentialsFileForTesting(nil)
+        CredentialStore.selectedASRProvider = originalProvider
         restoreUserDefault(key: "tf_migratedFromTypeFlow", value: originalMigrationMarker)
-        originalASRValues = nil
-        originalLLMValues = nil
+        try? FileManager.default.removeItem(at: temporaryDirectory)
+        originalProvider = nil
         originalMigrationMarker = nil
-        super.tearDown()
+        temporaryDirectory = nil
+        credentialsURL = nil
+        try super.tearDownWithError()
     }
 
     func testSaveAndLoad() throws {
-        try KeychainService.save(key: "test_key", value: "secret123")
-        let loaded = KeychainService.load(key: "test_key")
+        try CredentialStore.save(key: "test_key", value: "secret123")
+        let loaded = CredentialStore.load(key: "test_key")
         XCTAssertEqual(loaded, "secret123")
     }
 
     func testOverwrite() throws {
-        try KeychainService.save(key: "test_key", value: "old")
-        try KeychainService.save(key: "test_key", value: "new")
-        XCTAssertEqual(KeychainService.load(key: "test_key"), "new")
+        try CredentialStore.save(key: "test_key", value: "old")
+        try CredentialStore.save(key: "test_key", value: "new")
+        XCTAssertEqual(CredentialStore.load(key: "test_key"), "new")
     }
 
     func testLoadMissing() {
-        let result = KeychainService.load(key: "nonexistent_key_xyz")
+        let result = CredentialStore.load(key: "nonexistent_key_xyz")
         XCTAssertNil(result)
     }
 
     func testDelete() throws {
-        try KeychainService.save(key: "test_key", value: "value")
-        KeychainService.delete(key: "test_key")
-        XCTAssertNil(KeychainService.load(key: "test_key"))
+        try CredentialStore.save(key: "test_key", value: "value")
+        CredentialStore.delete(key: "test_key")
+        XCTAssertNil(CredentialStore.load(key: "test_key"))
     }
 
-    func testLoadCredentials_fromKeychain() throws {
-        let original = KeychainService.loadASRCredentials(for: .volcano)
+    func testLoadCredentialsFromFile() throws {
+        let original = CredentialStore.loadASRCredentials(for: .volcano)
         defer {
             if let original {
-                try? KeychainService.saveASRCredentials(for: .volcano, values: original)
+                try? CredentialStore.saveASRCredentials(for: .volcano, values: original)
             } else {
-                try? KeychainService.saveASRCredentials(for: .volcano, values: [:])
+                try? CredentialStore.saveASRCredentials(for: .volcano, values: [:])
             }
         }
 
-        try KeychainService.saveASRCredentials(for: .volcano, values: [
+        try CredentialStore.saveASRCredentials(for: .volcano, values: [
             "apiKey": "myApiKey",
             "resourceId": "myResource",
         ])
 
-        let config = KeychainService.loadASRConfig()
+        let config = CredentialStore.loadASRConfig()
         XCTAssertNotNil(config)
         XCTAssertEqual(config?.apiKey, "myApiKey")
         XCTAssertEqual(config?.authMode, VolcanoASRConfig.authModeAPIKey)
@@ -87,7 +80,7 @@ final class KeychainServiceTests: XCTestCase {
     }
 
     func testCompatibleASRCredentials_backfillsVolcanoResourceIdForOldValues() throws {
-        let values = KeychainService.compatibleASRCredentials(
+        let values = CredentialStore.compatibleASRCredentials(
             for: .volcano,
             stored: [
                 "apiKey": "myApiKey",
@@ -100,7 +93,7 @@ final class KeychainServiceTests: XCTestCase {
     }
 
     func testCompatibleASRCredentials_preservesLegacyVolcanoAuthFields() throws {
-        let values = KeychainService.compatibleASRCredentials(
+        let values = CredentialStore.compatibleASRCredentials(
             for: .volcano,
             stored: [
                 "appKey": "legacyAppID",
@@ -115,7 +108,7 @@ final class KeychainServiceTests: XCTestCase {
     }
 
     func testCompatibleLLMCredentials_backfillsModelAndBaseURLForOldValues() throws {
-        let values = KeychainService.compatibleLLMCredentials(
+        let values = CredentialStore.compatibleLLMCredentials(
             for: .doubao,
             stored: ["apiKey": "myApiKey"]
         )
@@ -127,7 +120,7 @@ final class KeychainServiceTests: XCTestCase {
     }
 
     func testCompatibleCredentialsPreferStoredValuesOverLegacyFallbacks() throws {
-        let values = KeychainService.compatibleASRCredentials(
+        let values = CredentialStore.compatibleASRCredentials(
             for: .volcano,
             stored: ["apiKey": "newApiKey"],
             legacy: [
@@ -140,45 +133,45 @@ final class KeychainServiceTests: XCTestCase {
         XCTAssertEqual(values["resourceId"], "oldResourceId")
     }
 
-    func testLoadASRCredentials_backfillsDefaultsWhenSecureFieldIsStoredAlone() throws {
-        let original = KeychainService.loadASRCredentials(for: .volcano)
+    func testLoadASRCredentialsBackfillsDefaultsWhenOnlyAPIKeyIsStored() throws {
+        let original = CredentialStore.loadASRCredentials(for: .volcano)
         defer {
             if let original {
-                try? KeychainService.saveASRCredentials(for: .volcano, values: original)
+                try? CredentialStore.saveASRCredentials(for: .volcano, values: original)
             } else {
-                try? KeychainService.saveASRCredentials(for: .volcano, values: [:])
+                try? CredentialStore.saveASRCredentials(for: .volcano, values: [:])
             }
         }
 
-        try KeychainService.saveASRCredentials(for: .volcano, values: [
+        try CredentialStore.saveASRCredentials(for: .volcano, values: [
             "apiKey": "myApiKey",
         ])
 
-        let values = try XCTUnwrap(KeychainService.loadASRCredentials(for: .volcano))
+        let values = try XCTUnwrap(CredentialStore.loadASRCredentials(for: .volcano))
         XCTAssertEqual(values["apiKey"], "myApiKey")
         XCTAssertEqual(values["resourceId"], VolcanoASRConfig.resourceIdAuto)
-        XCTAssertNotNil(KeychainService.loadASRConfig(for: .volcano))
+        XCTAssertNotNil(CredentialStore.loadASRConfig(for: .volcano))
     }
 
     func testLoadLLMCredentials_backfillsDefaultsWhenOnlyAPIKeyIsStored() throws {
-        let original = KeychainService.loadLLMCredentials(for: .doubao)
+        let original = CredentialStore.loadLLMCredentials(for: .doubao)
         defer {
             if let original {
-                try? KeychainService.saveLLMCredentials(for: .doubao, values: original)
+                try? CredentialStore.saveLLMCredentials(for: .doubao, values: original)
             } else {
-                try? KeychainService.saveLLMCredentials(for: .doubao, values: [:])
+                try? CredentialStore.saveLLMCredentials(for: .doubao, values: [:])
             }
         }
 
-        try KeychainService.saveLLMCredentials(for: .doubao, values: [
+        try CredentialStore.saveLLMCredentials(for: .doubao, values: [
             "apiKey": "myApiKey",
         ])
 
-        let values = try XCTUnwrap(KeychainService.loadLLMCredentials(for: .doubao))
+        let values = try XCTUnwrap(CredentialStore.loadLLMCredentials(for: .doubao))
         XCTAssertEqual(values["apiKey"], "myApiKey")
         XCTAssertEqual(values["model"], LLMProvider.doubao.modelOptions.first?.value)
         XCTAssertEqual(values["baseURL"], LLMProvider.doubao.defaultBaseURL)
-        XCTAssertNotNil(KeychainService.loadLLMProviderConfig(for: .doubao))
+        XCTAssertNotNil(CredentialStore.loadLLMProviderConfig(for: .doubao))
     }
 
     func testMigrateStoredCredentialsCleansLegacyFallbackSourcesAfterBackfill() throws {
@@ -187,34 +180,34 @@ final class KeychainServiceTests: XCTestCase {
             uniqueKeysWithValues: legacyKeys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
         )
         let originalScalarValues = Dictionary(
-            uniqueKeysWithValues: legacyKeys.map { ($0, KeychainService.load(key: $0)) }
+            uniqueKeysWithValues: legacyKeys.map { ($0, CredentialStore.load(key: $0)) }
         )
         defer {
             for key in legacyKeys {
                 restoreUserDefault(key: key, value: originalDefaults[key] ?? nil)
                 if let value = originalScalarValues[key] ?? nil {
-                    try? KeychainService.save(key: key, value: value)
+                    try? CredentialStore.save(key: key, value: value)
                 } else {
-                    KeychainService.delete(key: key)
+                    CredentialStore.delete(key: key)
                 }
             }
         }
 
-        try KeychainService.saveASRCredentials(for: .volcano, values: [:])
+        try CredentialStore.saveASRCredentials(for: .volcano, values: [:])
         UserDefaults.standard.set("legacyAppKey", forKey: "tf_appKey")
-        try KeychainService.save(key: "tf_accessKey", value: "legacyAccessKey")
+        try CredentialStore.save(key: "tf_accessKey", value: "legacyAccessKey")
         UserDefaults.standard.set("legacyResource", forKey: "tf_resourceId")
 
-        KeychainService.migrateStoredCredentials()
+        CredentialStore.migrateStoredCredentials()
 
-        let values = try XCTUnwrap(KeychainService.loadASRCredentials(for: .volcano))
+        let values = try XCTUnwrap(CredentialStore.loadASRCredentials(for: .volcano))
         XCTAssertEqual(values["resourceId"], "legacyResource")
         XCTAssertEqual(values["authMode"], VolcanoASRConfig.authModeLegacy)
         XCTAssertEqual(values["appKey"], "legacyAppKey")
         XCTAssertEqual(values["accessKey"], "legacyAccessKey")
         XCTAssertNil(UserDefaults.standard.object(forKey: "tf_appKey"))
         XCTAssertNil(UserDefaults.standard.object(forKey: "tf_resourceId"))
-        XCTAssertNil(KeychainService.load(key: "tf_accessKey"))
+        XCTAssertNil(CredentialStore.load(key: "tf_accessKey"))
     }
 
     func testMigrateStoredCredentialsCleansLegacyLLMFallbackSourcesAfterBackfill() throws {
@@ -223,37 +216,37 @@ final class KeychainServiceTests: XCTestCase {
             uniqueKeysWithValues: legacyKeys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
         )
         let originalScalarValues = Dictionary(
-            uniqueKeysWithValues: legacyKeys.map { ($0, KeychainService.load(key: $0)) }
+            uniqueKeysWithValues: legacyKeys.map { ($0, CredentialStore.load(key: $0)) }
         )
         defer {
             for key in legacyKeys {
                 restoreUserDefault(key: key, value: originalDefaults[key] ?? nil)
                 if let value = originalScalarValues[key] ?? nil {
-                    try? KeychainService.save(key: key, value: value)
+                    try? CredentialStore.save(key: key, value: value)
                 } else {
-                    KeychainService.delete(key: key)
+                    CredentialStore.delete(key: key)
                 }
             }
         }
 
-        try KeychainService.saveLLMCredentials(for: .doubao, values: [:])
-        try KeychainService.save(key: "tf_llmApiKey", value: "legacyLLMKey")
+        try CredentialStore.saveLLMCredentials(for: .doubao, values: [:])
+        try CredentialStore.save(key: "tf_llmApiKey", value: "legacyLLMKey")
         UserDefaults.standard.set("legacy-model", forKey: "tf_llmEndpointId")
         UserDefaults.standard.set("https://legacy.example/v1", forKey: "tf_llmBaseURL")
 
-        KeychainService.migrateStoredCredentials()
+        CredentialStore.migrateStoredCredentials()
 
-        let values = try XCTUnwrap(KeychainService.loadLLMCredentials(for: .doubao))
+        let values = try XCTUnwrap(CredentialStore.loadLLMCredentials(for: .doubao))
         XCTAssertEqual(values["apiKey"], "legacyLLMKey")
         XCTAssertEqual(values["model"], "legacy-model")
         XCTAssertEqual(values["baseURL"], "https://legacy.example/v1")
-        XCTAssertNil(KeychainService.load(key: "tf_llmApiKey"))
+        XCTAssertNil(CredentialStore.load(key: "tf_llmApiKey"))
         XCTAssertNil(UserDefaults.standard.object(forKey: "tf_llmEndpointId"))
         XCTAssertNil(UserDefaults.standard.object(forKey: "tf_llmBaseURL"))
     }
 
-    func testSaveASRCredentials_storesSecureFieldsOutsideCredentialsFile() throws {
-        try KeychainService.saveASRCredentials(for: .volcano, values: [
+    func testSaveASRCredentialsStoresAllFieldsInProtectedFile() throws {
+        try CredentialStore.saveASRCredentials(for: .volcano, values: [
             "apiKey": "myApiKey",
             "resourceId": "myResource",
         ])
@@ -261,10 +254,13 @@ final class KeychainServiceTests: XCTestCase {
         let fileData = try Data(contentsOf: credentialsURL)
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: fileData) as? [String: Any])
         let stored = try XCTUnwrap(json["tf_asr_volcano"] as? [String: String])
+        let attributes = try FileManager.default.attributesOfItem(atPath: credentialsURL.path)
+        let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)
 
         XCTAssertEqual(stored["resourceId"], "myResource")
-        XCTAssertNil(stored["apiKey"])
-        XCTAssertEqual(KeychainService.loadASRCredentials(for: .volcano)?["apiKey"], "myApiKey")
+        XCTAssertEqual(stored["apiKey"], "myApiKey")
+        XCTAssertEqual(permissions.intValue, 0o600)
+        XCTAssertEqual(CredentialStore.loadASRCredentials(for: .volcano)?["apiKey"], "myApiKey")
     }
 
     func testSelectedASRProviderPostsNotificationOnChange() {
@@ -280,7 +276,7 @@ final class KeychainServiceTests: XCTestCase {
         }
         defer { NotificationCenter.default.removeObserver(token) }
 
-        KeychainService.selectedASRProvider = targetProvider
+        CredentialStore.selectedASRProvider = targetProvider
 
         wait(for: [expectation], timeout: 1.0)
     }

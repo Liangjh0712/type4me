@@ -21,7 +21,7 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
     @AppStorage("tf_bypassProxy") private var bypassProxy = "off"
     @AppStorage("tf_stripTrailingPunctuation") private var stripTrailingPunctuation = "off"
     @AppStorage("tf_preserveCJKLatinSpacing") private var preserveCJKLatinSpacing = true
-    @AppStorage("tf_hoverTranscriptPreview") private var hoverTranscriptPreview = true
+    @AppStorage(TranscriptDisplayMode.storageKey) private var transcriptDisplayMode = TranscriptDisplayMode.defaultValue
     @AppStorage("tf_micKeepAlive") private var micKeepAlive = false
     @AppStorage(AudioInputDevicePreferenceStore.modeKey) private var microphonePreferenceMode = AudioInputDevicePreferenceMode.systemDefault.rawValue
     @AppStorage(AudioInputDevicePreferenceStore.priorityEntriesKey) private var microphonePriorityEntriesStorage = ""
@@ -87,13 +87,13 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
                 SettingsDivider()
 
-                // Row 2: 去句末标点 / 中英文空格 / 悬停文字预览
+                // Row 2: 去句末标点 / 中英文空格 / 字幕显示方式
                 HStack(alignment: .top, spacing: 16) {
                     stripPunctuationRow
                         .frame(maxWidth: .infinity)
                     cjkLatinSpacingRow
                         .frame(maxWidth: .infinity)
-                    hoverPreviewRow
+                    transcriptDisplayModeRow
                         .frame(maxWidth: .infinity)
                 }
             }
@@ -408,21 +408,15 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
         .padding(.vertical, 6)
     }
 
-    private var hoverPreviewRow: some View {
+    private var transcriptDisplayModeRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(L("悬停文字预览", "Hover Text Preview").uppercased())
+            Text(L("字幕显示方式", "Transcript Display").uppercased())
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(TF.settingsTextTertiary)
             settingsDropdown(
-                selection: Binding(
-                    get: { hoverTranscriptPreview ? "on" : "off" },
-                    set: { hoverTranscriptPreview = $0 == "on" }
-                ),
-                options: [
-                    ("on", L("开启", "On")),
-                    ("off", L("关闭", "Off")),
-                ]
+                selection: $transcriptDisplayMode,
+                options: TranscriptDisplayMode.allCases.map { ($0.rawValue, $0.displayName) }
             )
         }
         .padding(.vertical, 6)

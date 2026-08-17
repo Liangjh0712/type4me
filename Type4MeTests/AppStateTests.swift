@@ -220,4 +220,83 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(appState.currentMode.id, customMode.id)
     }
+
+    func testLiveOptimizationResultBecomesStaleAfterNewTranscript() {
+        let appState = AppState()
+        appState.currentMode = .formalWriting
+        appState.startRecording()
+        appState.markRecordingReady()
+        appState.setLiveTranscript(makeTranscript("预算 30 万"))
+
+        appState.beginLiveOptimization(sourceText: "预算 30 万")
+        appState.showLiveOptimizationResult("预算为 30 万。", sourceText: "预算 30 万")
+
+        XCTAssertEqual(appState.liveOptimizationPhase, .ready)
+        XCTAssertEqual(appState.liveOptimizedText, "预算为 30 万。")
+
+        appState.setLiveTranscript(makeTranscript("预算 30 万，改成 50 万"))
+
+        XCTAssertEqual(appState.liveOptimizationPhase, .stale)
+        XCTAssertEqual(appState.liveOptimizedText, "预算为 30 万。")
+    }
+
+    func testLiveOptimizationFailureFallsBackToRawForOlderSnapshot() {
+        let appState = AppState()
+        appState.currentMode = .formalWriting
+        appState.startRecording()
+        appState.markRecordingReady()
+        appState.setLiveTranscript(makeTranscript("最新原文"))
+
+        appState.showLiveOptimizationFailure("实时优化失败", sourceText: "旧原文")
+
+        XCTAssertEqual(appState.liveOptimizationPhase, .failed("实时优化失败"))
+    }
+
+    func testLiveOptimizationUnavailablePreservesRawTranscript() {
+        let appState = AppState()
+        appState.currentMode = .formalWriting
+        appState.startRecording()
+        appState.showLiveOptimizationUnavailable("实时优化不可用")
+        appState.markRecordingReady()
+        appState.setLiveTranscript(makeTranscript("完整原文"))
+
+        XCTAssertEqual(appState.liveOptimizationPhase, .unavailable("实时优化不可用"))
+        XCTAssertEqual(appState.transcriptionText, "完整原文")
+        XCTAssertTrue(appState.liveOptimizedText.isEmpty)
+    }
+
+
+    func testTranscriptArrivalReconcilesEarlyOptimizationResult() {
+        let appState = AppState()
+        appState.currentMode = .formalWriting
+        appState.startRecording()
+        appState.markRecordingReady()
+        appState.setLiveTranscript(makeTranscript("第一版原文"))
+
+        appState.showLiveOptimizationResult("第二版优化稿", sourceText: "第二版原文")
+        XCTAssertEqual(appState.liveOptimizationPhase, .stale)
+
+        appState.setLiveTranscript(makeTranscript("第二版原文"))
+
+        XCTAssertEqual(appState.liveOptimizationPhase, .ready)
+        XCTAssertEqual(appState.liveOptimizedText, "第二版优化稿")
+    }
+    private func makeTranscript(_ text: String) -> RecognitionTranscript {
+        RecognitionTranscript(
+            confirmedSegments: [text],
+            partialText: "",
+            authoritativeText: text,
+            isFinal: false
+        )
+    }
+
+    func testTranscriptDisplayDefaultsToExpanded() throws {
+        let suiteName = "TranscriptDisplayModeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(TranscriptDisplayMode.current(userDefaults: defaults), .expanded)
+        defaults.set(TranscriptDisplayMode.compact.rawValue, forKey: TranscriptDisplayMode.storageKey)
+        XCTAssertEqual(TranscriptDisplayMode.current(userDefaults: defaults), .compact)
+    }
 }

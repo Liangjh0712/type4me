@@ -40,6 +40,62 @@ enum RecordingVisualStyle: String, CaseIterable {
     }
 }
 
+enum TranscriptDisplayMode: String, CaseIterable {
+    static let storageKey = "tf_transcriptDisplayMode"
+    static let defaultValue = Self.expanded.rawValue
+
+    case compact
+    case expanded
+
+    var displayName: String {
+        switch self {
+        case .compact: return L("紧凑", "Compact")
+        case .expanded: return L("展开实时字幕", "Expanded Live Transcript")
+        }
+    }
+
+    static func current(userDefaults: UserDefaults = .standard) -> Self {
+        guard let raw = userDefaults.string(forKey: storageKey),
+              let mode = Self(rawValue: raw)
+        else { return .expanded }
+        return mode
+    }
+}
+
+enum LiveOptimizationPhase: Equatable {
+    case inactive
+    case waiting
+    case stale
+    case updating
+    case ready
+    case unavailable(String)
+    case failed(String)
+
+    var statusLabel: String? {
+        switch self {
+        case .inactive, .ready:
+            return nil
+        case .waiting:
+            return L("等待停顿", "Waiting for pause")
+        case .stale:
+            return L("待更新", "Update pending")
+        case .updating:
+            return L("更新中", "Updating")
+        case .unavailable(let message), .failed(let message):
+            return message
+        }
+    }
+
+    var failureMessage: String? {
+        switch self {
+        case .unavailable(let message), .failed(let message):
+            return message
+        default:
+            return nil
+        }
+    }
+}
+
 /// Visual variant of the floating-bar feedback. Lets the bar prepend a status
 /// icon (and tint the border) without introducing additional phases — the phase
 /// machine still drives layout, this just modulates the look of `.done`/`.error`.
@@ -900,9 +956,17 @@ final class AppState {
     var processingLabelOverride: String?
     var processingFinishTime: Date?
     var pinsTranscriptPopup = false
+    var liveOptimizedText = ""
+    var liveOptimizationSourceText = ""
+    var liveOptimizationPhase: LiveOptimizationPhase = .inactive
+
+    var supportsLiveOptimizationPreview: Bool {
+        !currentMode.prompt.isEmpty && currentMode.executionKind == .recording
+    }
+
     var isQwen3OnlyMode: Bool {
         // SenseVoice (sherpa) provides real-time partials even when Qwen3 also runs for calibration
-        guard KeychainService.selectedASRProvider != .sherpa else { return false }
+        guard CredentialStore.selectedASRProvider != .sherpa else { return false }
         return SenseVoiceServerManager.currentQwen3Port != nil
     }
     var effectiveProcessingLabel: String {
@@ -950,6 +1014,7 @@ final class AppState {
         feedbackKind = .standard
         processingLabelOverride = nil
         pinsTranscriptPopup = false
+        resetLiveOptimization()
         barPhase = .preparing
         if RecordingVisualStyle.current().showsRecordingPanel {
             onShowPanel?()
@@ -1002,15 +1067,41 @@ final class AppState {
            !transcript.authoritativeText.isEmpty,
            transcript.authoritativeText != transcript.composedText {
             segments = [TranscriptionSegment(text: transcript.authoritativeText, isConfirmed: true)]
-            return
+        } else {
+            segments = transcript.confirmedSegments.map {
+                TranscriptionSegment(text: $0, isConfirmed: true)
+            }
+            if !transcript.partialText.isEmpty {
+                segments.append(TranscriptionSegment(text: transcript.partialText, isConfirmed: false))
+            }
         }
+        markLiveOptimizationSourceChanged()
+    }
 
-        segments = transcript.confirmedSegments.map {
-            TranscriptionSegment(text: $0, isConfirmed: true)
-        }
-        if !transcript.partialText.isEmpty {
-            segments.append(TranscriptionSegment(text: transcript.partialText, isConfirmed: false))
-        }
+    func beginLiveOptimization(sourceText: String) {
+        guard barPhase == .recording, supportsLiveOptimizationPreview else { return }
+        guard !sourceText.isEmpty else { return }
+        liveOptimizationPhase = .updating
+    }
+
+    func showLiveOptimizationResult(_ result: String, sourceText: String) {
+        guard barPhase == .recording, supportsLiveOptimizationPreview else { return }
+        guard !result.isEmpty else { return }
+        liveOptimizedText = result
+        liveOptimizationSourceText = sourceText
+        liveOptimizationPhase = sourceText == transcriptionText ? .ready : .stale
+    }
+
+    func showLiveOptimizationUnavailable(_ message: String) {
+        guard (barPhase == .preparing || barPhase == .recording),
+              supportsLiveOptimizationPreview
+        else { return }
+        liveOptimizationPhase = .unavailable(message)
+    }
+
+    func showLiveOptimizationFailure(_ message: String, sourceText _: String) {
+        guard barPhase == .recording, supportsLiveOptimizationPreview else { return }
+        liveOptimizationPhase = .failed(message)
     }
 
     func showProcessingResult(_ result: String) {
@@ -1075,6 +1166,7 @@ final class AppState {
         segments = []
         audioLevel.current = 0
         pinsTranscriptPopup = false
+        resetLiveOptimization()
         onHidePanel?()
     }
 
@@ -1128,6 +1220,33 @@ final class AppState {
     // MARK: Private
 
     private var hideGeneration = 0
+
+    private func resetLiveOptimization() {
+        liveOptimizedText = ""
+        liveOptimizationSourceText = ""
+        liveOptimizationPhase = supportsLiveOptimizationPreview ? .waiting : .inactive
+    }
+
+    private func markLiveOptimizationSourceChanged() {
+        guard supportsLiveOptimizationPreview else {
+            liveOptimizationPhase = .inactive
+            return
+        }
+        guard liveOptimizationPhase.failureMessage == nil else { return }
+        guard !liveOptimizedText.isEmpty else {
+            if liveOptimizationPhase != .updating {
+                liveOptimizationPhase = .waiting
+            }
+            return
+        }
+        if liveOptimizationSourceText == transcriptionText {
+            if liveOptimizationPhase == .stale {
+                liveOptimizationPhase = .ready
+            }
+        } else if liveOptimizationPhase != .updating {
+            liveOptimizationPhase = .stale
+        }
+    }
 
     private func showDone(message: String = L("已完成", "Done"), delay: Duration = .seconds(0.5)) {
         DebugFileLogger.log("showDone: barPhase → .done, message=\(message)")

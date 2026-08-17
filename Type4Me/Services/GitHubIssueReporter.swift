@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 struct GitHubDeviceAuthorization: Equatable, Sendable {
     let deviceCode: String
@@ -260,51 +259,38 @@ private struct StoredGitHubCredential: Codable {
 }
 
 private enum GitHubTokenStore {
-    static let service = "com.type4me.app.github"
-    static let account = "issue-reporter"
+    private static var fileURL: URL {
+        let directory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!.appendingPathComponent("Type4Me", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory.appendingPathComponent("github-credential.json")
+    }
 
     static func load() -> StoredGitHubCredential? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
         return try? JSONDecoder().decode(StoredGitHubCredential.self, from: data)
     }
 
     static func save(_ credential: StoredGitHubCredential) throws {
-        delete()
-        let data: Data
         do {
-            data = try JSONEncoder().encode(credential)
+            let data = try JSONEncoder().encode(credential)
+            try data.write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: fileURL.path
+            )
         } catch {
-            throw GitHubReporterError.keychainFailure(errSecParam)
-        }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData as String: data,
-        ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw GitHubReporterError.keychainFailure(status)
+            throw GitHubReporterError.credentialStoreFailure(error.localizedDescription)
         }
     }
 
     static func delete() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
+        try? FileManager.default.removeItem(at: fileURL)
     }
 }
 
@@ -386,7 +372,7 @@ enum GitHubReporterError: LocalizedError {
     case authorizationRevoked
     case insufficientScope
     case invalidResponse
-    case keychainFailure(OSStatus)
+    case credentialStoreFailure(String)
     case github(String)
 
     var errorDescription: String? {
@@ -401,8 +387,8 @@ enum GitHubReporterError: LocalizedError {
                 "GitHub authorization cannot create issues; authorize again"
             )
         case .invalidResponse: return L("GitHub 返回了无法识别的数据", "GitHub returned an invalid response")
-        case .keychainFailure(let status):
-            return L("无法把 GitHub token 保存到钥匙串（\(status)）", "Could not save the GitHub token in Keychain (\(status))")
+        case .credentialStoreFailure(let message):
+            return L("无法保存 GitHub token：\(message)", "Could not save the GitHub token: \(message)")
         case .github(let message): return "GitHub: \(message)"
         }
     }

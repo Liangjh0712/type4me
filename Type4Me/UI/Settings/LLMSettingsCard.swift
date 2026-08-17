@@ -227,7 +227,7 @@ struct LLMSettingsCard: View, SettingsCardHelpers {
             // Defaults alone (notably Codex CLI's model) must not change the
             // active provider until the user explicitly saves.
             if hasStoredLLM && hasLLMCredentials {
-                KeychainService.selectedLLMProvider = newProvider
+                CredentialStore.selectedLLMProvider = newProvider
             }
         }
     }
@@ -433,14 +433,14 @@ struct LLMSettingsCard: View, SettingsCardHelpers {
     }
 
     private func loadLLMCredentials() {
-        selectedLLMProvider = KeychainService.selectedLLMProvider
+        selectedLLMProvider = CredentialStore.selectedLLMProvider
         loadLLMCredentialsForProvider(selectedLLMProvider)
     }
 
     private func loadLLMCredentialsForProvider(_ provider: LLMProvider) {
         testTask?.cancel()
         editedFields = []
-        if let values = KeychainService.loadLLMCredentials(for: provider) {
+        if let values = CredentialStore.loadLLMCredentials(for: provider) {
             llmCredentialValues = values
             savedLLMValues = values
             hasStoredLLM = true
@@ -462,8 +462,8 @@ struct LLMSettingsCard: View, SettingsCardHelpers {
     private func saveLLMCredentials() {
         let values = effectiveLLMValues
         do {
-            try KeychainService.saveLLMCredentials(for: selectedLLMProvider, values: values)
-            KeychainService.selectedLLMProvider = selectedLLMProvider
+            try CredentialStore.saveLLMCredentials(for: selectedLLMProvider, values: values)
+            CredentialStore.selectedLLMProvider = selectedLLMProvider
             llmCredentialValues = values
             savedLLMValues = values
             editedFields = []

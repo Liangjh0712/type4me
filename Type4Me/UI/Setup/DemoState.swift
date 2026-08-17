@@ -136,4 +136,7 @@ final class DemoState {
 extension DemoState: FloatingBarState {
     var pinsTranscriptPopup: Bool { false }
     var isQwen3OnlyMode: Bool { false }
+    var liveOptimizedText: String { "" }
+    var liveOptimizationPhase: LiveOptimizationPhase { .inactive }
+    var supportsLiveOptimizationPreview: Bool { false }
 }

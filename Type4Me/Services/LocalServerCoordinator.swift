@@ -42,7 +42,7 @@ class LocalServerCoordinator {
 
     /// Stop server only if ASR doesn't need it.
     func stopIfUnneeded() async {
-        let asrNeedsLocal = KeychainService.selectedASRProvider == .sherpa
+        let asrNeedsLocal = CredentialStore.selectedASRProvider == .sherpa
         if !asrNeedsLocal {
             await SenseVoiceServerManager.shared.stop()
             isRunning = false

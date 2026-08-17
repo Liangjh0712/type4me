@@ -3,7 +3,7 @@ import XCTest
 
 final class RecognitionSessionTests: XCTestCase {
     override func tearDown() {
-        KeychainService.selectedASRProvider = .volcano
+        CredentialStore.selectedASRProvider = .volcano
         UserDefaults.standard.removeObject(forKey: "tf_preserveCJKLatinSpacing")
     }
 
@@ -52,7 +52,7 @@ final class RecognitionSessionTests: XCTestCase {
     }
 
     func testSwitchModeAppliesToDirect() async {
-        KeychainService.selectedASRProvider = .volcano
+        CredentialStore.selectedASRProvider = .volcano
         let session = RecognitionSession()
 
         await session.switchMode(to: .direct)
@@ -62,7 +62,7 @@ final class RecognitionSessionTests: XCTestCase {
     }
 
     func testSwitchModeDirectWorksForSoniox() async {
-        KeychainService.selectedASRProvider = .soniox
+        CredentialStore.selectedASRProvider = .soniox
         let session = RecognitionSession()
 
         await session.switchMode(to: .direct)

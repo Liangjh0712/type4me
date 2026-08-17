@@ -74,11 +74,11 @@ actor ASRVariantGenerator {
         }
         #endif
 
-        guard let config = KeychainService.loadLLMConfig() else {
+        guard let config = CredentialStore.loadLLMConfig() else {
             throw GenerationError.noLLMConfigured
         }
 
-        let provider = KeychainService.selectedLLMProvider
+        let provider = CredentialStore.selectedLLMProvider
         let client: any LLMClient = provider == .claude
             ? ClaudeChatClient()
             : DoubaoChatClient(provider: provider)

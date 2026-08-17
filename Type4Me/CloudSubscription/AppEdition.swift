@@ -40,17 +40,17 @@ enum AppEditionMigration {
     static func switchTo(_ edition: AppEdition) {
         // Save current BYOK provider before switching away
         if current == .byoKey {
-            let currentProvider = KeychainService.selectedASRProvider
+            let currentProvider = CredentialStore.selectedASRProvider
             if currentProvider != .cloud {
-                KeychainService.lastBYOKProvider = currentProvider
+                CredentialStore.lastBYOKProvider = currentProvider
             }
         }
         current = edition
         switch edition {
         case .member:
-            KeychainService.selectedASRProvider = .cloud
+            CredentialStore.selectedASRProvider = .cloud
         case .byoKey:
-            KeychainService.selectedASRProvider = KeychainService.lastBYOKProvider
+            CredentialStore.selectedASRProvider = CredentialStore.lastBYOKProvider
         }
     }
 }

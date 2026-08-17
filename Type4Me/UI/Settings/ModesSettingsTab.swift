@@ -28,7 +28,7 @@ struct ModesSettingsTab: View {
     @State private var recordingTarget: RecordingTarget?
     @State private var deletingModeId: UUID?
     @State private var draggingModeId: UUID?
-    @State private var selectedASRProvider: ASRProvider = KeychainService.selectedASRProvider
+    @State private var selectedASRProvider: ASRProvider = CredentialStore.selectedASRProvider
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -92,7 +92,7 @@ struct ModesSettingsTab: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
-            selectedASRProvider = KeychainService.selectedASRProvider
+            selectedASRProvider = CredentialStore.selectedASRProvider
             if selectedModeId == nil {
                 selectedModeId = modes.first?.id
             }
@@ -101,7 +101,7 @@ struct ModesSettingsTab: View {
             if let provider = note.object as? ASRProvider {
                 selectedASRProvider = provider
             } else {
-                selectedASRProvider = KeychainService.selectedASRProvider
+                selectedASRProvider = CredentialStore.selectedASRProvider
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .selectMode)) { note in

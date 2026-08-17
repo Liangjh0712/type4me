@@ -26,7 +26,7 @@ actor VolcBoostingTableManager {
 
     /// Load IAM credentials from Volcano ASR credential store.
     nonisolated func loadCredentials() -> IAMCredentials? {
-        guard let values = KeychainService.loadASRCredentials(for: .volcano),
+        guard let values = CredentialStore.loadASRCredentials(for: .volcano),
               let ak = values["iamAccessKeyId"], !ak.isEmpty,
               let sk = values["iamSecretAccessKey"], !sk.isEmpty,
               let appKey = values["appKey"], !appKey.isEmpty

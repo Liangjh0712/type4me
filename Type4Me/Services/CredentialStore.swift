@@ -1,21 +1,34 @@
 import Foundation
-import Security
 
-enum KeychainService {
+enum CredentialStore {
 
     private static let lock = NSLock()
     private static var cachedCredentials: [String: Any]?
-    private static let keychainScalarService = "com.type4me.scalar"
-    private static let keychainGroupedService = "com.type4me.grouped"
+    private static var credentialsURLOverride: URL?
+    private static let scalarStorageKey = "tf_scalar"
 
     private static var credentialsURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let url = credentialsURLOverride ?? FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
             .appendingPathComponent("Type4Me", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("credentials.json")
+            .appendingPathComponent("credentials.json")
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        return url
     }
 
-    // MARK: - Core read/write (now supports nested objects)
+    static func useCredentialsFileForTesting(_ url: URL?) {
+        lock.lock()
+        credentialsURLOverride = url
+        cachedCredentials = nil
+        lock.unlock()
+    }
+
+    // MARK: - Core file read/write
 
     /// Load without acquiring lock — caller must hold `lock`.
     private static func _loadAllUnlocked() -> [String: Any] {
@@ -43,19 +56,42 @@ enum KeychainService {
         )
     }
 
-    // MARK: - Scalar key-value (for LLM keys and misc)
+    // MARK: - Scalar key-value
 
     static func save(key: String, value: String) throws {
-        try saveSecureString(value, service: keychainScalarService, account: key)
+        lock.lock()
+        defer { lock.unlock() }
+        var dict = _loadAllUnlocked()
+        var scalars = stringDictionary(dict[scalarStorageKey])
+        scalars[key] = value
+        dict[scalarStorageKey] = scalars
+        try saveAll(dict)
+        cachedCredentials = dict
     }
 
     static func load(key: String) -> String? {
-        loadSecureString(service: keychainScalarService, account: key)
+        stringDictionary(loadAll()[scalarStorageKey])[key]
     }
 
     @discardableResult
     static func delete(key: String) -> Bool {
-        deleteSecureValue(service: keychainScalarService, account: key)
+        lock.lock()
+        defer { lock.unlock() }
+        var dict = _loadAllUnlocked()
+        var scalars = stringDictionary(dict[scalarStorageKey])
+        guard scalars.removeValue(forKey: key) != nil else { return true }
+        if scalars.isEmpty {
+            dict.removeValue(forKey: scalarStorageKey)
+        } else {
+            dict[scalarStorageKey] = scalars
+        }
+        do {
+            try saveAll(dict)
+            cachedCredentials = dict
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: - Selected ASR Provider (UserDefaults)
@@ -106,16 +142,11 @@ enum KeychainService {
         defer { lock.unlock() }
         var dict = _loadAllUnlocked()
         let storageKey = asrStorageKey(for: provider)
-        let split = splitCredentials(values, using: ASRProviderRegistry.configType(for: provider)?.credentialFields ?? [])
-        if split.secure.isEmpty {
-            _ = deleteSecureValue(service: keychainGroupedService, account: storageKey)
-        } else {
-            try saveSecureValues(split.secure, account: storageKey)
-        }
-        if split.plaintext.isEmpty {
+        let stored = values.filter { !$0.value.isEmpty }
+        if stored.isEmpty {
             dict.removeValue(forKey: storageKey)
         } else {
-            dict[storageKey] = split.plaintext
+            dict[storageKey] = stored
         }
         try saveAll(dict)
         cachedCredentials = dict
@@ -123,12 +154,9 @@ enum KeychainService {
 
     static func loadASRCredentials(for provider: ASRProvider) -> [String: String]? {
         let dict = loadAll()
-        let storageKey = asrStorageKey(for: provider)
-        let plaintext = stringDictionary(dict[storageKey])
-        let secure = loadSecureValues(account: storageKey)
-        let merged = plaintext.merging(secure) { _, secure in secure }
+        let stored = stringDictionary(dict[asrStorageKey(for: provider)])
         let legacy = provider == .volcano ? legacyVolcanoASRCredentials(in: dict) : [:]
-        let compatible = compatibleASRCredentials(for: provider, stored: merged, legacy: legacy)
+        let compatible = compatibleASRCredentials(for: provider, stored: stored, legacy: legacy)
         return compatible.isEmpty ? nil : compatible
     }
 
@@ -194,16 +222,11 @@ enum KeychainService {
         defer { lock.unlock() }
         var dict = _loadAllUnlocked()
         let storageKey = llmStorageKey(for: provider)
-        let split = splitCredentials(values, using: LLMProviderRegistry.configType(for: provider)?.credentialFields ?? [])
-        if split.secure.isEmpty {
-            _ = deleteSecureValue(service: keychainGroupedService, account: storageKey)
-        } else {
-            try saveSecureValues(split.secure, account: storageKey)
-        }
-        if split.plaintext.isEmpty {
+        let stored = values.filter { !$0.value.isEmpty }
+        if stored.isEmpty {
             dict.removeValue(forKey: storageKey)
         } else {
-            dict[storageKey] = split.plaintext
+            dict[storageKey] = stored
         }
         try saveAll(dict)
         cachedCredentials = dict
@@ -211,12 +234,9 @@ enum KeychainService {
 
     static func loadLLMCredentials(for provider: LLMProvider) -> [String: String]? {
         let dict = loadAll()
-        let storageKey = llmStorageKey(for: provider)
-        let plaintext = stringDictionary(dict[storageKey])
-        let secure = loadSecureValues(account: storageKey)
-        let merged = plaintext.merging(secure) { _, secure in secure }
+        let stored = stringDictionary(dict[llmStorageKey(for: provider)])
         let legacy = provider == .doubao ? legacyDoubaoLLMCredentials(in: dict) : [:]
-        let compatible = compatibleLLMCredentials(for: provider, stored: merged, legacy: legacy)
+        let compatible = compatibleLLMCredentials(for: provider, stored: stored, legacy: legacy)
         return compatible.isEmpty ? nil : compatible
     }
 
@@ -290,7 +310,7 @@ enum KeychainService {
             if repaired != current {
                 mutableDict[storageKey] = repaired
                 migrated = true
-                NSLog("[KeychainService] Migrated legacy ASR credentials to tf_asr_volcano")
+                NSLog("[CredentialStore] Migrated legacy ASR credentials to tf_asr_volcano")
             }
             migrated = removeLegacyFileKeys(legacyASRKeys, from: &mutableDict) || migrated
             legacyExternalKeysToClean.formUnion(legacyASRKeys)
@@ -306,7 +326,7 @@ enum KeychainService {
                 selectedASRProvider = .bailian
             }
             migrated = true
-            NSLog("[KeychainService] Migrated Bailian ASR credentials from tf_asr_aliyun → tf_asr_bailian")
+            NSLog("[CredentialStore] Migrated Bailian ASR credentials from tf_asr_aliyun → tf_asr_bailian")
         }
 
         // Migrate LLM: tf_llmApiKey/tf_llmModel/tf_llmEndpointId/tf_llmBaseURL → tf_llm_doubao
@@ -319,7 +339,7 @@ enum KeychainService {
             if repaired != current {
                 mutableDict[storageKey] = repaired
                 migrated = true
-                NSLog("[KeychainService] Migrated flat LLM keys to tf_llm_doubao")
+                NSLog("[CredentialStore] Migrated flat LLM keys to tf_llm_doubao")
             }
             migrated = removeLegacyFileKeys(legacyLLMKeys, from: &mutableDict) || migrated
             legacyExternalKeysToClean.formUnion(legacyLLMKeys)
@@ -335,22 +355,25 @@ enum KeychainService {
             )
             mutableDict[minimaxCNKey] = minimaxCreds
             migrated = true
-            NSLog("[KeychainService] Migrated MiniMax CN base URL: api.minimax.chat → api.minimaxi.com")
+            NSLog("[CredentialStore] Migrated MiniMax CN base URL: api.minimax.chat → api.minimaxi.com")
         }
 
         let defaultsRepaired = repairCredentialDefaults(in: &mutableDict)
-        let secureFieldsMigrated = migrateSecureCredentialGroups(in: &mutableDict)
+        let scalarKeysCleaned = removeLegacyScalarKeys(
+            legacyExternalKeysToClean,
+            from: &mutableDict
+        )
 
-        if migrated || defaultsRepaired || secureFieldsMigrated {
+        if migrated || defaultsRepaired || scalarKeysCleaned {
             do {
                 try saveAll(mutableDict)
                 cachedCredentials = mutableDict
-                cleanLegacyExternalCredentialSources(legacyExternalKeysToClean)
+                cleanLegacyUserDefaults(legacyExternalKeysToClean)
             } catch {
-                NSLog("[KeychainService] Failed to persist credential migration: %@", error.localizedDescription)
+                NSLog("[CredentialStore] Failed to persist credential migration: %@", error.localizedDescription)
             }
         } else {
-            cleanLegacyExternalCredentialSources(legacyExternalKeysToClean)
+            cleanLegacyUserDefaults(legacyExternalKeysToClean)
         }
     }
 
@@ -364,118 +387,30 @@ enum KeychainService {
         return changed
     }
 
-    private static func cleanLegacyExternalCredentialSources(_ keys: Set<String>) {
-        guard !keys.isEmpty else { return }
+    private static func removeLegacyScalarKeys(
+        _ keys: Set<String>,
+        from dict: inout [String: Any]
+    ) -> Bool {
+        guard !keys.isEmpty else { return false }
+        var scalars = stringDictionary(dict[scalarStorageKey])
+        var changed = false
+        for key in keys {
+            changed = scalars.removeValue(forKey: key) != nil || changed
+        }
+        if scalars.isEmpty {
+            dict.removeValue(forKey: scalarStorageKey)
+        } else {
+            dict[scalarStorageKey] = scalars
+        }
+        return changed
+    }
+
+    private static func cleanLegacyUserDefaults(_ keys: Set<String>) {
         for key in keys {
             UserDefaults.standard.removeObject(forKey: key)
-            _ = deleteSecureValue(service: keychainScalarService, account: key)
         }
     }
 
-    // MARK: - Keychain helpers
-
-    private static func keychainQuery(service: String, account: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-    }
-
-    private static func saveSecureString(_ value: String, service: String, account: String) throws {
-        guard let data = value.data(using: .utf8) else {
-            throw KeychainError.invalidEncoding
-        }
-        try saveSecureData(data, service: service, account: account)
-    }
-
-    private static func loadSecureString(service: String, account: String) -> String? {
-        guard let data = loadSecureData(service: service, account: account) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private static func saveSecureValues(_ values: [String: String], account: String) throws {
-        let data = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
-        try saveSecureData(data, service: keychainGroupedService, account: account)
-    }
-
-    private static func loadSecureValues(account: String) -> [String: String] {
-        guard let data = loadSecureData(service: keychainGroupedService, account: account),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String]
-        else {
-            return [:]
-        }
-        return object
-    }
-
-    private static func saveSecureData(_ data: Data, service: String, account: String) throws {
-        let query = keychainQuery(service: service, account: account)
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
-        ]
-
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        switch status {
-        case errSecSuccess:
-            let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-            guard updateStatus == errSecSuccess else {
-                throw KeychainError.saveFailed(updateStatus)
-            }
-        case errSecItemNotFound:
-            var addQuery = query
-            addQuery.merge(attributes) { _, new in new }
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw KeychainError.saveFailed(addStatus)
-            }
-        default:
-            throw KeychainError.saveFailed(status)
-        }
-    }
-
-    private static func loadSecureData(service: String, account: String) -> Data? {
-        var query = keychainQuery(service: service, account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return nil }
-        return result as? Data
-    }
-
-    @discardableResult
-    private static func deleteSecureValue(service: String, account: String) -> Bool {
-        let status = SecItemDelete(keychainQuery(service: service, account: account) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
-    }
-
-    // MARK: - Secure field splitting
-
-    private static func splitCredentials(
-        _ values: [String: String],
-        using fields: [CredentialField]
-    ) -> (plaintext: [String: String], secure: [String: String]) {
-        let secureKeys = Set(fields.filter(\.isSecure).map(\.key))
-        guard !secureKeys.isEmpty else {
-            return (values, [:])
-        }
-
-        var plaintext: [String: String] = [:]
-        var secure: [String: String] = [:]
-
-        for (key, value) in values {
-            if secureKeys.contains(key) {
-                if !value.isEmpty {
-                    secure[key] = value
-                }
-            } else if !value.isEmpty {
-                plaintext[key] = value
-            }
-        }
-        return (plaintext, secure)
-    }
 
     static func compatibleASRCredentials(
         for provider: ASRProvider,
@@ -578,10 +513,11 @@ enum KeychainService {
     }
 
     private static func legacyString(_ key: String, in dict: [String: Any]) -> String? {
+        let scalar = stringDictionary(dict[scalarStorageKey])[key]
         let candidates = [
             dict[key] as? String,
             UserDefaults.standard.string(forKey: key),
-            loadSecureString(service: keychainScalarService, account: key),
+            scalar,
         ]
         return candidates.compactMap { value in
             let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -616,46 +552,6 @@ enum KeychainService {
         return changed
     }
 
-    @discardableResult
-    private static func migrateSecureCredentialGroups(in dict: inout [String: Any]) -> Bool {
-        var changed = false
-        for provider in ASRProvider.allCases {
-            changed = migrateSecureFields(
-                in: &dict,
-                storageKey: asrStorageKey(for: provider),
-                fields: ASRProviderRegistry.configType(for: provider)?.credentialFields ?? []
-            ) || changed
-        }
-
-        for provider in LLMProvider.allCases {
-            changed = migrateSecureFields(
-                in: &dict,
-                storageKey: llmStorageKey(for: provider),
-                fields: LLMProviderRegistry.configType(for: provider)?.credentialFields ?? []
-            ) || changed
-        }
-        return changed
-    }
-
-    @discardableResult
-    private static func migrateSecureFields(
-        in dict: inout [String: Any],
-        storageKey: String,
-        fields: [CredentialField]
-    ) -> Bool {
-        guard let values = dict[storageKey] as? [String: String] else { return false }
-        let split = splitCredentials(values, using: fields)
-        guard split.plaintext.count != values.count || !split.secure.isEmpty else { return false }
-        if !split.secure.isEmpty {
-            try? saveSecureValues(split.secure, account: storageKey)
-        }
-        if split.plaintext.isEmpty {
-            dict.removeValue(forKey: storageKey)
-        } else {
-            dict[storageKey] = split.plaintext
-        }
-        return true
-    }
 
     // MARK: - Application Support Directory Migration
 
@@ -684,13 +580,13 @@ enum KeychainService {
                     try fm.moveItem(at: src, to: dst)
                     movedCount += 1
                 } catch {
-                    NSLog("[KeychainService] Failed to migrate %@: %@", item, error.localizedDescription)
+                    NSLog("[CredentialStore] Failed to migrate %@: %@", item, error.localizedDescription)
                 }
             }
         }
 
         if movedCount > 0 {
-            NSLog("[KeychainService] Migrated %d files from TypeFlow → Type4Me", movedCount)
+            NSLog("[CredentialStore] Migrated %d files from TypeFlow → Type4Me", movedCount)
         }
 
         // Clean up old directory if empty
@@ -727,12 +623,8 @@ enum KeychainService {
 
         UserDefaults.standard.set(true, forKey: marker)
         if count > 0 {
-            NSLog("[KeychainService] Migrated %d UserDefaults keys from com.typeflow.app", count)
+            NSLog("[CredentialStore] Migrated %d UserDefaults keys from com.typeflow.app", count)
         }
     }
 }
 
-enum KeychainError: Error {
-    case invalidEncoding
-    case saveFailed(OSStatus)
-}

@@ -330,10 +330,10 @@ struct SetupWizardView: View {
                 Spacer()
                 Button(L("下一步", "Next")) {
                     if hasRequiredFields {
-                        try? KeychainService.saveASRCredentials(
+                        try? CredentialStore.saveASRCredentials(
                             for: selectedProvider, values: credentialValues
                         )
-                        KeychainService.selectedASRProvider = selectedProvider
+                        CredentialStore.selectedASRProvider = selectedProvider
                     }
                     step = nextStep
                 }

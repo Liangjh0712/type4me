@@ -327,7 +327,7 @@ struct ASRSettingsCard: View, SettingsCardHelpers {
         .padding(.vertical, 6)
         .onChange(of: selectedASRProvider) { oldProvider, newProvider in
             // Skip if this is the initial load (oldProvider is the @State default, not a real switch)
-            guard oldProvider == KeychainService.selectedASRProvider || oldProvider == newProvider else {
+            guard oldProvider == CredentialStore.selectedASRProvider || oldProvider == newProvider else {
                 // Initial load: just sync credentials, don't start/stop servers
                 loadASRCredentialsForProvider(newProvider)
                 refreshModelStatus()
@@ -337,7 +337,7 @@ struct ASRSettingsCard: View, SettingsCardHelpers {
             testTask?.cancel()
             asrTestStatus = .idle
             isEditingASR = true
-            KeychainService.selectedASRProvider = newProvider
+            CredentialStore.selectedASRProvider = newProvider
             loadASRCredentialsForProvider(newProvider)
             refreshModelStatus()
             // Stop servers when switching away from local ASR
@@ -758,14 +758,14 @@ struct ASRSettingsCard: View, SettingsCardHelpers {
     // MARK: - Data
 
     private func loadASRCredentials() {
-        selectedASRProvider = KeychainService.selectedASRProvider
+        selectedASRProvider = CredentialStore.selectedASRProvider
         loadASRCredentialsForProvider(selectedASRProvider)
     }
 
     private func loadASRCredentialsForProvider(_ provider: ASRProvider) {
         testTask?.cancel()
         editedFields = []
-        if let values = KeychainService.loadASRCredentials(for: provider) {
+        if let values = CredentialStore.loadASRCredentials(for: provider) {
             asrCredentialValues = values
             savedASRValues = values
             hasStoredASR = true
@@ -786,8 +786,8 @@ struct ASRSettingsCard: View, SettingsCardHelpers {
     private func saveASRCredentials() {
         let values = effectiveASRValues
         do {
-            try KeychainService.saveASRCredentials(for: selectedASRProvider, values: values)
-            KeychainService.selectedASRProvider = selectedASRProvider
+            try CredentialStore.saveASRCredentials(for: selectedASRProvider, values: values)
+            CredentialStore.selectedASRProvider = selectedASRProvider
             asrCredentialValues = values
             savedASRValues = values
             editedFields = []
@@ -889,8 +889,8 @@ struct ASRSettingsCard: View, SettingsCardHelpers {
 
     private func saveASRCredentialsQuietly(_ values: [String: String]) {
         do {
-            try KeychainService.saveASRCredentials(for: .volcano, values: values)
-            KeychainService.selectedASRProvider = .volcano
+            try CredentialStore.saveASRCredentials(for: .volcano, values: values)
+            CredentialStore.selectedASRProvider = .volcano
             asrCredentialValues = values
             savedASRValues = values
             editedFields = []

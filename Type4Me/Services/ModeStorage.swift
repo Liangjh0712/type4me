@@ -33,9 +33,7 @@ struct ModeStorage {
         var result = saved.compactMap { mode -> ProcessingMode? in
             if mode.id == ProcessingMode.directId {
                 var d = ProcessingMode.direct
-                d.hotkeyCode = mode.hotkeyCode
-                d.hotkeyModifiers = mode.hotkeyModifiers
-                d.hotkeyStyle = mode.hotkeyStyle
+                d.hotkeyBindings = mode.hotkeyBindings
                 return d
             }
             if mode.id == ProcessingMode.smartDirectId {
@@ -58,9 +56,7 @@ struct ModeStorage {
                     || mode.prompt.contains("内容包含多个要点时")
                     || isV4
                 var d = ProcessingMode.formalWriting
-                d.hotkeyCode = mode.hotkeyCode
-                d.hotkeyModifiers = mode.hotkeyModifiers
-                d.hotkeyStyle = mode.hotkeyStyle
+                d.hotkeyBindings = mode.hotkeyBindings
                 // If user customized the prompt, keep theirs
                 if !isLegacy {
                     d.name = mode.name
@@ -71,15 +67,18 @@ struct ModeStorage {
             }
             if mode.id == ProcessingMode.selectionAskId {
                 var d = ProcessingMode.selectionAsk
-                d.hotkeyCode = mode.hotkeyCode
-                d.hotkeyModifiers = mode.hotkeyModifiers
-                d.hotkeyStyle = mode.hotkeyStyle
+                d.hotkeyBindings = mode.hotkeyBindings
                 if mode.prompt != ProcessingMode.selectionAsk.prompt,
                    !selectionAskPromptIsLegacy(mode.prompt) {
                     d.name = mode.name
                     d.processingLabel = mode.processingLabel
                     d.prompt = mode.prompt
                 }
+                return d
+            }
+            if mode.id == ProcessingMode.macActionId {
+                var d = ProcessingMode.macAction
+                d.hotkeyBindings = mode.hotkeyBindings
                 return d
             }
             if mode.id == ProcessingMode.translate.id {
@@ -95,9 +94,7 @@ struct ModeStorage {
                     || (mode.prompt.contains("不编造具体方向") && !mode.prompt.contains("分析/研究/方案类任务"))  // V3 without complexity fix
                 if isLegacy {
                     var migrated = ProcessingMode.promptOptimize
-                    migrated.hotkeyCode = mode.hotkeyCode
-                    migrated.hotkeyModifiers = mode.hotkeyModifiers
-                    migrated.hotkeyStyle = mode.hotkeyStyle
+                    migrated.hotkeyBindings = mode.hotkeyBindings
                     return migrated
                 }
                 return mode
@@ -164,9 +161,7 @@ struct ModeStorage {
         if !mode.processingLabel.isEmpty {
             migrated.processingLabel = mode.processingLabel
         }
-        migrated.hotkeyCode = mode.hotkeyCode
-        migrated.hotkeyModifiers = mode.hotkeyModifiers
-        migrated.hotkeyStyle = mode.hotkeyStyle
+        migrated.hotkeyBindings = mode.hotkeyBindings
         migrated.isBuiltin = false
         return migrated
     }

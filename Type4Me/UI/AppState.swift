@@ -64,6 +64,28 @@ struct TranscriptionSegment: Identifiable, Equatable {
     }
 }
 
+// MARK: - Hotkey Binding
+
+struct HotkeyBinding: Codable, Identifiable, Equatable, Hashable {
+    let id: UUID
+    var keyCode: Int
+    var modifiers: UInt64?
+    var style: ProcessingMode.HotkeyStyle
+
+    init(
+        id: UUID = UUID(),
+        keyCode: Int,
+        modifiers: UInt64? = nil,
+        style: ProcessingMode.HotkeyStyle? = nil
+    ) {
+        self.id = id
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+        self.style = style ?? ProcessingMode.defaultHotkeyStyle
+    }
+}
+
+
 // MARK: - Processing Mode
 
 struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
@@ -72,9 +94,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
     var prompt: String
     var isBuiltin: Bool
     var processingLabel: String
-    var hotkeyCode: Int?
-    var hotkeyModifiers: UInt64?
-    var hotkeyStyle: HotkeyStyle
+    var hotkeyBindings: [HotkeyBinding]
     var executionKind: ExecutionKind
 
     enum HotkeyStyle: String, Codable, CaseIterable {
@@ -107,9 +127,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
         prompt: String,
         isBuiltin: Bool,
         processingLabel: String = L("处理中", "Processing"),
-        hotkeyCode: Int? = nil,
-        hotkeyModifiers: UInt64? = nil,
-        hotkeyStyle: HotkeyStyle? = nil,
+        hotkeyBindings: [HotkeyBinding] = [],
         executionKind: ExecutionKind = .recording
     ) {
         self.id = id
@@ -117,15 +135,16 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
         self.prompt = prompt
         self.isBuiltin = isBuiltin
         self.processingLabel = processingLabel
-        self.hotkeyCode = hotkeyCode
-        self.hotkeyModifiers = hotkeyModifiers
-        self.hotkeyStyle = hotkeyStyle ?? Self.defaultHotkeyStyle
+        self.hotkeyBindings = hotkeyBindings
         self.executionKind = executionKind
     }
 
+
     enum CodingKeys: String, CodingKey {
-        case id, name, prompt, isBuiltin, processingLabel
-        case hotkeyCode, hotkeyModifiers, hotkeyStyle, executionKind
+        case id, name, prompt, isBuiltin, processingLabel, executionKind
+        case hotkeyBindings
+        // The legacy keys mirror the first binding so older builds retain one trigger.
+        case hotkeyCode, hotkeyModifiers, hotkeyStyle
     }
 
     init(from decoder: Decoder) throws {
@@ -135,10 +154,34 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
         prompt = try container.decode(String.self, forKey: .prompt)
         isBuiltin = try container.decode(Bool.self, forKey: .isBuiltin)
         processingLabel = try container.decodeIfPresent(String.self, forKey: .processingLabel) ?? L("处理中", "Processing")
-        hotkeyCode = try container.decodeIfPresent(Int.self, forKey: .hotkeyCode)
-        hotkeyModifiers = try container.decodeIfPresent(UInt64.self, forKey: .hotkeyModifiers)
-        hotkeyStyle = try container.decodeIfPresent(HotkeyStyle.self, forKey: .hotkeyStyle) ?? Self.defaultHotkeyStyle
+        if let bindings = try container.decodeIfPresent([HotkeyBinding].self, forKey: .hotkeyBindings) {
+            hotkeyBindings = bindings
+        } else if let legacyCode = try container.decodeIfPresent(Int.self, forKey: .hotkeyCode) {
+            let modifiers = try container.decodeIfPresent(UInt64.self, forKey: .hotkeyModifiers)
+            let style = try container.decodeIfPresent(HotkeyStyle.self, forKey: .hotkeyStyle)
+            hotkeyBindings = [
+                HotkeyBinding(id: id, keyCode: legacyCode, modifiers: modifiers, style: style)
+            ]
+        } else {
+            hotkeyBindings = []
+        }
         executionKind = try container.decodeIfPresent(ExecutionKind.self, forKey: .executionKind) ?? .recording
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(isBuiltin, forKey: .isBuiltin)
+        try container.encode(processingLabel, forKey: .processingLabel)
+        try container.encode(hotkeyBindings, forKey: .hotkeyBindings)
+        if let first = hotkeyBindings.first {
+            try container.encode(first.keyCode, forKey: .hotkeyCode)
+            try container.encodeIfPresent(first.modifiers, forKey: .hotkeyModifiers)
+            try container.encode(first.style, forKey: .hotkeyStyle)
+        }
+        try container.encode(executionKind, forKey: .executionKind)
     }
 
     // MARK: - Built-in Mode IDs (stable, never change)
@@ -151,7 +194,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
         ProcessingMode(
             id: directId,
             name: L("快速模式", "Quick Mode"), prompt: "", isBuiltin: true,
-            hotkeyCode: 62, hotkeyModifiers: 0, hotkeyStyle: .toggle
+            hotkeyBindings: [HotkeyBinding(id: directId, keyCode: 62, modifiers: 0, style: .toggle)]
         )
     }
 
@@ -406,7 +449,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: formalWritingPromptTemplate,
             isBuiltin: true,
             processingLabel: L("润色中", "Polishing"),
-            hotkeyCode: 18, hotkeyModifiers: 524288, hotkeyStyle: .toggle
+            hotkeyBindings: [HotkeyBinding(id: formalWritingId, keyCode: 18, modifiers: 524288, style: .toggle)]
         )
     }
 
@@ -514,7 +557,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             """#,
             isBuiltin: false,
             processingLabel: L("优化中", "Optimizing"),
-            hotkeyCode: 19, hotkeyModifiers: 524288, hotkeyStyle: .toggle
+            hotkeyBindings: [HotkeyBinding(id: promptOptimizeId, keyCode: 19, modifiers: 524288, style: .toggle)]
         )
     }
 
@@ -525,7 +568,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: translatePromptTemplate,
             isBuiltin: false,
             processingLabel: L("翻译中", "Translating"),
-            hotkeyCode: 20, hotkeyModifiers: 524288, hotkeyStyle: .toggle
+            hotkeyBindings: [HotkeyBinding(id: defaultTranslateId, keyCode: 20, modifiers: 524288, style: .toggle)]
         )
     }
 
@@ -536,7 +579,6 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: translateToChinesePromptTemplate,
             isBuiltin: false,
             processingLabel: L("翻译中", "Translating"),
-            hotkeyStyle: .toggle
         )
     }
 
@@ -547,7 +589,6 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: "你是一个文字处理工具，\n现在选择的内容是：\"{selected}\"\n现在剪切板(复制)的内容是:\"{clipboard}\"\n请在以下规则下执行命令\n1. 不用解释，直接输出\n2. 不要使用任何 markdown 语法\n命令如下：{text}",
             isBuiltin: false,
             processingLabel: L("执行中", "Executing"),
-            hotkeyStyle: .toggle
         )
     }
 
@@ -624,7 +665,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: macActionPromptTemplate,
             isBuiltin: true,
             processingLabel: L("执行中", "Executing"),
-            hotkeyCode: 23, hotkeyModifiers: 524288, hotkeyStyle: .toggle
+            hotkeyBindings: [HotkeyBinding(id: macActionId, keyCode: 23, modifiers: 524288, style: .toggle)]
         )
     }
 
@@ -665,9 +706,12 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: selectionAskPromptTemplate,
             isBuiltin: true,
             processingLabel: L("思考中", "Thinking"),
-            hotkeyCode: 22,
-            hotkeyModifiers: 524288,
-            hotkeyStyle: .toggle,
+            hotkeyBindings: [HotkeyBinding(
+                id: selectionAskId,
+                keyCode: 22,
+                modifiers: 524288,
+                style: .toggle
+            )],
             executionKind: .selectionAsk
         )
     }
@@ -818,7 +862,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
             prompt: agentModePromptTemplate,
             isBuiltin: false,
             processingLabel: L("处理中", "Handling"),
-            hotkeyCode: 21, hotkeyModifiers: 524288, hotkeyStyle: .toggle
+            hotkeyBindings: [HotkeyBinding(id: agentModeId, keyCode: 21, modifiers: 524288, style: .toggle)]
         )
     }
 

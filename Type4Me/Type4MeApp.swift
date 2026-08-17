@@ -306,15 +306,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func registerHotkeys(for provider: ASRProvider) {
         let availableModes = appState.availableModes
         let modes = ASRProviderRegistry.supportedModes(from: availableModes, for: provider)
-        let bindings: [ModeBinding] = modes.compactMap { mode in
-            guard let code = mode.hotkeyCode else { return nil }
-            let modifiers = CGEventFlags(rawValue: mode.hotkeyModifiers ?? 0)
+        let bindings: [ModeBinding] = modes.flatMap { mode in
             let capturedMode = mode
-            return ModeBinding(
-                modeId: mode.id,
-                keyCode: CGKeyCode(code),
-                modifiers: modifiers,
-                style: capturedMode.hotkeyStyle,
+            return mode.hotkeyBindings.map { hotkey in
+                ModeBinding(
+                    bindingId: hotkey.id,
+                    modeId: mode.id,
+                    keyCode: CGKeyCode(hotkey.keyCode),
+                    modifiers: CGEventFlags(rawValue: hotkey.modifiers ?? 0),
+                    style: hotkey.style,
                 onStart: { [weak self] in
                     guard let self else { return }
 
@@ -401,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             )
+        }
         }
         hotkeyManager.registerBindings(bindings)
 
@@ -797,10 +798,10 @@ struct MenuBarContent: View {
                     name: .navigateToMode, object: mode.id
                 )
             } label: {
-                let hotkey = mode.hotkeyCode.map {
-                    HotkeyRecorderView.keyDisplayName(keyCode: $0, modifiers: mode.hotkeyModifiers)
-                }
-                Text("\(mode.name)  [\(hotkey ?? L("未绑定", "Unbound"))]")
+                let hotkeys = mode.hotkeyBindings.map {
+                    HotkeyRecorderView.keyDisplayName(keyCode: $0.keyCode, modifiers: $0.modifiers)
+                }.joined(separator: " / ")
+                Text("\(mode.name)  [\(hotkeys.isEmpty ? L("未绑定", "Unbound") : hotkeys)]")
             }
         }
 

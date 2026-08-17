@@ -4,6 +4,7 @@ import MediaPlayer
 typealias HotkeyStyle = ProcessingMode.HotkeyStyle
 
 struct ModeBinding {
+    let bindingId: UUID
     let modeId: UUID
     let keyCode: CGKeyCode
     let modifiers: CGEventFlags  // .maskCommand etc. Use [] for no modifiers
@@ -39,7 +40,7 @@ struct ModeBinding {
         .maskSecondaryFn,
     ]
 
-    /// Encode a mouse button number as a keyCode (for storage in ProcessingMode.hotkeyCode).
+    /// Encode a mouse button number as a keyCode for a persisted binding.
     static func mouseKeyCode(for buttonNumber: Int) -> Int { mouseKeyCodeBase + buttonNumber }
 
     /// Decode a mouse keyCode back to a button number.
@@ -56,7 +57,7 @@ struct ModeBinding {
     // NX_KEYTYPE_FAST=19, NX_KEYTYPE_REWIND=20.
     // No collision with keyboard (0–127) or mouse (0x8000+) keyCodes.
 
-    /// Encode an NX_KEYTYPE value as a keyCode (for storage in ProcessingMode.hotkeyCode).
+    /// Encode an NX_KEYTYPE value as a keyCode for a persisted binding.
     static func mediaKeyCode(for keyType: Int) -> Int { mediaKeyCodeBase + keyType }
 
     /// Decode a media keyCode back to the NX_KEYTYPE value.
@@ -171,11 +172,10 @@ final class HotkeyManager: NSObject {
 
     private var bindings: [ModeBinding] = []
     private var holdState: [UUID: Bool] = [:]
-    private var toggleState: [UUID: Bool] = [:]
     private var wasModifierDown: [UUID: Bool] = [:]
     private var holdSafetyTimers: [UUID: Timer] = [:]
-    /// Which toggle mode is currently active (recording). Only one can be active at a time.
-    private var activeToggleModeId: UUID?
+    private var activeRecordingBindingId: UUID?
+    private var activeRecordingModeId: UUID?
     private struct PendingModifierTrigger {
         let binding: ModeBinding
         let token: UUID
@@ -200,9 +200,11 @@ final class HotkeyManager: NSObject {
     /// Reset all active recording/hold state. Called when session ends (completed/error/finalized)
     /// to ensure hotkeys and ESC don't remain stuck.
     func resetActiveState() {
-        activeToggleModeId = nil
-        for key in toggleState.keys { toggleState[key] = false }
+        clearActiveRecordingState()
+        for key in wasModifierDown.keys { wasModifierDown[key] = false }
         for key in holdState.keys { holdState[key] = false }
+        holdSafetyTimers.values.forEach { $0.invalidate() }
+        holdSafetyTimers = [:]
         cancelPendingModifierTriggers()
     }
 
@@ -231,8 +233,8 @@ final class HotkeyManager: NSObject {
     func registerBindings(_ newBindings: [ModeBinding]) {
         bindings = newBindings
         holdState = [:]
-        toggleState = [:]
         wasModifierDown = [:]
+        clearActiveRecordingState()
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
         cancelPendingModifierTriggers()
@@ -316,8 +318,8 @@ final class HotkeyManager: NSObject {
         runLoopSource = nil
         lastEventTime = nil
         holdState = [:]
-        toggleState = [:]
         wasModifierDown = [:]
+        clearActiveRecordingState()
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
         cancelPendingModifierTriggers()
@@ -396,22 +398,7 @@ final class HotkeyManager: NSObject {
                     }
                 case .toggle:
                     if type == .otherMouseDown {
-                        let id = binding.modeId
-                        if let activeId = activeToggleModeId, activeId != id {
-                            toggleState[activeId] = false
-                            activeToggleModeId = nil
-                            onCrossModeStop?(id)
-                        } else {
-                            let isOn = toggleState[id] ?? false
-                            toggleState[id] = !isOn
-                            if !isOn {
-                                activeToggleModeId = id
-                                binding.onStart()
-                            } else {
-                                activeToggleModeId = nil
-                                binding.onStop()
-                            }
-                        }
+                        handleTogglePress(binding: binding)
                     }
                 }
                 return nil  // Swallow matched mouse button events
@@ -451,22 +438,7 @@ final class HotkeyManager: NSObject {
                     }
                 case .toggle:
                     if isKeyDown {
-                        let id = binding.modeId
-                        if let activeId = activeToggleModeId, activeId != id {
-                            toggleState[activeId] = false
-                            activeToggleModeId = nil
-                            onCrossModeStop?(id)
-                        } else {
-                            let isOn = toggleState[id] ?? false
-                            toggleState[id] = !isOn
-                            if !isOn {
-                                activeToggleModeId = id
-                                binding.onStart()
-                            } else {
-                                activeToggleModeId = nil
-                                binding.onStop()
-                            }
-                        }
+                        handleTogglePress(binding: binding)
                     }
                 }
                 return nil  // Swallow matched media key events
@@ -530,23 +502,7 @@ final class HotkeyManager: NSObject {
                     if type == .keyDown {
                         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat)
                         if isRepeat != 0 { return nil }
-                        let id = binding.modeId
-                        if let activeId = activeToggleModeId, activeId != id {
-                            // Cross-mode stop: different mode's key pressed while recording
-                            toggleState[activeId] = false
-                            activeToggleModeId = nil
-                            onCrossModeStop?(id)
-                        } else {
-                            let isOn = toggleState[id] ?? false
-                            toggleState[id] = !isOn
-                            if !isOn {
-                                activeToggleModeId = id
-                                binding.onStart()
-                            } else {
-                                activeToggleModeId = nil
-                                binding.onStop()
-                            }
-                        }
+                        handleTogglePress(binding: binding)
                     }
                 }
                 return nil  // Swallow matched regular key events
@@ -555,7 +511,7 @@ final class HotkeyManager: NSObject {
 
         // ESC key (keyCode 53) - abort active recording or processing
         if isESCAbortEnabled && type == .keyDown && keyCode == 53 {
-            let isRecording = activeToggleModeId != nil || holdState.values.contains(true)
+            let isRecording = activeRecordingBindingId != nil
             let shouldAbort = isRecording || isProcessing
             if shouldAbort {
                 NSLog("[HotkeyManager] ESC pressed, triggering abort (recording=%@, processing=%@)",
@@ -577,45 +533,112 @@ final class HotkeyManager: NSObject {
     // MARK: - Binding dispatch
 
     private func handleBindingEvent(binding: ModeBinding, pressed: Bool) {
-        let id = binding.modeId
-
         switch binding.style {
         case .hold:
-            let wasHolding = holdState[id] ?? false
-            if pressed && !wasHolding {
-                holdState[id] = true
-                startSafetyTimer(for: binding)
-                binding.onStart()
-            } else if !pressed && wasHolding {
-                holdState[id] = false
-                cancelSafetyTimer(for: id)
-                binding.onStop()
+            if pressed {
+                handleHoldPress(binding: binding)
+            } else {
+                handleHoldRelease(binding: binding)
             }
 
         case .toggle:
-            let wasDown = wasModifierDown[id] ?? false
-            if pressed && !wasDown {
-                wasModifierDown[id] = true
-                if let activeId = activeToggleModeId, activeId != id {
-                    // Cross-mode stop via modifier key
-                    toggleState[activeId] = false
-                    activeToggleModeId = nil
-                    onCrossModeStop?(id)
-                } else {
-                    let isOn = toggleState[id] ?? false
-                    toggleState[id] = !isOn
-                    if !isOn {
-                        activeToggleModeId = id
-                        binding.onStart()
-                    } else {
-                        activeToggleModeId = nil
-                        binding.onStop()
-                    }
-                }
-            } else if !pressed {
-                wasModifierDown[id] = false
+            let bindingId = binding.bindingId
+            if pressed {
+                guard wasModifierDown[bindingId] != true else { return }
+                wasModifierDown[bindingId] = true
+                handleTogglePress(binding: binding)
+            } else {
+                wasModifierDown[bindingId] = false
             }
         }
+    }
+
+    private func handleTogglePress(binding: ModeBinding) {
+        if activeRecordingBindingId != nil {
+            if activeRecordingModeId == binding.modeId {
+                stopActiveRecording()
+            } else {
+                clearActiveRecordingState()
+                onCrossModeStop?(binding.modeId)
+            }
+        } else {
+            startRecording(with: binding)
+        }
+    }
+
+    private func handleHoldPress(binding: ModeBinding) {
+        let bindingId = binding.bindingId
+        guard holdState[bindingId] != true else { return }
+
+        if activeRecordingBindingId != nil {
+            if activeRecordingModeId == binding.modeId {
+                stopActiveRecording()
+            } else {
+                clearActiveRecordingState()
+                onCrossModeStop?(binding.modeId)
+            }
+            return
+        }
+
+        holdState[bindingId] = true
+        startSafetyTimer(for: binding)
+        startRecording(with: binding)
+    }
+
+    private func handleHoldRelease(binding: ModeBinding) {
+        let bindingId = binding.bindingId
+        guard holdState[bindingId] == true else { return }
+        holdState[bindingId] = false
+        cancelSafetyTimer(for: bindingId)
+        if activeRecordingBindingId == bindingId {
+            stopActiveRecording()
+        }
+    }
+
+    private func startRecording(with binding: ModeBinding) {
+        activeRecordingBindingId = binding.bindingId
+        activeRecordingModeId = binding.modeId
+        binding.onStart()
+    }
+
+    private func stopActiveRecording() {
+        let active = activeRecordingBinding()
+        clearActiveRecordingState()
+        active?.onStop()
+    }
+
+    private func clearActiveRecordingState() {
+        if let activeId = activeRecordingBindingId {
+            holdState[activeId] = false
+            cancelSafetyTimer(for: activeId)
+        }
+        activeRecordingBindingId = nil
+        activeRecordingModeId = nil
+    }
+
+    private func activeRecordingBinding() -> ModeBinding? {
+        guard let id = activeRecordingBindingId else { return nil }
+        return bindings.first { $0.bindingId == id }
+    }
+
+    internal func simulateBindingEvent(_ binding: ModeBinding, pressed: Bool) {
+        handleBindingEvent(binding: binding, pressed: pressed)
+    }
+
+    internal func simulateStopActiveRecording() {
+        stopActiveRecording()
+    }
+
+    internal func isHoldActive(for bindingId: UUID) -> Bool {
+        holdState[bindingId] == true
+    }
+
+    internal func isActiveRecordingBinding(_ bindingId: UUID) -> Bool {
+        activeRecordingBindingId == bindingId
+    }
+
+    internal func hasPendingSafetyTimer(for bindingId: UUID) -> Bool {
+        holdSafetyTimers[bindingId] != nil
     }
 
     // MARK: - Modifier Prefix Conflicts
@@ -624,7 +647,7 @@ final class HotkeyManager: NSObject {
         guard isModifierKeyCode(binding.keyCode) else { return false }
 
         return bindings.contains { other in
-            guard other.modeId != binding.modeId,
+            guard other.bindingId != binding.bindingId,
                   !other.isMouseButton,
                   !other.isMediaKey
             else { return false }
@@ -638,32 +661,32 @@ final class HotkeyManager: NSObject {
     }
 
     private func schedulePendingModifierTrigger(for binding: ModeBinding) {
-        cancelPendingModifierTriggers(except: binding.modeId)
+        cancelPendingModifierTriggers(except: binding.bindingId)
         let token = UUID()
-        pendingModifierTriggers[binding.modeId] = PendingModifierTrigger(binding: binding, token: token)
+        pendingModifierTriggers[binding.bindingId] = PendingModifierTrigger(binding: binding, token: token)
         DispatchQueue.main.asyncAfter(deadline: .now() + modifierPrefixTriggerDelay) { [weak self] in
-            self?.firePendingModifierTrigger(modeId: binding.modeId, token: token)
+            self?.firePendingModifierTrigger(bindingId: binding.bindingId, token: token)
         }
     }
 
-    private func firePendingModifierTrigger(modeId: UUID, token: UUID) {
-        guard let pending = pendingModifierTriggers[modeId],
+    private func firePendingModifierTrigger(bindingId: UUID, token: UUID) {
+        guard let pending = pendingModifierTriggers[bindingId],
               pending.token == token,
               isExactModifierComboActive(for: pending.binding)
         else { return }
-        pendingModifierTriggers.removeValue(forKey: modeId)
+        pendingModifierTriggers.removeValue(forKey: bindingId)
         handleBindingEvent(binding: pending.binding, pressed: true)
     }
 
     private func consumePendingModifierRelease(for binding: ModeBinding) -> Bool {
-        guard let pending = pendingModifierTriggers.removeValue(forKey: binding.modeId) else { return false }
+        guard let pending = pendingModifierTriggers.removeValue(forKey: binding.bindingId) else { return false }
         handleBindingEvent(binding: pending.binding, pressed: true)
         handleBindingEvent(binding: pending.binding, pressed: false)
         return true
     }
 
-    private func cancelPendingModifierTriggers(except modeId: UUID? = nil) {
-        let ids = pendingModifierTriggers.keys.filter { $0 != modeId }
+    private func cancelPendingModifierTriggers(except bindingId: UUID? = nil) {
+        let ids = pendingModifierTriggers.keys.filter { $0 != bindingId }
         for id in ids {
             pendingModifierTriggers.removeValue(forKey: id)
         }
@@ -685,8 +708,8 @@ final class HotkeyManager: NSObject {
     // MARK: - Safety Timer
 
     private func startSafetyTimer(for binding: ModeBinding) {
-        cancelSafetyTimer(for: binding.modeId)
-        let id = binding.modeId
+        let id = binding.bindingId
+        cancelSafetyTimer(for: id)
         holdSafetyTimers[id] = Timer.scheduledTimer(
             timeInterval: maxHoldDuration,
             target: self,
@@ -705,11 +728,8 @@ final class HotkeyManager: NSObject {
     private func handleHoldSafetyTimer(_ timer: Timer) {
         guard let id = timer.userInfo as? UUID else { return }
         guard holdState[id] == true else { return }
-        guard let binding = bindings.first(where: { $0.modeId == id }) else { return }
-
-        NSLog("[HotkeyManager] Safety timer fired for mode %@, auto-stopping", id.uuidString)
-        holdState[id] = false
-        binding.onStop()
+        guard activeRecordingBindingId == id else { return }
+        stopActiveRecording()
     }
 
     // MARK: - Stuck Hold Recovery
@@ -719,7 +739,7 @@ final class HotkeyManager: NSObject {
         let currentFlags = CGEventSource.flagsState(.combinedSessionState)
 
         for binding in bindings where binding.style == .hold {
-            let id = binding.modeId
+            let id = binding.bindingId
             guard holdState[id] == true else { continue }
 
             // Mouse buttons and media keys: no API to query current state, rely on release events instead.
@@ -734,10 +754,12 @@ final class HotkeyManager: NSObject {
             }
 
             if !stillDown {
-                NSLog("[HotkeyManager] Recovering stuck hold for mode %@", id.uuidString)
+                NSLog("[HotkeyManager] Recovering stuck hold for binding %@", id.uuidString)
                 holdState[id] = false
                 cancelSafetyTimer(for: id)
-                binding.onStop()
+                if activeRecordingBindingId == id {
+                    stopActiveRecording()
+                }
             }
         }
     }
@@ -773,9 +795,9 @@ final class HotkeyManager: NSObject {
     private func isModifierBindingActive(_ binding: ModeBinding) -> Bool {
         switch binding.style {
         case .hold:
-            return holdState[binding.modeId] ?? false
+            return holdState[binding.bindingId] ?? false
         case .toggle:
-            return wasModifierDown[binding.modeId] ?? false
+            return wasModifierDown[binding.bindingId] ?? false
         }
     }
 

@@ -4,8 +4,18 @@ import SwiftUI
 
 private struct RecordingTarget: Identifiable {
     let id: UUID
+    let modeId: UUID
+    let bindingId: UUID?
     let name: String
     let currentStyle: ProcessingMode.HotkeyStyle
+
+    init(mode: ProcessingMode, binding: HotkeyBinding? = nil) {
+        id = binding?.id ?? UUID()
+        modeId = mode.id
+        bindingId = binding?.id
+        name = mode.name
+        currentStyle = binding?.style ?? ProcessingMode.defaultHotkeyStyle
+    }
 }
 
 // MARK: - Main View
@@ -103,51 +113,59 @@ struct ModesSettingsTab: View {
                 target: target,
                 checkConflict: { code, mods in
                     guard let code else { return nil }
-                    return modes.first { other in
-                        guard other.id != target.id,
-                              let otherCode = other.hotkeyCode
-                        else { return false }
-                        return ModeBinding.hotkeysAreEquivalent(
-                            keyCode: code,
-                            modifiers: mods,
-                            otherKeyCode: otherCode,
-                            otherModifiers: other.hotkeyModifiers
-                        )
+                    return modes.first { mode in
+                        mode.hotkeyBindings.contains { binding in
+                            binding.id != target.bindingId
+                                && ModeBinding.hotkeysAreEquivalent(
+                                    keyCode: code,
+                                    modifiers: mods,
+                                    otherKeyCode: binding.keyCode,
+                                    otherModifiers: binding.modifiers
+                                )
+                        }
                     }
                 },
                 checkPrefixConflict: { code, mods in
                     guard let code else { return nil }
-                    return modes.first { other in
-                        guard other.id != target.id,
-                              let otherCode = other.hotkeyCode
-                        else { return false }
-                        return ModeBinding.hasModifierPrefixConflict(
-                            keyCode: code,
-                            modifiers: mods,
-                            otherKeyCode: otherCode,
-                            otherModifiers: other.hotkeyModifiers
-                        )
+                    return modes.first { mode in
+                        mode.hotkeyBindings.contains { binding in
+                            binding.id != target.bindingId
+                                && ModeBinding.hasModifierPrefixConflict(
+                                    keyCode: code,
+                                    modifiers: mods,
+                                    otherKeyCode: binding.keyCode,
+                                    otherModifiers: binding.modifiers
+                                )
+                        }
                     }
                 },
                 onConfirm: { code, mods, style in
-                    if let conflictIdx = modes.firstIndex(where: {
-                        guard $0.id != target.id,
-                              let otherCode = $0.hotkeyCode
-                        else { return false }
-                        return ModeBinding.hotkeysAreEquivalent(
+                    for modeIndex in modes.indices {
+                        modes[modeIndex].hotkeyBindings.removeAll { binding in
+                            binding.id != target.bindingId
+                                && ModeBinding.hotkeysAreEquivalent(
+                                    keyCode: code,
+                                    modifiers: mods,
+                                    otherKeyCode: binding.keyCode,
+                                    otherModifiers: binding.modifiers
+                                )
+                        }
+                    }
+
+                    if let modeIndex = modes.firstIndex(where: { $0.id == target.modeId }) {
+                        let updated = HotkeyBinding(
+                            id: target.bindingId ?? target.id,
                             keyCode: code,
                             modifiers: mods,
-                            otherKeyCode: otherCode,
-                            otherModifiers: $0.hotkeyModifiers
+                            style: style
                         )
-                    }) {
-                        modes[conflictIdx].hotkeyCode = nil
-                        modes[conflictIdx].hotkeyModifiers = nil
-                    }
-                    if let idx = modes.firstIndex(where: { $0.id == target.id }) {
-                        modes[idx].hotkeyCode = code
-                        modes[idx].hotkeyModifiers = mods
-                        modes[idx].hotkeyStyle = style
+                        if let bindingIndex = modes[modeIndex].hotkeyBindings.firstIndex(where: {
+                            $0.id == target.bindingId
+                        }) {
+                            modes[modeIndex].hotkeyBindings[bindingIndex] = updated
+                        } else {
+                            modes[modeIndex].hotkeyBindings.append(updated)
+                        }
                     }
                     persistModes()
                     recordingTarget = nil
@@ -208,40 +226,54 @@ struct ModesSettingsTab: View {
                     }
                 }
 
-                if let kc = mode.hotkeyCode {
-                    HStack(spacing: 4) {
-                        Text(hotkeyStyleLabel(mode.hotkeyStyle))
-                            .font(.system(size: 9))
-                            .foregroundStyle(isActive ? .white.opacity(0.45) : TF.settingsTextTertiary)
-                        Text(HotkeyRecorderView.keyDisplayName(keyCode: kc, modifiers: mode.hotkeyModifiers))
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(isActive ? .white.opacity(0.6) : TF.settingsTextSecondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(
-                                RoundedRectangle(cornerRadius: 3)
-                                    .fill(isActive ? Color.white.opacity(0.12) : TF.settingsBg)
-                            )
-                        Button {
-                            if let idx = modes.firstIndex(where: { $0.id == mode.id }) {
-                                modes[idx].hotkeyCode = nil
-                                modes[idx].hotkeyModifiers = nil
-                                persistModes()
-                            }
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 7, weight: .bold))
-                                .foregroundStyle(isActive ? .white.opacity(0.4) : TF.settingsTextTertiary)
-                                .frame(width: 14, height: 14)
-                                .background(Circle().fill(isActive ? Color.white.opacity(0.1) : TF.settingsBg))
-                        }
-                        .buttonStyle(.plain)
-                        .help(L("删除快捷键", "Remove hotkey"))
-                    }
-                } else {
-                    Text(L("未设置快捷键", "No hotkey"))
+                if mode.hotkeyBindings.isEmpty {
+                    Text(L("未设置触发方式", "No trigger"))
                         .font(.system(size: 9))
                         .foregroundStyle(isActive ? .white.opacity(0.35) : TF.settingsTextTertiary.opacity(0.6))
+                } else {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(mode.hotkeyBindings) { binding in
+                            HStack(spacing: 4) {
+                                Button {
+                                    recordingTarget = RecordingTarget(mode: mode, binding: binding)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text(hotkeyStyleLabel(binding.style))
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(isActive ? .white.opacity(0.45) : TF.settingsTextTertiary)
+                                        Text(HotkeyRecorderView.keyDisplayName(
+                                            keyCode: binding.keyCode,
+                                            modifiers: binding.modifiers
+                                        ))
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(isActive ? .white.opacity(0.6) : TF.settingsTextSecondary)
+                                    }
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 3)
+                                            .fill(isActive ? Color.white.opacity(0.12) : TF.settingsBg)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    if let modeIndex = modes.firstIndex(where: { $0.id == mode.id }) {
+                                        modes[modeIndex].hotkeyBindings.removeAll { $0.id == binding.id }
+                                        persistModes()
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .foregroundStyle(isActive ? .white.opacity(0.4) : TF.settingsTextTertiary)
+                                        .frame(width: 14, height: 14)
+                                        .background(Circle().fill(isActive ? Color.white.opacity(0.1) : TF.settingsBg))
+                                }
+                                .buttonStyle(.plain)
+                                .help(L("删除触发方式", "Remove trigger"))
+                            }
+                        }
+                    }
                 }
             }
 
@@ -249,14 +281,12 @@ struct ModesSettingsTab: View {
 
             HStack(spacing: 4) {
                 Button {
-                    recordingTarget = RecordingTarget(
-                        id: mode.id, name: mode.name, currentStyle: mode.hotkeyStyle
-                    )
+                    recordingTarget = RecordingTarget(mode: mode)
                 } label: {
                     HStack(spacing: 3) {
-                        Image(systemName: "record.circle")
+                        Image(systemName: "plus.circle")
                             .font(.system(size: 10))
-                        Text(L("按键录制", "Record key"))
+                        Text(L("添加触发", "Add trigger"))
                             .font(.system(size: 10, weight: .medium))
                     }
                     .foregroundStyle(isActive ? .white.opacity(0.7) : TF.settingsTextSecondary)
@@ -615,7 +645,9 @@ private struct HotkeyRecordingSheet: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text(L("为「\(target.name)」录制快捷键", "Record hotkey for \"\(target.name)\""))
+            Text(target.bindingId == nil
+                 ? L("为「\(target.name)」添加触发方式", "Add trigger for \"\(target.name)\"")
+                 : L("编辑「\(target.name)」的触发方式", "Edit trigger for \"\(target.name)\""))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(TF.settingsText)
 

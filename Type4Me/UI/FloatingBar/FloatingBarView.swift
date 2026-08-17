@@ -2,7 +2,10 @@ import SwiftUI
 
 /// Cached font for text measurement (module-level to avoid generic-type static restriction).
 private let floatingBarFont = NSFont.systemFont(ofSize: 14, weight: .medium)
-private let expandedTranscriptLineHeight: CGFloat = 18
+private let rawTranscriptFont = NSFont.systemFont(ofSize: 12.5, weight: .regular)
+private let optimizedTranscriptFont = NSFont.systemFont(ofSize: 14, weight: .medium)
+private let rawTranscriptLineHeight: CGFloat = 16
+private let optimizedTranscriptLineHeight: CGFloat = 18
 private let compactTranscriptHorizontalPadding: CGFloat = 10
 private let compactTranscriptLabelWidth: CGFloat = 30
 private let compactTranscriptRowSpacing: CGFloat = 7
@@ -396,10 +399,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
             expandedTranscriptHeader
             compactTranscriptRow(
                 label: L("原文", "RAW"),
-                labelColor: .white.opacity(0.46),
+                labelColor: .white.opacity(0.32),
                 text: state.transcriptionText,
                 maxLines: usesDualTranscript ? 2 : 6,
-                opacity: 0.82,
+                font: rawTranscriptFont,
+                lineHeight: rawTranscriptLineHeight,
+                textColor: NSColor.white.withAlphaComponent(0.42),
                 isFollowingLatest: $rawFollowsLatest,
                 hasNewContent: $rawHasNewContent,
                 scrollRequest: rawScrollRequest
@@ -434,8 +439,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
                 .frame(width: 14, height: 14)
 
             Text(state.currentMode.name)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.78))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.68))
                 .lineLimit(1)
 
             Spacer(minLength: 8)
@@ -470,17 +475,24 @@ struct FloatingBarView<S: FloatingBarState>: View {
         let text = state.liveOptimizedText.isEmpty
             ? L("停顿约 0.8 秒后显示优化结果", "Optimized text appears after a short pause")
             : state.liveOptimizedText
-        let opacity: Double = switch state.liveOptimizationPhase {
-        case .stale, .updating: 0.72
-        default: state.liveOptimizedText.isEmpty ? 0.42 : 0.96
+        let textAlpha: CGFloat = switch state.liveOptimizationPhase {
+        case .stale, .updating: 0.76
+        default: state.liveOptimizedText.isEmpty ? 0.42 : 0.98
         }
 
         return compactTranscriptRow(
             label: L("优化", "EDIT"),
-            labelColor: TF.amber.opacity(0.66),
+            labelColor: TF.amber.opacity(0.78),
             text: text,
-            maxLines: 4,
-            opacity: opacity,
+            maxLines: 12,
+            font: optimizedTranscriptFont,
+            lineHeight: optimizedTranscriptLineHeight,
+            textColor: NSColor(
+                srgbRed: 1.0,
+                green: 0.96,
+                blue: 0.90,
+                alpha: textAlpha
+            ),
             isFollowingLatest: $optimizedFollowsLatest,
             hasNewContent: $optimizedHasNewContent,
             scrollRequest: optimizedScrollRequest
@@ -492,7 +504,9 @@ struct FloatingBarView<S: FloatingBarState>: View {
         labelColor: Color,
         text: String,
         maxLines: Int,
-        opacity: Double,
+        font: NSFont,
+        lineHeight: CGFloat,
+        textColor: NSColor,
         isFollowingLatest: Binding<Bool>,
         hasNewContent: Binding<Bool>,
         scrollRequest: Int
@@ -508,7 +522,9 @@ struct FloatingBarView<S: FloatingBarState>: View {
             transcriptViewport(
                 text: text,
                 maxLines: maxLines,
-                opacity: opacity,
+                font: font,
+                lineHeight: lineHeight,
+                textColor: textColor,
                 isFollowingLatest: isFollowingLatest,
                 hasNewContent: hasNewContent,
                 scrollRequest: scrollRequest
@@ -519,22 +535,36 @@ struct FloatingBarView<S: FloatingBarState>: View {
     private func transcriptViewport(
         text: String,
         maxLines: Int,
-        opacity: Double,
+        font: NSFont,
+        lineHeight: CGFloat,
+        textColor: NSColor,
         isFollowingLatest: Binding<Bool>,
         hasNewContent: Binding<Bool>,
         scrollRequest: Int
     ) -> some View {
         FollowableTranscriptText(
             text: text,
-            opacity: opacity,
+            font: font,
+            lineHeight: lineHeight,
+            textColor: textColor,
             isFollowingLatest: isFollowingLatest,
             hasNewContent: hasNewContent,
             scrollRequest: scrollRequest
         )
-        .frame(height: transcriptViewportHeight(for: text, maxLines: maxLines))
+        .frame(height: transcriptViewportHeight(
+            for: text,
+            maxLines: maxLines,
+            font: font,
+            lineHeight: lineHeight
+        ))
     }
 
-    private func transcriptViewportHeight(for text: String, maxLines: Int) -> CGFloat {
+    private func transcriptViewportHeight(
+        for text: String,
+        maxLines: Int,
+        font: NSFont,
+        lineHeight: CGFloat
+    ) -> CGFloat {
         let width = TF.barWidth
             - compactTranscriptHorizontalPadding * 2
             - compactTranscriptLabelWidth
@@ -542,10 +572,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: floatingBarFont]
+            attributes: [.font: font]
         )
-        let lines = max(1, Int(ceil(bounds.height / expandedTranscriptLineHeight)))
-        return CGFloat(min(maxLines, lines)) * expandedTranscriptLineHeight
+        let lines = max(1, Int(ceil(bounds.height / lineHeight)))
+        return CGFloat(min(maxLines, lines)) * lineHeight
     }
 
     private func returnAllTranscriptsToLatest() {
@@ -562,9 +592,9 @@ struct FloatingBarView<S: FloatingBarState>: View {
             Rectangle().fill(.ultraThinMaterial)
             Color(red: 0.20, green: 0.15, blue: 0.09, opacity: 0.25)
             LinearGradient(
-                colors: [TF.recording.opacity(0.05), .clear],
-                startPoint: .bottomLeading,
-                endPoint: UnitPoint(x: 0.55, y: 0.45)
+                colors: [TF.amber.opacity(0.055), .clear, TF.recording.opacity(0.035)],
+                startPoint: .bottomTrailing,
+                endPoint: .topLeading
             )
         }
     }
@@ -723,7 +753,9 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
 private struct FollowableTranscriptText: NSViewRepresentable {
     let text: String
-    let opacity: Double
+    let font: NSFont
+    let lineHeight: CGFloat
+    let textColor: NSColor
     @Binding var isFollowingLatest: Bool
     @Binding var hasNewContent: Bool
     let scrollRequest: Int
@@ -774,7 +806,10 @@ private struct FollowableTranscriptText: NSViewRepresentable {
         private weak var scrollView: NSScrollView?
         private weak var textView: NSTextView?
         private var lastText = ""
-        private var lastOpacity = -1.0
+        private var lastFontName = ""
+        private var lastFontSize: CGFloat = -1
+        private var lastTextColor: NSColor?
+        private var lastLineHeight: CGFloat = -1
         private var lastScrollRequest: Int
         private var followingLatest: Bool
         private var suppressBoundsObservation = false
@@ -816,7 +851,10 @@ private struct FollowableTranscriptText: NSViewRepresentable {
             guard let textView else { return }
 
             let textChanged = lastText != parent.text
-            let appearanceChanged = lastOpacity != parent.opacity
+            let appearanceChanged = lastFontName != parent.font.fontName
+                || lastFontSize != parent.font.pointSize
+                || lastTextColor != parent.textColor
+                || lastLineHeight != parent.lineHeight
             let requestedLatest = lastScrollRequest != parent.scrollRequest
             let oldOrigin = scrollView?.contentView.bounds.origin ?? .zero
             if !parent.isFollowingLatest {
@@ -827,15 +865,22 @@ private struct FollowableTranscriptText: NSViewRepresentable {
             }
 
             if textChanged || appearanceChanged {
+                let paragraphStyle = NSMutableParagraphStyle()
+                paragraphStyle.minimumLineHeight = parent.lineHeight
+                paragraphStyle.maximumLineHeight = parent.lineHeight
                 textView.textStorage?.setAttributedString(NSAttributedString(
                     string: parent.text,
                     attributes: [
-                        .font: floatingBarFont,
-                        .foregroundColor: NSColor.white.withAlphaComponent(parent.opacity),
+                        .font: parent.font,
+                        .foregroundColor: parent.textColor,
+                        .paragraphStyle: paragraphStyle,
                     ]
                 ))
                 lastText = parent.text
-                lastOpacity = parent.opacity
+                lastFontName = parent.font.fontName
+                lastFontSize = parent.font.pointSize
+                lastTextColor = parent.textColor
+                lastLineHeight = parent.lineHeight
             }
 
             layoutDocument()
@@ -881,7 +926,7 @@ private struct FollowableTranscriptText: NSViewRepresentable {
             textView.layoutManager?.ensureLayout(for: textView.textContainer!)
             let usedHeight = textView.layoutManager?
                 .usedRect(for: textView.textContainer!)
-                .height ?? expandedTranscriptLineHeight
+                .height ?? ceil(parent.font.ascender - parent.font.descender + parent.font.leading)
             textView.frame = NSRect(
                 x: 0,
                 y: 0,

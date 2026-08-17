@@ -111,13 +111,46 @@ final class FloatingBarPanelTests: XCTestCase {
         let transcriptStackFrame = transcriptFrames.reduce(NSRect.null) { partial, frame in
             partial.union(frame)
         }
-        XCTAssertEqual(transcriptScrollViews.map(\.frame.height).sorted(), [36, 72])
-        XCTAssertLessThanOrEqual(transcriptStackFrame.height, 115)
+        XCTAssertEqual(transcriptScrollViews.map(\.frame.height).sorted(), [32, 216])
+        XCTAssertLessThanOrEqual(transcriptStackFrame.height, 257)
         let renderedTranscripts = transcriptScrollViews
             .compactMap { $0.documentView as? NSTextView }
             .map(\.string)
         XCTAssertTrue(renderedTranscripts.contains(raw))
         XCTAssertTrue(renderedTranscripts.contains(optimized))
+        let rawTextView = try XCTUnwrap(transcriptScrollViews
+            .compactMap { $0.documentView as? NSTextView }
+            .first { $0.string == raw })
+        let optimizedTextView = try XCTUnwrap(transcriptScrollViews
+            .compactMap { $0.documentView as? NSTextView }
+            .first { $0.string == optimized })
+        let rawFont = try XCTUnwrap(
+            rawTextView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        let optimizedFont = try XCTUnwrap(
+            optimizedTextView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        let rawColor = try XCTUnwrap(
+            rawTextView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        )
+        let optimizedColor = try XCTUnwrap(
+            optimizedTextView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        )
+        XCTAssertEqual(rawFont.pointSize, 12.5)
+        XCTAssertEqual(optimizedFont.pointSize, 14)
+        let rawParagraph = try XCTUnwrap(
+            rawTextView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+                as? NSParagraphStyle
+        )
+        let optimizedParagraph = try XCTUnwrap(
+            optimizedTextView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+                as? NSParagraphStyle
+        )
+        XCTAssertEqual(rawParagraph.minimumLineHeight, 16)
+        XCTAssertEqual(rawParagraph.maximumLineHeight, 16)
+        XCTAssertEqual(optimizedParagraph.minimumLineHeight, 18)
+        XCTAssertEqual(optimizedParagraph.maximumLineHeight, 18)
+        XCTAssertLessThan(rawColor.alphaComponent, optimizedColor.alphaComponent)
 
         for scrollView in transcriptScrollViews {
             (scrollView as? TranscriptNSScrollView)?.notifyUserWillScroll()
@@ -154,7 +187,7 @@ final class FloatingBarPanelTests: XCTestCase {
             .compactMap { $0 as? NSScrollView }
             .filter { $0.documentView is NSTextView }
         XCTAssertEqual(fallbackScrollViews.count, 1)
-        XCTAssertEqual(fallbackScrollViews.first?.frame.height, 108)
+        XCTAssertEqual(fallbackScrollViews.first?.frame.height, 96)
         withExtendedLifetime(controller) {}
     }
 

@@ -3,6 +3,10 @@ import SwiftUI
 /// Cached font for text measurement (module-level to avoid generic-type static restriction).
 private let floatingBarFont = NSFont.systemFont(ofSize: 14, weight: .medium)
 private let expandedTranscriptLineHeight: CGFloat = 18
+private let compactTranscriptHorizontalPadding: CGFloat = 10
+private let compactTranscriptLabelWidth: CGFloat = 30
+private let compactTranscriptRowSpacing: CGFloat = 7
+private let compactTranscriptCornerRadius: CGFloat = 10
 
 // MARK: - FloatingBarState Protocol
 
@@ -379,69 +383,20 @@ struct FloatingBarView<S: FloatingBarState>: View {
             && state.liveOptimizationPhase.failureMessage == nil
     }
 
-    private var expandedRecordingCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            rawTranscriptSection
-
-            if usesDualTranscript {
-                Rectangle()
-                    .fill(.white.opacity(0.08))
-                    .frame(height: 1)
-                optimizedTranscriptSection
-            } else if let message = state.liveOptimizationPhase.failureMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                    Text(message)
-                }
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(TF.amber.opacity(0.9))
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(width: TF.barWidth)
-        .background {
-            ZStack {
-                glassBackground
-                LinearGradient(
-                    colors: [TF.recording.opacity(0.08), .clear],
-                    startPoint: .bottomLeading,
-                    endPoint: UnitPoint(x: 0.55, y: 0.45)
-                )
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous)
-                .stroke(.white.opacity(breathe ? 0.18 : 0.09), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.28), radius: 10, y: 3)
+    private var isViewingTranscriptHistory: Bool {
+        !rawFollowsLatest || (usesDualTranscript && !optimizedFollowsLatest)
     }
 
-    private var rawTranscriptSection: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                RecordingDot(meter: state.audioLevel)
-                    .scaleEffect(0.72)
-                    .frame(width: 16, height: 16)
-                Text(L("原始转写", "RAW TRANSCRIPT"))
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.5)
-                    .foregroundStyle(.white.opacity(0.55))
-                Spacer(minLength: 8)
-                if !rawFollowsLatest {
-                    transcriptFollowButton(
-                        hasNewContent: rawHasNewContent,
-                        action: {
-                            rawScrollRequest &+= 1
-                            rawFollowsLatest = true
-                            rawHasNewContent = false
-                        }
-                    )
-                }
-            }
+    private var hasNewTranscriptContent: Bool {
+        rawHasNewContent || (usesDualTranscript && optimizedHasNewContent)
+    }
 
-            transcriptViewport(
+    private var expandedRecordingCard: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            expandedTranscriptHeader
+            compactTranscriptRow(
+                label: L("原文", "RAW"),
+                labelColor: .white.opacity(0.46),
                 text: state.transcriptionText,
                 maxLines: usesDualTranscript ? 2 : 6,
                 opacity: 0.82,
@@ -449,10 +404,69 @@ struct FloatingBarView<S: FloatingBarState>: View {
                 hasNewContent: $rawHasNewContent,
                 scrollRequest: rawScrollRequest
             )
+
+            if usesDualTranscript {
+                optimizedTranscriptRow
+            }
         }
+        .padding(.horizontal, compactTranscriptHorizontalPadding)
+        .padding(.vertical, 7)
+        .frame(width: TF.barWidth)
+        .background { expandedTranscriptGlassBackground }
+        .clipShape(RoundedRectangle(
+            cornerRadius: compactTranscriptCornerRadius,
+            style: .continuous
+        ))
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: compactTranscriptCornerRadius,
+                style: .continuous
+            )
+            .stroke(.white.opacity(breathe ? 0.16 : 0.10), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
     }
 
-    private var optimizedTranscriptSection: some View {
+    private var expandedTranscriptHeader: some View {
+        HStack(spacing: 6) {
+            RecordingDot(meter: state.audioLevel)
+                .scaleEffect(0.62)
+                .frame(width: 14, height: 14)
+
+            Text(state.currentMode.name)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.78))
+                .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            if isViewingTranscriptHistory {
+                Button(action: returnAllTranscriptsToLatest) {
+                    HStack(spacing: 4) {
+                        if hasNewTranscriptContent {
+                            Circle()
+                                .fill(TF.amber)
+                                .frame(width: 4, height: 4)
+                            Text(L("有新内容", "New text"))
+                        }
+                        Text(L("回到最新", "Latest"))
+                        Image(systemName: "arrow.down.to.line.compact")
+                    }
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
+                }
+                .buttonStyle(.plain)
+            } else if let status = state.liveOptimizationPhase.statusLabel {
+                Text(status)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(TF.amber.opacity(0.78))
+                    .lineLimit(1)
+            }
+        }
+        .frame(height: 14)
+    }
+
+    private var optimizedTranscriptRow: some View {
         let text = state.liveOptimizedText.isEmpty
             ? L("停顿约 0.8 秒后显示优化结果", "Optimized text appears after a short pause")
             : state.liveOptimizedText
@@ -461,43 +475,45 @@ struct FloatingBarView<S: FloatingBarState>: View {
         default: state.liveOptimizedText.isEmpty ? 0.42 : 0.96
         }
 
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(TF.amber.opacity(0.9))
-                Text(L("优化预览", "OPTIMIZED PREVIEW"))
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.5)
-                    .foregroundStyle(.white.opacity(0.58))
-                if let status = state.liveOptimizationPhase.statusLabel {
-                    Text("· \(status)")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(TF.amber.opacity(0.78))
-                }
-                Spacer(minLength: 8)
-                if !optimizedFollowsLatest {
-                    transcriptFollowButton(
-                        hasNewContent: optimizedHasNewContent,
-                        action: {
-                            optimizedScrollRequest &+= 1
-                            optimizedFollowsLatest = true
-                            optimizedHasNewContent = false
-                        }
-                    )
-                }
-            }
+        return compactTranscriptRow(
+            label: L("优化", "EDIT"),
+            labelColor: TF.amber.opacity(0.66),
+            text: text,
+            maxLines: 4,
+            opacity: opacity,
+            isFollowingLatest: $optimizedFollowsLatest,
+            hasNewContent: $optimizedHasNewContent,
+            scrollRequest: optimizedScrollRequest
+        )
+    }
+
+    private func compactTranscriptRow(
+        label: String,
+        labelColor: Color,
+        text: String,
+        maxLines: Int,
+        opacity: Double,
+        isFollowingLatest: Binding<Bool>,
+        hasNewContent: Binding<Bool>,
+        scrollRequest: Int
+    ) -> some View {
+        HStack(alignment: .top, spacing: compactTranscriptRowSpacing) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.3)
+                .foregroundStyle(labelColor)
+                .frame(width: compactTranscriptLabelWidth, alignment: .leading)
+                .padding(.top, 1)
 
             transcriptViewport(
                 text: text,
-                maxLines: 4,
+                maxLines: maxLines,
                 opacity: opacity,
-                isFollowingLatest: $optimizedFollowsLatest,
-                hasNewContent: $optimizedHasNewContent,
-                scrollRequest: optimizedScrollRequest
+                isFollowingLatest: isFollowingLatest,
+                hasNewContent: hasNewContent,
+                scrollRequest: scrollRequest
             )
         }
-
     }
 
     private func transcriptViewport(
@@ -519,7 +535,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
     }
 
     private func transcriptViewportHeight(for text: String, maxLines: Int) -> CGFloat {
-        let width = TF.barWidth - 28
+        let width = TF.barWidth
+            - compactTranscriptHorizontalPadding * 2
+            - compactTranscriptLabelWidth
+            - compactTranscriptRowSpacing
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -529,25 +548,25 @@ struct FloatingBarView<S: FloatingBarState>: View {
         return CGFloat(min(maxLines, lines)) * expandedTranscriptLineHeight
     }
 
-    private func transcriptFollowButton(
-        hasNewContent: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 3) {
-                if hasNewContent {
-                    Circle()
-                        .fill(TF.amber)
-                        .frame(width: 4, height: 4)
-                    Text(L("有新内容", "New text"))
-                }
-                Text(L("回到最新", "Latest"))
-                Image(systemName: "arrow.down.to.line.compact")
-            }
-            .font(.system(size: 9, weight: .medium))
-            .foregroundStyle(.white.opacity(0.65))
+    private func returnAllTranscriptsToLatest() {
+        rawScrollRequest &+= 1
+        optimizedScrollRequest &+= 1
+        rawFollowsLatest = true
+        optimizedFollowsLatest = true
+        rawHasNewContent = false
+        optimizedHasNewContent = false
+    }
+
+    private var expandedTranscriptGlassBackground: some View {
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial)
+            Color(red: 0.20, green: 0.15, blue: 0.09, opacity: 0.25)
+            LinearGradient(
+                colors: [TF.recording.opacity(0.05), .clear],
+                startPoint: .bottomLeading,
+                endPoint: UnitPoint(x: 0.55, y: 0.45)
+            )
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Background & Border

@@ -105,6 +105,14 @@ final class FloatingBarPanelTests: XCTestCase {
         let transcriptScrollViews = descendantViews(of: hosting)
             .compactMap { $0 as? NSScrollView }
             .filter { $0.documentView is NSTextView }
+        let transcriptFrames = transcriptScrollViews.map { scrollView in
+            scrollView.convert(scrollView.bounds, to: hosting)
+        }
+        let transcriptStackFrame = transcriptFrames.reduce(NSRect.null) { partial, frame in
+            partial.union(frame)
+        }
+        XCTAssertEqual(transcriptScrollViews.map(\.frame.height).sorted(), [36, 72])
+        XCTAssertLessThanOrEqual(transcriptStackFrame.height, 115)
         let renderedTranscripts = transcriptScrollViews
             .compactMap { $0.documentView as? NSTextView }
             .map(\.string)
@@ -136,6 +144,17 @@ final class FloatingBarPanelTests: XCTestCase {
         for scrollView in transcriptScrollViews {
             XCTAssertEqual(scrollView.contentView.bounds.origin.y, 0, accuracy: 1)
         }
+
+        state.showLiveOptimizationUnavailable("实时优化暂不可用")
+        for _ in 0..<5 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            panel.contentView?.layoutSubtreeIfNeeded()
+        }
+        let fallbackScrollViews = descendantViews(of: hosting)
+            .compactMap { $0 as? NSScrollView }
+            .filter { $0.documentView is NSTextView }
+        XCTAssertEqual(fallbackScrollViews.count, 1)
+        XCTAssertEqual(fallbackScrollViews.first?.frame.height, 108)
         withExtendedLifetime(controller) {}
     }
 

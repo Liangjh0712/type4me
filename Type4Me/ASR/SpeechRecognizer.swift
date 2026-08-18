@@ -97,12 +97,16 @@ enum RecognitionEvent: Sendable {
     case transcript(RecognitionTranscript)
     case error(Error)
     case completed
+    case finalizedEmpty
     case processingResult(text: String)
     case processingLabelOverride(String)
-    case liveOptimizationStarted(sourceText: String)
-    case liveOptimizationResult(text: String, sourceText: String)
+    case liveOptimizationStarted(sourceText: String, modeID: UUID)
+    case liveOptimizationResult(text: String, sourceText: String, modeID: UUID)
     case liveOptimizationUnavailable(message: String)
     case liveOptimizationFailed(message: String, sourceText: String)
+    case llmRequestStarted(provider: String, model: String, attempt: Int)
+    case llmRequestFinished(provider: String, model: String, attempt: Int, durationSeconds: Double, succeeded: Bool)
+    case finalOptimizationFailed(message: String, sourceText: String)
     case recoveryStarted(text: String, message: String)
     case recoveryPrompt(text: String, message: String)
     case recoverySucceeded(text: String, message: String)

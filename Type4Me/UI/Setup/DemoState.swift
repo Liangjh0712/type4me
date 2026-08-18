@@ -17,7 +17,13 @@ final class DemoState {
     var feedbackKind: FeedbackKind = .standard
     var processingFinishTime: Date?
     var recordingStartDate: Date?
+    var recordingStopDate: Date?
 
+    var processingResultText = ""
+    var isTranscriptPanelCollapsed = false
+    var activeLLMCall: ActiveLLMCall?
+    var llmCallAttempts: [LLMCallAttempt] = []
+    var finalOptimizationFailureMessage: String?
     var transcriptionText: String {
         segments.map(\.text).joined()
     }
@@ -135,8 +141,16 @@ final class DemoState {
 
 extension DemoState: FloatingBarState {
     var pinsTranscriptPopup: Bool { false }
+    var selectablePanelModes: [ProcessingMode] { [] }
     var isQwen3OnlyMode: Bool { false }
     var liveOptimizedText: String { "" }
     var liveOptimizationPhase: LiveOptimizationPhase { .inactive }
     var supportsLiveOptimizationPreview: Bool { false }
+    var optimizedPanelText: String { processingResultText }
+    var pendingOptimizationTail: String { "" }
+    func selectPanelMode(_: ProcessingMode) {}
+    func toggleTranscriptPanelCollapsed() { isTranscriptPanelCollapsed.toggle() }
+    func requestPanelStop() {}
+    func retryFinalOptimization() {}
+    func insertRawAfterOptimizationFailure() {}
 }

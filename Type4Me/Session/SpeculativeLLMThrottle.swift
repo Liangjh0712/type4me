@@ -1,13 +1,19 @@
 import Foundation
 
 struct SpeculativeLLMThrottle: Sendable {
-    static let debounceDuration: Duration = .milliseconds(800)
-    static let minimumTextLength = 8
-    static let minimumCharacterIncrement = 8
+    static let debounceDuration: Duration = .milliseconds(1_200)
+    static let minimumTextLength = 4
+    static let minimumCharacterIncrement = 20
+    static let minimumRequestInterval: Duration = .seconds(5)
+    static let maximumRequestsPerSession = 3
+
     private static let correctionTriggers = [
         "不对", "哦不", "不是", "算了", "改成", "应该是", "重说",
         "i mean", "actually", "change", "replace",
     ]
+    private static let ignoredCharacters = CharacterSet.whitespacesAndNewlines.union(
+        CharacterSet(charactersIn: "，。！？；：、,.!?;:…—-_()[]{}\"'“”‘’")
+    )
 
     enum Submission: Equatable, Sendable {
         case tooShort
@@ -15,32 +21,43 @@ struct SpeculativeLLMThrottle: Sendable {
         case debounce
         case queued
         case duplicate
+        case cooldown(Duration)
+        case limitReached
+        case circuitOpen
     }
 
     private(set) var lastStartedText = ""
-    private var startedTexts: Set<String> = []
+    private var lastStartedFingerprint = ""
+    private var startedFingerprints: Set<String> = []
     private(set) var debounceText: String?
     private(set) var pendingText: String?
     private(set) var inFlight = false
+    private(set) var requestCount = 0
+    private(set) var isCircuitOpen = false
+    private var lastStartedAt: ContinuousClock.Instant?
 
-    mutating func submit(_ text: String) -> Submission {
-        guard text.count >= Self.minimumTextLength else {
-            debounceText = nil
-            pendingText = nil
+    mutating func submit(
+        _ text: String,
+        now: ContinuousClock.Instant = .now
+    ) -> Submission {
+        guard !isCircuitOpen else { return .circuitOpen }
+        let fingerprint = Self.fingerprint(text)
+        guard fingerprint.count >= Self.minimumTextLength else {
+            clearDebounceIfIdle()
             return .tooShort
         }
-        guard !startedTexts.contains(text) else {
-            debounceText = nil
-            pendingText = nil
+        guard !startedFingerprints.contains(fingerprint) else {
+            clearDebounceIfIdle()
             return .duplicate
         }
+
         let bypassesMinimumIncrement = shouldBypassMinimumIncrement(for: text)
-        guard lastStartedText.isEmpty
+        let meaningfulIncrement = fingerprint.count - lastStartedFingerprint.count
+        guard lastStartedFingerprint.isEmpty
                 || bypassesMinimumIncrement
-                || text.count - lastStartedText.count >= Self.minimumCharacterIncrement
+                || meaningfulIncrement >= Self.minimumCharacterIncrement
         else {
-            debounceText = nil
-            pendingText = nil
+            clearDebounceIfIdle()
             return .deltaTooSmall
         }
 
@@ -49,27 +66,55 @@ struct SpeculativeLLMThrottle: Sendable {
             debounceText = nil
             return .queued
         }
+        guard requestCount < Self.maximumRequestsPerSession else {
+            debounceText = nil
+            pendingText = nil
+            return .limitReached
+        }
+        if let lastStartedAt {
+            let elapsed = now - lastStartedAt
+            if elapsed < Self.minimumRequestInterval {
+                debounceText = nil
+                return .cooldown(Self.minimumRequestInterval - elapsed)
+            }
+        }
 
         debounceText = text
         return .debounce
     }
 
+    private mutating func clearDebounceIfIdle() {
+        guard !inFlight else { return }
+        debounceText = nil
+    }
+
     private func shouldBypassMinimumIncrement(for text: String) -> Bool {
         guard !lastStartedText.isEmpty else { return false }
-        // A stable ASR rewrite is new source data even if its length did not grow.
-        guard text.hasPrefix(lastStartedText) else { return true }
-        let appended = text.dropFirst(lastStartedText.count)
         return Self.correctionTriggers.contains { trigger in
-            appended.range(of: trigger, options: .caseInsensitive) != nil
+            text.range(of: trigger, options: .caseInsensitive) != nil
+                && lastStartedText.range(of: trigger, options: .caseInsensitive) == nil
         }
     }
 
-    mutating func beginDebouncedRequest(for text: String) -> Bool {
-        guard !inFlight, debounceText == text else { return false }
+    mutating func beginDebouncedRequest(
+        for text: String,
+        now: ContinuousClock.Instant = .now
+    ) -> Bool {
+        let fingerprint = Self.fingerprint(text)
+        guard !isCircuitOpen,
+              !inFlight,
+              requestCount < Self.maximumRequestsPerSession,
+              debounceText == text,
+              !startedFingerprints.contains(fingerprint)
+        else { return false }
+
         debounceText = nil
         pendingText = nil
         lastStartedText = text
-        startedTexts.insert(text)
+        lastStartedFingerprint = fingerprint
+        startedFingerprints.insert(fingerprint)
+        lastStartedAt = now
+        requestCount += 1
         inFlight = true
         return true
     }
@@ -82,11 +127,26 @@ struct SpeculativeLLMThrottle: Sendable {
         return next
     }
 
+    mutating func tripCircuit() {
+        isCircuitOpen = true
+        inFlight = false
+        debounceText = nil
+        pendingText = nil
+    }
+
     mutating func reset() {
         lastStartedText = ""
-        startedTexts.removeAll()
+        lastStartedFingerprint = ""
+        startedFingerprints.removeAll()
         debounceText = nil
         pendingText = nil
         inFlight = false
+        requestCount = 0
+        isCircuitOpen = false
+        lastStartedAt = nil
+    }
+
+    private static func fingerprint(_ text: String) -> String {
+        String(text.unicodeScalars.filter { !ignoredCharacters.contains($0) }).lowercased()
     }
 }

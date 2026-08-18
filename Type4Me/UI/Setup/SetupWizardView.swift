@@ -94,7 +94,7 @@ struct SetupWizardView: View {
             }
 
             VStack(spacing: 8) {
-                Text("Type4Me")
+                Text(appDisplayName)
                     .font(.system(size: 24, weight: .bold))
                 Text(L("说话，就是输入", "Speak, and it types"))
                     .foregroundStyle(.secondary)

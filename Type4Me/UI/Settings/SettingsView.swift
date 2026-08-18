@@ -126,7 +126,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Brand
             VStack(alignment: .leading, spacing: 2) {
-                Text("TYPE4ME")
+                Text(appDisplayName.uppercased())
                     .font(.system(size: 11, weight: .bold))
                     .tracking(2)
                     .foregroundStyle(TF.settingsTextTertiary)

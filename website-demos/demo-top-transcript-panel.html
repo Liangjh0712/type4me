@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Type4Me — 顶部实时对照面板视觉稿</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f7f5f0;
+      --ink-soft: rgba(247, 245, 240, 0.68);
+      --ink-faint: rgba(247, 245, 240, 0.38);
+      --glass: rgba(18, 19, 20, 0.91);
+      --glass-deep: rgba(11, 12, 13, 0.96);
+      --line: rgba(255, 255, 255, 0.09);
+      --line-strong: rgba(255, 255, 255, 0.15);
+      --amber: #e7b567;
+      --amber-soft: rgba(231, 181, 103, 0.14);
+      --red: #e36d61;
+      --green: #8fc59c;
+      --blue: #89aeca;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.38), 0 8px 22px rgba(0, 0, 0, 0.28);
+      --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      font-family: var(--font-ui);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button { font: inherit; }
+
+    body {
+      background: #c9cdd1;
+      color: #1d2228;
+    }
+
+    .desktop {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      min-width: 1080px;
+      min-height: 720px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 16% 12%, rgba(255,255,255,0.92), transparent 30%),
+        radial-gradient(circle at 84% 18%, rgba(205,216,226,0.76), transparent 28%),
+        linear-gradient(145deg, #d9dee2 0%, #b8c0c7 52%, #d9d3ca 100%);
+    }
+
+    .desktop::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.22;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.13'/%3E%3C/svg%3E");
+    }
+
+    .menu-bar {
+      position: relative;
+      z-index: 2;
+      height: 28px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: rgba(23, 27, 31, 0.78);
+      background: rgba(242, 244, 245, 0.76);
+      border-bottom: 1px solid rgba(25, 31, 36, 0.08);
+      backdrop-filter: blur(24px) saturate(130%);
+      font-size: 12px;
+      font-weight: 550;
+      letter-spacing: -0.01em;
+    }
+
+    .menu-left, .menu-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .menu-left strong { font-weight: 720; }
+
+    .workspace {
+      position: absolute;
+      z-index: 1;
+      inset: 28px 0 0;
+      display: grid;
+      grid-template-columns: 236px 1fr 274px;
+      color: #2a3036;
+      background: rgba(248, 249, 249, 0.86);
+    }
+
+    .sidebar {
+      padding: 72px 18px 22px;
+      border-right: 1px solid rgba(29, 36, 42, 0.08);
+      background: rgba(236, 239, 241, 0.82);
+    }
+
+    .sidebar-label {
+      margin: 0 10px 12px;
+      color: rgba(36, 43, 50, 0.42);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .nav-row {
+      height: 36px;
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-radius: 9px;
+      color: rgba(36, 43, 50, 0.58);
+      font-size: 13px;
+    }
+
+    .nav-row.active {
+      color: #20262c;
+      background: rgba(255,255,255,0.78);
+      box-shadow: 0 1px 2px rgba(30,35,40,0.06);
+    }
+
+    .nav-glyph {
+      width: 16px;
+      height: 16px;
+      border: 1px solid currentColor;
+      border-radius: 5px;
+      opacity: 0.62;
+    }
+
+    .document {
+      padding: 78px 8vw 100px;
+      overflow: hidden;
+      background: rgba(251, 251, 250, 0.92);
+    }
+
+    .document-kicker {
+      margin-bottom: 10px;
+      color: #8b7352;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .document h1 {
+      max-width: 720px;
+      margin: 0 0 18px;
+      color: #22272c;
+      font-family: "Songti SC", "STSong", serif;
+      font-size: clamp(28px, 3.1vw, 46px);
+      font-weight: 600;
+      letter-spacing: -0.04em;
+      line-height: 1.18;
+    }
+
+    .document-meta {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 40px;
+      color: rgba(43, 49, 55, 0.44);
+      font-size: 12px;
+    }
+
+    .document-copy {
+      max-width: 720px;
+      color: rgba(42, 48, 54, 0.62);
+      font-family: "Songti SC", "STSong", serif;
+      font-size: 17px;
+      line-height: 1.95;
+    }
+
+    .document-copy p { margin: 0 0 24px; }
+
+    .inspector {
+      padding: 74px 20px 20px;
+      border-left: 1px solid rgba(29, 36, 42, 0.08);
+      background: rgba(241, 243, 244, 0.8);
+    }
+
+    .inspector-card {
+      margin-bottom: 12px;
+      padding: 14px;
+      border: 1px solid rgba(35, 42, 48, 0.08);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.68);
+    }
+
+    .inspector-card b {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+
+    .inspector-line {
+      height: 7px;
+      margin: 7px 0;
+      border-radius: 99px;
+      background: rgba(40, 48, 54, 0.08);
+    }
+
+    .inspector-line.short { width: 62%; }
+
+    .panel-shell {
+      position: absolute;
+      z-index: 20;
+      top: 48px;
+      left: 50%;
+      width: min(1280px, calc(100vw - 48px));
+      max-height: calc(100vh - 72px);
+      transform: translateX(-50%);
+      overflow: hidden;
+      color: var(--ink);
+      border: 1px solid var(--line-strong);
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.028), transparent 22%),
+        var(--glass);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(30px) saturate(118%);
+      transition:
+        width 360ms cubic-bezier(.2,.8,.2,1),
+        max-height 360ms cubic-bezier(.2,.8,.2,1),
+        border-radius 280ms ease,
+        opacity 180ms ease;
+    }
+
+    .panel-shell::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(231,181,103,0.06), transparent 34%),
+        linear-gradient(90deg, transparent, rgba(255,255,255,0.015), transparent);
+    }
+
+    .panel-toolbar {
+      position: relative;
+      z-index: 2;
+      height: 52px;
+      padding: 0 12px 0 17px;
+      display: grid;
+      grid-template-columns: minmax(154px, 0.85fr) minmax(320px, 1.7fr) minmax(220px, 0.9fr);
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: rgba(7, 8, 9, 0.22);
+    }
+
+    .toolbar-section {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+    }
+
+    .toolbar-section + .toolbar-section {
+      height: 24px;
+      padding-left: 18px;
+      border-left: 1px solid var(--line);
+    }
+
+    .mode-section { gap: 9px; }
+
+    .recording-mark {
+      position: relative;
+      width: 12px;
+      height: 12px;
+      flex: 0 0 12px;
+    }
+
+    .recording-mark::before {
+      content: "";
+      position: absolute;
+      inset: 2px;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 12px rgba(227,109,97,0.42);
+    }
+
+    .recording-mark::after {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border: 1px solid rgba(227,109,97,0.34);
+      border-radius: 50%;
+      animation: recording-pulse 1.8s ease-out infinite;
+    }
+
+    @keyframes recording-pulse {
+      0% { transform: scale(.72); opacity: .8; }
+      80%, 100% { transform: scale(1.45); opacity: 0; }
+    }
+
+    .mode-name {
+      overflow: hidden;
+      color: rgba(247,245,240,0.82);
+      font-size: 12px;
+      font-weight: 620;
+      letter-spacing: 0.01em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .api-section { gap: 9px; }
+
+    .model-route {
+      overflow: hidden;
+      color: var(--ink-soft);
+      font-size: 11px;
+      font-weight: 510;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .api-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      padding: 5px 8px;
+      color: var(--amber);
+      border: 1px solid rgba(231,181,103,0.18);
+      border-radius: 999px;
+      background: rgba(231,181,103,0.08);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 640;
+      letter-spacing: 0.01em;
+    }
+
+    .api-state::before {
+      content: "";
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 7px currentColor;
+    }
+
+    .control-section {
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .recording-time {
+      margin-right: 4px;
+      color: var(--ink-faint);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 560;
+    }
+
+    .icon-button {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      color: var(--ink-soft);
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      cursor: default;
+      transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+    }
+
+    .icon-button:hover {
+      color: var(--ink);
+      border-color: var(--line);
+      background: rgba(255,255,255,0.055);
+    }
+
+    .icon-button svg { width: 13px; height: 13px; }
+
+    .stop-button {
+      color: #ffb1a8;
+      border-color: rgba(227,109,97,0.2);
+      background: rgba(227,109,97,0.1);
+    }
+
+    .stop-button:hover {
+      color: #ffd1cb;
+      border-color: rgba(227,109,97,0.34);
+      background: rgba(227,109,97,0.16);
+    }
+
+    .panel-content {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 45% 55%;
+      align-items: stretch;
+    }
+
+    .transcript-column {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: rgba(255,255,255,0.006);
+    }
+
+    .transcript-column.optimized {
+      border-left: 1px solid var(--line);
+      background: rgba(255,255,255,0.016);
+    }
+
+    .column-header {
+      height: 38px;
+      padding: 0 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex: 0 0 38px;
+      border-bottom: 1px solid rgba(255,255,255,0.055);
+    }
+
+    .column-title {
+      color: var(--ink-faint);
+      font-size: 10px;
+      font-weight: 720;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .column-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--ink-faint);
+      font-size: 9px;
+      font-weight: 560;
+    }
+
+    .pending-badge {
+      padding: 3px 7px;
+      color: rgba(231,181,103,0.88);
+      border: 1px solid rgba(231,181,103,0.15);
+      border-radius: 99px;
+      background: rgba(231,181,103,0.07);
+    }
+
+    .transcript-scroll {
+      flex: 0 0 auto;
+      min-height: 0;
+      padding: 17px 22px 22px;
+      overflow: visible;
+    }
+
+
+    .transcript-text {
+      margin: 0;
+      color: rgba(247,245,240,0.76);
+      font-size: 16px;
+      font-weight: 400;
+      letter-spacing: 0.004em;
+      line-height: 1.56;
+      white-space: pre-wrap;
+    }
+
+    .optimized .transcript-text { color: rgba(255,253,248,0.96); }
+
+    .pending-tail {
+      color: #ebbf7f;
+      background: linear-gradient(180deg, transparent 67%, rgba(231,181,103,0.13) 67%);
+      text-decoration: underline;
+      text-decoration-color: rgba(231,181,103,0.34);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 4px;
+    }
+
+
+    .collapsed {
+      width: 480px;
+      max-height: 44px;
+      border-radius: 14px;
+    }
+
+    .collapsed .panel-toolbar {
+      height: 44px;
+      padding: 0 8px 0 14px;
+      grid-template-columns: minmax(72px, .7fr) minmax(184px, 1.7fr) minmax(126px, 1fr);
+      border-bottom: 0;
+    }
+
+    .collapsed .toolbar-section + .toolbar-section {
+      height: 22px;
+      padding-left: 10px;
+    }
+
+    .collapsed .model-route .provider,
+    .collapsed .api-state .api-label,
+    .collapsed .mode-name .long-mode { display: none; }
+
+    .collapsed .api-section { gap: 6px; }
+    .collapsed .api-state { padding: 4px 6px; }
+    .collapsed .panel-content { display: none; }
+    .collapsed .recording-time { margin-right: 0; }
+
+    .error .api-state {
+      color: #f3a49c;
+      border-color: rgba(227,109,97,0.2);
+      background: rgba(227,109,97,0.09);
+    }
+
+    .error .recording-mark::before {
+      background: rgba(227,109,97,0.62);
+      box-shadow: none;
+    }
+
+    .error .recording-mark::after {
+      animation: none;
+      opacity: 0;
+    }
+
+    .error .pending-badge { display: none; }
+    .error .optimized .transcript-scroll { padding: 18px 22px 20px; }
+
+    .error-pane {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .error-heading {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 17px;
+    }
+
+    .error-icon {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 28px;
+      color: #f2aaa2;
+      border: 1px solid rgba(227,109,97,.22);
+      border-radius: 9px;
+      background: rgba(227,109,97,.09);
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .error-copy h2 {
+      margin: 0 0 4px;
+      color: rgba(255,253,249,.94);
+      font-size: 14px;
+      font-weight: 660;
+    }
+
+    .error-copy p {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .attempt-list {
+      margin: 0 0 18px;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--line);
+    }
+
+    .attempt-list li {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--ink-faint);
+      border-bottom: 1px solid rgba(255,255,255,0.055);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .attempt-status { color: #efa69e; }
+
+    .error-actions {
+      margin-top: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .action-button {
+      height: 32px;
+      padding: 0 13px;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      color: var(--ink-soft);
+      background: rgba(255,255,255,0.045);
+      font-size: 11px;
+      font-weight: 630;
+    }
+
+    .action-button.primary {
+      color: #1a1814;
+      border-color: rgba(231,181,103,0.56);
+      background: var(--amber);
+      box-shadow: 0 6px 18px rgba(231,181,103,0.13);
+    }
+
+    .action-button:hover { filter: brightness(1.07); }
+
+    .error-note {
+      margin-left: auto;
+      color: var(--ink-faint);
+      font-size: 9px;
+    }
+
+    .prototype-controls {
+      position: absolute;
+      z-index: 30;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 5px;
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 13px;
+      background: rgba(24,26,28,0.88);
+      box-shadow: 0 16px 42px rgba(0,0,0,.24);
+      backdrop-filter: blur(20px);
+    }
+
+    .prototype-label {
+      padding: 0 9px 0 6px;
+      color: rgba(255,255,255,.38);
+      font-size: 9px;
+      font-weight: 720;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .state-button {
+      height: 30px;
+      padding: 0 12px;
+      color: rgba(255,255,255,.54);
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      font-size: 11px;
+      font-weight: 580;
+      cursor: pointer;
+    }
+
+    .state-button:hover { color: rgba(255,255,255,.84); }
+
+    .state-button.active {
+      color: rgba(255,255,255,.94);
+      background: rgba(255,255,255,.1);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+    }
+
+    .spec-tag {
+      position: absolute;
+      z-index: 4;
+      right: 18px;
+      bottom: 18px;
+      color: rgba(29,35,40,.42);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 620;
+      letter-spacing: .03em;
+    }
+
+    @media (max-width: 1120px) {
+      .workspace { grid-template-columns: 190px 1fr 220px; }
+      .document { padding-left: 6vw; padding-right: 6vw; }
+      .panel-toolbar { grid-template-columns: minmax(132px,.7fr) minmax(280px,1.7fr) minmax(190px,.8fr); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="desktop">
+    <header class="menu-bar" aria-hidden="true">
+      <div class="menu-left"><strong>●</strong><strong>Notes</strong><span>文件</span><span>编辑</span><span>格式</span><span>窗口</span></div>
+      <div class="menu-right"><span>􀙇</span><span>8月18日 周二</span><span>10:42</span></div>
+    </header>
+
+    <section class="workspace" aria-hidden="true">
+      <aside class="sidebar">
+        <div class="sidebar-label">Workspace</div>
+        <div class="nav-row active"><i class="nav-glyph"></i>产品思考</div>
+        <div class="nav-row"><i class="nav-glyph"></i>设计记录</div>
+        <div class="nav-row"><i class="nav-glyph"></i>语音草稿</div>
+        <div class="nav-row"><i class="nav-glyph"></i>归档</div>
+      </aside>
+      <article class="document">
+        <div class="document-kicker">Product Notes · 08</div>
+        <h1>让一次语音输入，始终只发生在一个地方</h1>
+        <div class="document-meta"><span>今天 10:36</span><span>6 分钟阅读</span><span>自动保存</span></div>
+        <div class="document-copy">
+          <p>真正自然的语音输入，不应该要求用户理解内部经历了多少次转写、多少次模型调用。界面需要承认系统仍有状态，但不能把这些状态变成不断跳转的空间。</p>
+          <p>顶部面板更像一张临时铺开的工作纸：内容从上向下生长，结果稳定后直接落进当前文档。它不抢走焦点，也不要求用户停下来管理工具本身。</p>
+          <p>当文本变长，空间应服务于阅读；当它遮挡工作区，又应能在一次动作后收成细窄的信息条。可靠感来自持续、克制和可预期。</p>
+        </div>
+      </article>
+      <aside class="inspector">
+        <div class="sidebar-label">Outline</div>
+        <div class="inspector-card"><b>交互目标</b><div class="inspector-line"></div><div class="inspector-line short"></div></div>
+        <div class="inspector-card"><b>视觉层级</b><div class="inspector-line"></div><div class="inspector-line"></div><div class="inspector-line short"></div></div>
+        <div class="inspector-card"><b>失败边界</b><div class="inspector-line"></div><div class="inspector-line short"></div></div>
+      </aside>
+    </section>
+
+    <section class="panel-shell" id="panel" aria-label="Type4Me 顶部实时对照面板">
+      <header class="panel-toolbar">
+        <div class="toolbar-section mode-section">
+          <span class="recording-mark" aria-hidden="true"></span>
+          <span class="mode-name"><span class="long-mode">语音</span>润色</span>
+        </div>
+        <div class="toolbar-section api-section">
+          <span class="model-route"><span class="provider">OpenRouter / </span>DeepSeek V3</span>
+          <span class="api-state"><span class="api-label">优化中 </span><span class="api-time">1.24s</span></span>
+        </div>
+        <div class="toolbar-section control-section">
+          <span class="recording-time">录音 00:38</span>
+          <button class="icon-button collapse-control" aria-label="收缩面板" title="收缩面板">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 6.2 8 10l5-3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="icon-button stop-button" aria-label="停止并插入" title="停止并插入">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.8" fill="currentColor"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="panel-content">
+        <section class="transcript-column raw">
+          <header class="column-header">
+            <span class="column-title">原文</span>
+            <span class="column-meta">实时转写</span>
+          </header>
+          <div class="transcript-scroll">
+            <p class="transcript-text">我觉得这一次可以先不要急着实现，我们先把整个交互聊清楚。现在最主要的问题是，软件虽然已经有实时优化了，但是我停止以后，界面还是会从大面板切换成一个小胶囊，然后再告诉我正在润色。这个过程从系统内部看也许是合理的，但是从使用者的角度看，它其实像是同一件事被做了两次。
+
+我希望录音、实时转写、实时优化、最后收尾和插入，都在同一个面板里面完成。停止以后，如果最后一点尾音还没有被模型处理，就让面板留在原位继续完成，不需要突然变成另一种形态。正常完成后直接插入，再给一个很轻的成功反馈就可以了。
+
+另外长文本也是一个问题。我有时候会一次说五六百字，现在的宽度和行距看起来会比较挤。把面板放到顶部以后，内容可以自然地往下增长，而且原文和优化稿最好能一直左右对照，这样我可以直观看到模型改了什么。
+
+还有，调用耗时我也希望在顶部看到，因为我有时会切换不同模型，希望能直观知道每一次实际请求用了多久。这个时间不要把录音或等待停顿算进去，只算请求发出到完整结果返回。如果第一次调用失败，错误区域保留这次耗时，重试的时候重新计时，这样我才好判断到底是网络偶发问题，还是模型本身速度不稳定。
+
+最后，整个面板即使展开得很高，也不要在里面再套滚动区域，因为那样我还是得用鼠标去找前面的内容。我宁愿它覆盖当前窗口，需要时自己点收缩。<span class="pending-tail">还有一点，如果模型调用失败，希望不要直接把面板关掉，最好保留原文，并且给我一个手动重试优化的按钮。</span></p>
+          </div>
+        </section>
+
+        <section class="transcript-column optimized">
+          <header class="column-header">
+            <span class="column-title">优化稿</span>
+            <span class="column-meta"><span class="pending-badge">待更新</span> 约 600 字</span>
+          </header>
+          <div class="transcript-scroll">
+            <p class="transcript-text">这次先不急于实现，优先把整体交互讨论清楚。
+
+当前的核心问题是：虽然软件已经支持实时优化，但停止录音后，界面仍会从大面板切换为小胶囊，并再次提示“正在润色”。从系统内部看，这可能对应不同处理阶段；但从用户视角看，同一件事像是被重复执行了两次，体验并不连贯。
+
+更自然的方案，是让录音、实时转写、实时优化、最终收尾和文本插入都发生在同一个面板中。用户停止录音后，如果仍有尾音尚未处理，面板就在原位完成最后一次收敛，不再切换为另一种容器。处理完成后直接插入文本，并在原面板内给出短暂、克制的成功反馈。
+
+长文本的可读性也需要同步改善。一次输入五六百字时，现有宽度、字号和行距会显得拥挤。将面板移动到屏幕顶部后，内容可以自然向下增长；展开状态采用原文与优化稿的左右对照布局，既能持续确认识别结果，也便于观察模型具体修改了哪些内容。
+
+当面板遮挡当前应用时，用户可以手动将其收缩为顶部信息条。收缩只改变显示体积，不中断录音或优化；应用本次运行期间继续记住这一选择。
+
+标题栏还需要展示真实的 LLM API 耗时，方便比较不同提供商和模型。计时应从请求实际发出开始，在完整响应返回或失败时结束，不应混入录音时长、停顿等待或缓存复用时间。首次调用失败后，错误区域保留该次调用的模型、状态与耗时；手动重试则开启一次新的独立计时。这样既能判断单次网络异常，也能持续观察模型速度是否稳定。
+
+为了保持免鼠标的体验，展开面板内部不再设置滚动容器。即使面板占据大部分屏幕，也应把约六百字内容完整铺开；遮挡当前应用时，由用户主动收缩成顶部标题条，而不是把阅读成本转移给滚动操作。</p>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <nav class="prototype-controls" aria-label="视觉稿状态切换">
+      <span class="prototype-label">Preview</span>
+      <button class="state-button active" data-state="live">双栏展开</button>
+      <button class="state-button" data-state="collapsed">收缩标题条</button>
+      <button class="state-button" data-state="error">失败与重试</button>
+    </nav>
+
+    <div class="spec-tag" id="specTag">约 600 字完整平铺 · 1280 pt · 45 / 55</div>
+  </main>
+
+  <script>
+    const panel = document.getElementById('panel');
+    const buttons = [...document.querySelectorAll('.state-button')];
+    const specTag = document.getElementById('specTag');
+    const content = panel.querySelector('.panel-content');
+    const apiState = panel.querySelector('.api-state');
+    const collapseControl = panel.querySelector('.collapse-control');
+    const stopControl = panel.querySelector('.stop-button');
+    const recordingTime = panel.querySelector('.recording-time');
+    const originalLiveMarkup = content.innerHTML;
+    const originalApiMarkup = apiState.innerHTML;
+
+    const errorMarkup = `
+      <section class="transcript-column raw">
+        <header class="column-header">
+          <span class="column-title">完整原文</span>
+          <span class="column-meta">已保留 · 526 字</span>
+        </header>
+        <div class="transcript-scroll">
+          <p class="transcript-text">我觉得这一次可以先不要急着实现，我们先把整个交互聊清楚。现在最主要的问题是，软件虽然已经有实时优化了，但是我停止以后，界面还是会从大面板切换成一个小胶囊，然后再告诉我正在润色。
+
+我希望录音、实时转写、实时优化、最后收尾和插入，都在同一个面板里面完成。停止以后，如果最后一点尾音还没有被模型处理，就让面板留在原位继续完成，不需要突然变成另一种形态。
+
+另外，如果模型调用失败，希望不要直接把面板关掉。完整原文需要继续保留，并且让我选择重新优化，或者直接插入原文。</p>
+        </div>
+      </section>
+      <section class="transcript-column optimized">
+        <header class="column-header">
+          <span class="column-title">优化稿</span>
+          <span class="column-meta">DeepSeek V3</span>
+        </header>
+        <div class="transcript-scroll">
+          <div class="error-pane">
+            <div class="error-heading">
+              <div class="error-icon">!</div>
+              <div class="error-copy">
+                <h2>优化失败，完整原文已保留</h2>
+                <p>连接在模型返回结果前超时。你可以使用同一份原文和配置重新调用，或直接插入原文。</p>
+              </div>
+            </div>
+            <ul class="attempt-list">
+              <li><span>调用 #1 · OpenRouter / DeepSeek V3</span><span class="attempt-status">请求超时 · 8.02s</span></li>
+            </ul>
+            <div class="error-actions">
+              <button class="action-button primary">重试优化</button>
+              <button class="action-button">插入原文</button>
+              <span class="error-note">仅点击重试后才会再次调用模型</span>
+            </div>
+          </div>
+        </div>
+      </section>`;
+
+    function setState(state) {
+      buttons.forEach(button => button.classList.toggle('active', button.dataset.state === state));
+      panel.classList.remove('collapsed', 'error');
+      content.innerHTML = originalLiveMarkup;
+      apiState.innerHTML = originalApiMarkup;
+      recordingTime.textContent = '录音 00:38';
+      stopControl.setAttribute('aria-label', '停止并插入');
+      stopControl.setAttribute('title', '停止并插入');
+      stopControl.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.8" fill="currentColor"/></svg>';
+
+      if (state === 'collapsed') {
+        panel.classList.add('collapsed');
+        collapseControl.setAttribute('aria-label', '展开面板');
+        collapseControl.setAttribute('title', '展开面板');
+        collapseControl.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m3 9.8 5-3.8 5 3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        specTag.textContent = '480 × 44 pt · 本次运行内记住';
+      } else {
+        collapseControl.setAttribute('aria-label', '收缩面板');
+        collapseControl.setAttribute('title', '收缩面板');
+        collapseControl.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 6.2 8 10l5-3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        specTag.textContent = '约 600 字完整平铺 · 1280 pt · 45 / 55';
+      }
+
+      if (state === 'error') {
+        panel.classList.add('error');
+        content.innerHTML = errorMarkup;
+        apiState.innerHTML = '<span class="api-label">失败 </span><span class="api-time">8.02s</span>';
+        recordingTime.textContent = '已停止 00:38';
+        stopControl.setAttribute('aria-label', '关闭面板');
+        stopControl.setAttribute('title', '关闭面板');
+        stopControl.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4.5 4.5 7 7m0-7-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+        specTag.textContent = '失败时强制展开 · 保留原文 · 手动重试';
+      }
+    }
+
+    buttons.forEach(button => button.addEventListener('click', () => setState(button.dataset.state)));
+    collapseControl.addEventListener('click', () => setState(panel.classList.contains('collapsed') ? 'live' : 'collapsed'));
+  </script>
+</body>
+</html>

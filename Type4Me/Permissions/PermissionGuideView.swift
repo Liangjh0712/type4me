@@ -66,8 +66,8 @@ struct PermissionGuideView: View {
             }
 
             Text(L(
-                "请授权以下权限,以允许 Type4Me 使用你的麦克风并监听快捷键和完成输入",
-                "Please grant the permissions below so Type4Me can use your microphone and listen for hotkeys to type for you."
+                "请授权以下权限，以允许 \(appDisplayName) 使用你的麦克风、监听快捷键并完成输入",
+                "Please grant the permissions below so \(appDisplayName) can use your microphone, listen for hotkeys, and type for you."
             ))
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(textPrimary)
@@ -94,7 +94,7 @@ struct PermissionGuideView: View {
     @ViewBuilder
     private var launchButton: some View {
         Button(action: dismissGuide) {
-            Text(L("启动 Type4Me", "Launch Type4Me"))
+            Text(L("启动 \(appDisplayName)", "Launch \(appDisplayName)"))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)

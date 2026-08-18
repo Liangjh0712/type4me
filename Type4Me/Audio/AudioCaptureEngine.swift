@@ -93,6 +93,8 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
     private let outputQueueTag: UInt8 = 1
     private var activeOutput: AVCaptureAudioDataOutput?
     private var levelCounter = 0
+    private let journalLock = NSLock()
+    private var journalWriter: AudioJournalWriter?
 
     // MARK: - Warm-up
 
@@ -118,6 +120,46 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
             self?.isWarmedUp = true
             NSLog("[Audio] Warm-up complete (AVAudioEngine graph initialized)")
         }
+    }
+
+    func prepareAudioJournal(metadata: AudioJournalMetadata) throws {
+        let writer = try AudioArchive.shared.beginJournal(metadata: metadata)
+        journalLock.withLock {
+            journalWriter?.discard()
+            journalWriter = writer
+        }
+    }
+
+    func updateAudioJournalPartialTranscript(_ text: String) {
+        let writer = journalLock.withLock { journalWriter }
+        writer?.updatePartialTranscript(text)
+    }
+
+    func finalizeAudioJournal() -> ArchivedAudio? {
+        let writer = journalLock.withLock { journalWriter }
+        return writer?.finalize()
+    }
+
+    func commitAudioJournal() {
+        let writer = journalLock.withLock { () -> AudioJournalWriter? in
+            defer { journalWriter = nil }
+            return journalWriter
+        }
+        writer?.commit()
+    }
+
+    func preserveAudioJournalForRecovery() {
+        journalLock.withLock {
+            journalWriter = nil
+        }
+    }
+
+    func discardAudioJournal() {
+        let writer = journalLock.withLock { () -> AudioJournalWriter? in
+            defer { journalWriter = nil }
+            return journalWriter
+        }
+        writer?.discard()
     }
 
     // MARK: - Start / Stop
@@ -290,6 +332,8 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
         let audioBuffer = convertedBuffer.audioBufferList.pointee.mBuffers
         guard let mData = audioBuffer.mData else { return }
         let chunk = Data(bytes: mData, count: byteCount)
+        let journal = journalLock.withLock { journalWriter }
+        journal?.append(chunk)
 
         bufferLock.lock()
         accumulatedAudio.append(chunk)

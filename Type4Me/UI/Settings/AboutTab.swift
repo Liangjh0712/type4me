@@ -202,7 +202,7 @@ struct AboutTab: View {
                 }
                 .buttonStyle(.plain)
 
-                Text(L("Type4Me 将关闭并自动重启", "Type4Me will close and restart automatically"))
+                Text(L("\(appDisplayName) 将关闭并自动重启", "\(appDisplayName) will close and restart automatically"))
                     .font(.system(size: 10))
                     .foregroundStyle(TF.settingsTextTertiary)
             }

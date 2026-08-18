@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Model
 
@@ -14,6 +15,13 @@ struct HistoryRecord: Identifiable, Hashable {
     let characterCount: Int?
     let asrProvider: String?
     let asrModel: String?
+    let audioPath: String?
+    let audioBytes: Int64?
+    let audioDurationSeconds: Double?
+    let audioStatus: String?
+    let retranscribedText: String?
+    let retranscriptionProvider: String?
+    let retranscriptionModel: String?
 
     init(
         id: String,
@@ -26,7 +34,14 @@ struct HistoryRecord: Identifiable, Hashable {
         status: String,
         characterCount: Int?,
         asrProvider: String?,
-        asrModel: String? = nil
+        asrModel: String? = nil,
+        audioPath: String? = nil,
+        audioBytes: Int64? = nil,
+        audioDurationSeconds: Double? = nil,
+        audioStatus: String? = nil,
+        retranscribedText: String? = nil,
+        retranscriptionProvider: String? = nil,
+        retranscriptionModel: String? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -39,6 +54,13 @@ struct HistoryRecord: Identifiable, Hashable {
         self.characterCount = characterCount
         self.asrProvider = asrProvider
         self.asrModel = asrModel
+        self.audioPath = audioPath
+        self.audioBytes = audioBytes
+        self.audioDurationSeconds = audioDurationSeconds
+        self.audioStatus = audioStatus
+        self.retranscribedText = retranscribedText
+        self.retranscriptionProvider = retranscriptionProvider
+        self.retranscriptionModel = retranscriptionModel
     }
 }
 
@@ -113,6 +135,10 @@ struct HistoryTab: View {
     @State private var usageBreakdown: [HistoryStore.UsageBreakdown] = []
     @State private var usageBreakdownLoading = false
     @State private var showUsageDetails = false
+    @State private var retranscribingIDs: Set<String> = []
+    @State private var retranscriptionErrors: [String: String] = [:]
+    @State private var playingRecordID: String?
+    @State private var playingSound: NSSound?
 
     private static let pageSize = 50
 
@@ -766,6 +792,12 @@ struct HistoryTab: View {
         isSelected: Bool,
         onToggleSelection: @escaping () -> Void
     ) -> some View {
+        let displayedText = record.retranscribedText
+            ?? (!record.finalText.isEmpty ? record.finalText : record.rawText)
+        let hasAudio = record.audioPath != nil
+        let isRecoverable = hasAudio && record.finalText.isEmpty
+        let isRetranscribing = retranscribingIDs.contains(record.id)
+
         let metadataAndText = VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 let timeFormat: Date.FormatStyle = showDate
@@ -773,7 +805,7 @@ struct HistoryTab: View {
                     : .dateTime.hour().minute()
                 Label(record.createdAt.formatted(timeFormat), systemImage: "clock")
                 Label(String(format: "%.1fs", record.durationSeconds), systemImage: "waveform")
-                if let chars = record.characterCount {
+                if let chars = record.characterCount, chars > 0 {
                     Label(L("\(chars) 字", "\(chars) chars"), systemImage: "doc.text")
                 }
                 if let mode = record.processingMode {
@@ -782,18 +814,46 @@ struct HistoryTab: View {
                 if let provider = record.asrProvider {
                     Label(provider, systemImage: "mic")
                 }
+                if let bytes = record.audioBytes {
+                    Label(formatAudioBytes(bytes), systemImage: "waveform.badge.mic")
+                }
                 Spacer()
             }
             .font(.system(size: 10))
             .foregroundStyle(TF.settingsTextTertiary)
 
-            Text(record.finalText)
-                .font(.system(size: 12))
-                .foregroundStyle(TF.settingsText)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if isRecoverable {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                    Text(L("上次录音未完成，音频已保留", "The previous recording was interrupted; audio was retained"))
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(TF.settingsAccentAmber)
+            }
 
-            if record.processedText != nil {
+            if !displayedText.isEmpty {
+                Text(displayedText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(TF.settingsText)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if hasAudio {
+                Text(L("尚无可用文本，可使用当前识别引擎重新转写。", "No text is available yet. Retranscribe with the current provider."))
+                    .font(.system(size: 11))
+                    .foregroundStyle(TF.settingsTextSecondary)
+            }
+
+            if record.retranscribedText != nil, !record.finalText.isEmpty {
+                HStack(alignment: .top, spacing: 4) {
+                    Text(L("原结果:", "Original:"))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(TF.settingsTextTertiary)
+                    Text(record.finalText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(TF.settingsTextSecondary)
+                        .textSelection(.enabled)
+                }
+            } else if record.processedText != nil {
                 HStack(alignment: .top, spacing: 4) {
                     Text(L("原始:", "Raw:"))
                         .font(.system(size: 10, weight: .medium))
@@ -805,37 +865,72 @@ struct HistoryTab: View {
                 }
             }
 
+            if let error = retranscriptionErrors[record.id] {
+                Text(error)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(TF.settingsAccentRed)
+            }
+
             if !isSelectionMode {
                 HStack(spacing: 8) {
                     Spacer()
 
-                    Button {
-                        correctionRecord = record
-                    } label: {
-                        Label(L("纠错", "Correct"), systemImage: "character.textbox")
+                    if !record.rawText.isEmpty {
+                        Button {
+                            correctionRecord = record
+                        } label: {
+                            Label(L("纠错", "Correct"), systemImage: "character.textbox")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(TF.settingsAccentAmber)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if hasAudio {
+                        Button {
+                            toggleAudioPlayback(record)
+                        } label: {
+                            Label(
+                                playingRecordID == record.id ? L("停止", "Stop") : L("播放", "Play"),
+                                systemImage: playingRecordID == record.id ? "stop.fill" : "play.fill"
+                            )
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(TF.settingsTextSecondary)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            retranscribe(record)
+                        } label: {
+                            Label(
+                                isRetranscribing ? L("转写中", "Transcribing") : L("重新转写", "Retranscribe"),
+                                systemImage: isRetranscribing ? "hourglass" : "arrow.clockwise"
+                            )
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(TF.settingsAccentAmber)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(record.finalText, forType: .string)
-                        copiedId = record.id
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            if copiedId == record.id { copiedId = nil }
                         }
-                    } label: {
-                        Label(
-                            copiedId == record.id ? L("已复制", "Copied") : L("复制", "Copy"),
-                            systemImage: copiedId == record.id ? "checkmark" : "doc.on.doc"
-                        )
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(copiedId == record.id ? TF.settingsAccentGreen : TF.settingsTextSecondary)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .disabled(isRetranscribing)
                     }
-                    .buttonStyle(.plain)
+
+                    if !displayedText.isEmpty {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(displayedText, forType: .string)
+                            copiedId = record.id
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                if copiedId == record.id { copiedId = nil }
+                            }
+                        } label: {
+                            Label(
+                                copiedId == record.id ? L("已复制", "Copied") : L("复制", "Copy"),
+                                systemImage: copiedId == record.id ? "checkmark" : "doc.on.doc"
+                            )
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(copiedId == record.id ? TF.settingsAccentGreen : TF.settingsTextSecondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     Button {
                         Task {
@@ -846,7 +941,6 @@ struct HistoryTab: View {
                         Label(L("删除", "Delete"), systemImage: "trash")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(TF.settingsAccentRed.opacity(0.7))
-                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -876,8 +970,60 @@ struct HistoryTab: View {
         }
         .padding(12)
         .background(
-            RoundedRectangle(cornerRadius: 8).fill(TF.settingsBg)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(TF.settingsCardAlt)
         )
+    }
+
+    private func toggleAudioPlayback(_ record: HistoryRecord) {
+        if playingRecordID == record.id {
+            playingSound?.stop()
+            playingSound = nil
+            playingRecordID = nil
+            return
+        }
+        guard let path = record.audioPath else { return }
+        let url = AudioArchive.shared.fileURL(relativePath: path)
+        guard let sound = NSSound(contentsOf: url, byReference: true) else {
+            retranscriptionErrors[record.id] = L("无法播放历史音频", "Unable to play history audio")
+            return
+        }
+        playingSound?.stop()
+        playingSound = sound
+        playingRecordID = record.id
+        sound.play()
+        let recordID = record.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + sound.duration) {
+            if playingRecordID == recordID {
+                playingSound = nil
+                playingRecordID = nil
+            }
+        }
+    }
+
+    private func retranscribe(_ record: HistoryRecord) {
+        guard let path = record.audioPath, !retranscribingIDs.contains(record.id) else { return }
+        retranscribingIDs.insert(record.id)
+        retranscriptionErrors[record.id] = nil
+        Task {
+            do {
+                let result = try await HistoryRetranscriptionService.transcribe(audioRelativePath: path)
+                await historyStore.updateRetranscription(
+                    id: record.id,
+                    text: result.text,
+                    provider: result.providerName,
+                    model: result.modelName
+                )
+                await loadRecords()
+            } catch {
+                retranscriptionErrors[record.id] = error.localizedDescription
+            }
+            retranscribingIDs.remove(record.id)
+        }
+    }
+
+    private func formatAudioBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     // MARK: - Statistics UI

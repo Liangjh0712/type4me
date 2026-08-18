@@ -8,8 +8,18 @@ extension Notification.Name {
 actor HistoryStore {
 
     private var db: OpaquePointer?
+    private let audioArchive: AudioArchive
 
-    init(path: String? = nil) {
+    init(path: String? = nil, audioArchive: AudioArchive? = nil) {
+        if let audioArchive {
+            self.audioArchive = audioArchive
+        } else if let path {
+            self.audioArchive = AudioArchive(
+                baseURL: URL(fileURLWithPath: path).deletingLastPathComponent()
+            )
+        } else {
+            self.audioArchive = .shared
+        }
         let dbPath: String
         if let path {
             dbPath = path
@@ -18,7 +28,7 @@ actor HistoryStore {
                 for: .applicationSupportDirectory, in: .userDomainMask
             ).first!.appendingPathComponent("Type4Me", isDirectory: true)
             try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
-            dbPath = appSupport.appendingPathComponent("history.db").path
+            dbPath = appSupport.appendingPathComponent("history-v2.db").path
         }
 
         if sqlite3_open(dbPath, &db) == SQLITE_OK {
@@ -34,22 +44,18 @@ actor HistoryStore {
                 status TEXT NOT NULL,
                 character_count INTEGER,
                 asr_provider TEXT,
-                asr_model TEXT
+                asr_model TEXT,
+                audio_path TEXT,
+                audio_bytes INTEGER,
+                audio_duration_seconds REAL,
+                audio_status TEXT,
+                retranscribed_text TEXT,
+                retranscription_provider TEXT,
+                retranscription_model TEXT
             );
             """
             sqlite3_exec(db, sql, nil, nil, nil)
 
-            // Migration: add character_count column if it doesn't exist (for existing databases)
-            let alterSQL = "ALTER TABLE recognition_history ADD COLUMN character_count INTEGER;"
-            sqlite3_exec(db, alterSQL, nil, nil, nil)
-
-            // Migration: add asr_provider column if it doesn't exist
-            let alterASRSQL = "ALTER TABLE recognition_history ADD COLUMN asr_provider TEXT;"
-            sqlite3_exec(db, alterASRSQL, nil, nil, nil)
-
-            // Migration: add asr_model column if it doesn't exist
-            let alterASRModelSQL = "ALTER TABLE recognition_history ADD COLUMN asr_model TEXT;"
-            sqlite3_exec(db, alterASRModelSQL, nil, nil, nil)
 
             // Index for ORDER BY created_at DESC pagination
             sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_history_created_at ON recognition_history(created_at DESC);", nil, nil, nil)
@@ -58,14 +64,15 @@ actor HistoryStore {
 
     // MARK: - CRUD
 
-    func insert(_ record: HistoryRecord) {
+    @discardableResult
+    func insert(_ record: HistoryRecord) -> Bool {
         let sql = """
         INSERT OR REPLACE INTO recognition_history
-        (id, created_at, duration_seconds, raw_text, processing_mode, processed_text, final_text, status, character_count, asr_provider, asr_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (id, created_at, duration_seconds, raw_text, processing_mode, processed_text, final_text, status, character_count, asr_provider, asr_model, audio_path, audio_bytes, audio_duration_seconds, audio_status, retranscribed_text, retranscription_provider, retranscription_model)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         defer { sqlite3_finalize(stmt) }
 
         let iso = ISO8601DateFormatter()
@@ -84,9 +91,35 @@ actor HistoryStore {
         }
         bindOptional(stmt, 10, record.asrProvider)
         bindOptional(stmt, 11, record.asrModel)
+        bindOptional(stmt, 12, record.audioPath)
+        if let bytes = record.audioBytes {
+            sqlite3_bind_int64(stmt, 13, bytes)
+        } else {
+            sqlite3_bind_null(stmt, 13)
+        }
+        if let duration = record.audioDurationSeconds {
+            sqlite3_bind_double(stmt, 14, duration)
+        } else {
+            sqlite3_bind_null(stmt, 14)
+        }
+        bindOptional(stmt, 15, record.audioStatus)
+        bindOptional(stmt, 16, record.retranscribedText)
+        bindOptional(stmt, 17, record.retranscriptionProvider)
+        bindOptional(stmt, 18, record.retranscriptionModel)
         if sqlite3_step(stmt) == SQLITE_DONE {
             postDidChangeNotification()
+            return true
         }
+        return false
+    }
+
+    func contains(id: String) -> Bool {
+        let sql = "SELECT 1 FROM recognition_history WHERE id = ? LIMIT 1;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     func fetchAll(limit: Int? = nil, offset: Int = 0) -> [HistoryRecord] {
@@ -149,7 +182,14 @@ actor HistoryStore {
                 status: column(stmt, 7),
                 characterCount: sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 8)),
                 asrProvider: optionalColumn(stmt, 9),
-                asrModel: optionalColumn(stmt, 10)
+                asrModel: optionalColumn(stmt, 10),
+                audioPath: optionalColumn(stmt, 11),
+                audioBytes: sqlite3_column_type(stmt, 12) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 12),
+                audioDurationSeconds: sqlite3_column_type(stmt, 13) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 13),
+                audioStatus: optionalColumn(stmt, 14),
+                retranscribedText: optionalColumn(stmt, 15),
+                retranscriptionProvider: optionalColumn(stmt, 16),
+                retranscriptionModel: optionalColumn(stmt, 17)
             ))
         }
         return records
@@ -196,13 +236,132 @@ actor HistoryStore {
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
+    func updateRetranscription(
+        id: String,
+        text: String,
+        provider: String,
+        model: String?
+    ) {
+        let sql = """
+        UPDATE recognition_history SET
+            raw_text = CASE WHEN final_text = '' THEN ? ELSE raw_text END,
+            final_text = CASE WHEN final_text = '' THEN ? ELSE final_text END,
+            status = CASE WHEN final_text = '' THEN 'retranscribed' ELSE status END,
+            character_count = CASE WHEN final_text = '' THEN ? ELSE character_count END,
+            retranscribed_text = ?,
+            retranscription_provider = ?,
+            retranscription_model = ?
+        WHERE id = ?;
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, text)
+        bind(stmt, 2, text)
+        sqlite3_bind_int(stmt, 3, Int32(text.count))
+        bind(stmt, 4, text)
+        bind(stmt, 5, provider)
+        bindOptional(stmt, 6, model)
+        bind(stmt, 7, id)
+        if sqlite3_step(stmt) == SQLITE_DONE {
+            postDidChangeNotification()
+        }
+    }
+
+    func pruneAudio(
+        now: Date = Date(),
+        maximumAge: TimeInterval = 30 * 24 * 60 * 60,
+        maximumCount: Int = 500,
+        maximumBytes: Int64 = 1_000_000_000
+    ) {
+        let sql = """
+        SELECT id, created_at, audio_path, COALESCE(audio_bytes, 0), raw_text, final_text, status
+        FROM recognition_history
+        WHERE audio_path IS NOT NULL
+        ORDER BY created_at DESC;
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        let iso = ISO8601DateFormatter()
+        let cutoff = now.addingTimeInterval(-maximumAge)
+        var retainedCount = 0
+        var retainedBytes: Int64 = 0
+        var expired: [(id: String, path: String, removeRow: Bool)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = column(stmt, 0)
+            let createdAt = iso.date(from: column(stmt, 1)) ?? .distantPast
+            let path = column(stmt, 2)
+            let bytes = sqlite3_column_int64(stmt, 3)
+            let rawText = column(stmt, 4)
+            let finalText = column(stmt, 5)
+            let status = column(stmt, 6)
+            let canKeep = createdAt >= cutoff
+                && retainedCount < maximumCount
+                && retainedBytes + bytes <= maximumBytes
+            if canKeep {
+                retainedCount += 1
+                retainedBytes += bytes
+            } else {
+                expired.append((
+                    id: id,
+                    path: path,
+                    removeRow: rawText.isEmpty && finalText.isEmpty && status == "crash_recoverable"
+                ))
+            }
+        }
+        guard !expired.isEmpty else { return }
+        var changed = false
+        for item in expired {
+            let updated: Bool
+            if item.removeRow {
+                updated = executeUpdate("DELETE FROM recognition_history WHERE id = ?;", id: item.id)
+            } else {
+                updated = executeUpdate(
+                    "UPDATE recognition_history SET audio_path = NULL, audio_bytes = NULL, audio_duration_seconds = NULL, audio_status = 'expired' WHERE id = ?;",
+                    id: item.id
+                )
+            }
+            if updated {
+                audioArchive.remove(relativePath: item.path)
+                changed = true
+            }
+        }
+        reconcileAudioArchive()
+        guard changed else { return }
+        postDidChangeNotification()
+    }
+
+    func audioStorageBytes() -> Int64 {
+        let sql = "SELECT COALESCE(SUM(audio_bytes), 0) FROM recognition_history WHERE audio_path IS NOT NULL;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0
+    }
+
+    func reconcileAudioArchive() {
+        let sql = "SELECT audio_path FROM recognition_history WHERE audio_path IS NOT NULL;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        var referenced = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            referenced.insert(column(stmt, 0))
+        }
+        audioArchive.removeUnreferencedWAVs(referencedRelativePaths: referenced)
+    }
+
     func delete(id: String) {
+        let paths = audioPaths(for: [id])
         let sql = "DELETE FROM recognition_history WHERE id = ?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
         if sqlite3_step(stmt) == SQLITE_DONE {
+            paths.forEach { audioArchive.remove(relativePath: $0) }
+            reconcileAudioArchive()
             postDidChangeNotification()
         }
     }
@@ -210,6 +369,7 @@ actor HistoryStore {
     /// Deletes multiple rows in one transaction; posts a single change notification on success.
     func delete(ids: [String]) {
         guard !ids.isEmpty else { return }
+        let paths = audioPaths(for: ids)
         let chunkSize = 500
         guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return }
         var ok = true
@@ -233,6 +393,8 @@ actor HistoryStore {
         }
         if ok {
             if sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK {
+                paths.forEach { audioArchive.remove(relativePath: $0) }
+                reconcileAudioArchive()
                 postDidChangeNotification()
             } else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
@@ -243,46 +405,14 @@ actor HistoryStore {
     }
 
     func deleteAll() {
+        let paths = allAudioPaths()
         if sqlite3_exec(db, "DELETE FROM recognition_history;", nil, nil, nil) == SQLITE_OK {
+            paths.forEach { audioArchive.remove(relativePath: $0) }
+            reconcileAudioArchive()
             postDidChangeNotification()
         }
     }
 
-    // MARK: - Migration
-
-    /// 为旧记录计算并保存字数。应在应用启动时调用一次。
-    func migrateCharacterCounts() async {
-        let sql = """
-        SELECT id, final_text FROM recognition_history
-        WHERE character_count IS NULL;
-        """
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-
-        var updates: [(id: String, count: Int)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let id = column(stmt, 0)
-            let text = column(stmt, 1)
-            updates.append((id: id, count: text.count))
-        }
-
-        guard !updates.isEmpty else { return }
-
-        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
-        for update in updates {
-            let updateSQL = "UPDATE recognition_history SET character_count = ? WHERE id = ?;"
-            var updateStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nil) == SQLITE_OK {
-                sqlite3_bind_int(updateStmt, 1, Int32(update.count))
-                bind(updateStmt, 2, update.id)
-                sqlite3_step(updateStmt)
-                sqlite3_finalize(updateStmt)
-            }
-        }
-        sqlite3_exec(db, "COMMIT", nil, nil, nil)
-        NSLog("[HistoryStore] Migrated %d records with character counts", updates.count)
-    }
 
     // MARK: - Statistics
 
@@ -395,6 +525,44 @@ actor HistoryStore {
     }
 
     // MARK: - SQLite Helpers
+
+    @discardableResult
+    private func executeUpdate(_ sql: String, id: String) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        return sqlite3_step(stmt) == SQLITE_DONE
+    }
+
+    private func audioPaths(for ids: [String]) -> [String] {
+        guard !ids.isEmpty else { return [] }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+        let sql = "SELECT audio_path FROM recognition_history WHERE id IN (\(placeholders)) AND audio_path IS NOT NULL;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        for (index, id) in ids.enumerated() {
+            bind(stmt, Int32(index + 1), id)
+        }
+        var paths: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            paths.append(column(stmt, 0))
+        }
+        return paths
+    }
+
+    private func allAudioPaths() -> [String] {
+        let sql = "SELECT audio_path FROM recognition_history WHERE audio_path IS NOT NULL;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var paths: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            paths.append(column(stmt, 0))
+        }
+        return paths
+    }
 
     private func bind(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
         sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))

@@ -2,112 +2,161 @@ import XCTest
 @testable import Type4Me
 
 final class SpeculativeLLMThrottleTests: XCTestCase {
-    func testMinimumTextLength() {
+    func testMinimumTextLengthWaitsForMeaningfulShortPhrase() {
         var throttle = SpeculativeLLMThrottle()
 
-        XCTAssertEqual(throttle.submit("1234567"), .tooShort)
-        XCTAssertEqual(throttle.submit("12345678"), .debounce)
+        XCTAssertEqual(throttle.submit("测试呀"), .tooShort)
+        XCTAssertEqual(throttle.submit("测试一下"), .debounce)
     }
 
-    func testMinimumCharacterIncrement() {
+    func testMinimumCharacterIncrementIsTwentyMeaningfulCharacters() {
         var throttle = SpeculativeLLMThrottle()
-        XCTAssertEqual(throttle.submit("12345678"), .debounce)
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: "12345678"))
-        _ = throttle.requestCompleted(input: "12345678")
+        let start = ContinuousClock.now
+        let first = "测试一下"
+        XCTAssertEqual(throttle.submit(first, now: start), .debounce)
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: first, now: start))
+        _ = throttle.requestCompleted(input: first)
 
-        XCTAssertEqual(throttle.submit("123456789012345"), .deltaTooSmall)
-        XCTAssertEqual(throttle.submit("1234567890123456"), .debounce)
+        XCTAssertEqual(
+            throttle.submit(first + String(repeating: "增", count: 19), now: start + .seconds(5)),
+            .deltaTooSmall
+        )
+        XCTAssertEqual(
+            throttle.submit(first + String(repeating: "增", count: 20), now: start + .seconds(5)),
+            .debounce
+        )
     }
 
     func testDebounceKeepsNewestCandidateBeforeRequestStarts() {
         var throttle = SpeculativeLLMThrottle()
 
-        XCTAssertEqual(throttle.submit("12345678"), .debounce)
-        XCTAssertEqual(throttle.submit("abcdefgh"), .debounce)
+        XCTAssertEqual(throttle.submit("测试一下"), .debounce)
+        XCTAssertEqual(throttle.submit("换一份候选文本"), .debounce)
 
-        XCTAssertFalse(throttle.beginDebouncedRequest(for: "12345678"))
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: "abcdefgh"))
+        XCTAssertFalse(throttle.beginDebouncedRequest(for: "测试一下"))
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: "换一份候选文本"))
     }
 
-    func testDoesNotRunConcurrentRequests() {
+    func testDoesNotRunConcurrentRequestsAndKeepsNewestPendingText() {
         var throttle = SpeculativeLLMThrottle()
-        _ = throttle.submit("12345678")
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: "12345678"))
+        let start = ContinuousClock.now
+        let first = "测试一下"
+        let second = first + String(repeating: "二", count: 20)
+        let latest = second + String(repeating: "三", count: 20)
+        _ = throttle.submit(first, now: start)
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: first, now: start))
 
-        XCTAssertEqual(throttle.submit("1234567890123456"), .queued)
-        XCTAssertFalse(throttle.beginDebouncedRequest(for: "1234567890123456"))
+        XCTAssertEqual(throttle.submit(second, now: start + .seconds(1)), .queued)
+        XCTAssertEqual(throttle.submit(latest, now: start + .seconds(2)), .queued)
+        XCTAssertFalse(throttle.beginDebouncedRequest(for: latest, now: start + .seconds(2)))
+
+        XCTAssertEqual(throttle.requestCompleted(input: first), latest)
     }
 
-    func testNewestPendingTranscriptIsReturnedAfterCompletion() {
+    func testCooldownDefersNextRequestForFiveSeconds() {
         var throttle = SpeculativeLLMThrottle()
-        _ = throttle.submit("12345678")
-        _ = throttle.beginDebouncedRequest(for: "12345678")
-        XCTAssertEqual(throttle.submit("1234567890123456"), .queued)
-        XCTAssertEqual(throttle.submit("123456789012345678901234"), .queued)
+        let start = ContinuousClock.now
+        let first = "测试一下"
+        let second = first + String(repeating: "增", count: 20)
+        _ = throttle.submit(first, now: start)
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: first, now: start))
+        _ = throttle.requestCompleted(input: first)
 
-        let pending = throttle.requestCompleted(input: "12345678")
-
-        XCTAssertEqual(pending, "123456789012345678901234")
+        XCTAssertEqual(
+            throttle.submit(second, now: start + .seconds(2)),
+            .cooldown(.seconds(3))
+        )
+        XCTAssertEqual(throttle.submit(second, now: start + .seconds(5)), .debounce)
     }
 
-    func testResetClearsInFlightAndPendingState() {
+    func testExplicitCorrectionBypassesIncrementButNotCooldown() {
         var throttle = SpeculativeLLMThrottle()
-        _ = throttle.submit("12345678")
-        _ = throttle.beginDebouncedRequest(for: "12345678")
-        _ = throttle.submit("1234567890123456")
+        let start = ContinuousClock.now
+        let original = "预算确定为三十万"
+        let corrected = original + "，不对，改成五十万"
+        _ = throttle.submit(original, now: start)
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: original, now: start))
+        _ = throttle.requestCompleted(input: original)
+
+        XCTAssertEqual(
+            throttle.submit(corrected, now: start + .seconds(2)),
+            .cooldown(.seconds(3))
+        )
+        XCTAssertEqual(throttle.submit(corrected, now: start + .seconds(5)), .debounce)
+    }
+
+    func testSmallASRRewriteDoesNotBypassIncrement() {
+        var throttle = SpeculativeLLMThrottle()
+        let start = ContinuousClock.now
+        let original = "今天下午三点开会"
+        _ = throttle.submit(original, now: start)
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: original, now: start))
+        _ = throttle.requestCompleted(input: original)
+
+        XCTAssertEqual(
+            throttle.submit("今天下午四点开会", now: start + .seconds(5)),
+            .deltaTooSmall
+        )
+    }
+
+    func testWhitespaceAndPunctuationVariantsAreDuplicates() {
+        var throttle = SpeculativeLLMThrottle()
+        let start = ContinuousClock.now
+        let source = "同一份原始语音文本"
+        _ = throttle.submit(source, now: start)
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: source, now: start))
+        _ = throttle.requestCompleted(input: source)
+
+        XCTAssertEqual(
+            throttle.submit("同一份 原始语音文本。", now: start + .seconds(5)),
+            .duplicate
+        )
+    }
+
+    func testSessionRequestCapStopsAfterThreePreviews() {
+        var throttle = SpeculativeLLMThrottle()
+        let start = ContinuousClock.now
+        var text = "测试一下"
+        for index in 0..<SpeculativeLLMThrottle.maximumRequestsPerSession {
+            if index > 0 { text += String(repeating: "增", count: 20) }
+            let now = start + .seconds(index * 5)
+            XCTAssertEqual(throttle.submit(text, now: now), .debounce)
+            XCTAssertTrue(throttle.beginDebouncedRequest(for: text, now: now))
+            _ = throttle.requestCompleted(input: text)
+        }
+
+        let extra = text + String(repeating: "额", count: 20)
+        XCTAssertEqual(throttle.submit(extra, now: start + .seconds(15)), .limitReached)
+        XCTAssertEqual(throttle.requestCount, 3)
+    }
+
+    func testRateLimitCircuitSuppressesRemainingPreviewsUntilReset() {
+        var throttle = SpeculativeLLMThrottle()
+        _ = throttle.submit("测试一下")
+        XCTAssertTrue(throttle.beginDebouncedRequest(for: "测试一下"))
+
+        throttle.tripCircuit()
+
+        XCTAssertTrue(throttle.isCircuitOpen)
+        XCTAssertFalse(throttle.inFlight)
+        XCTAssertEqual(throttle.submit("测试一下再补充很多内容"), .circuitOpen)
+
+        throttle.reset()
+        XCTAssertFalse(throttle.isCircuitOpen)
+        XCTAssertEqual(throttle.submit("测试一下"), .debounce)
+    }
+
+    func testResetClearsRequestBudgetAndPendingState() {
+        var throttle = SpeculativeLLMThrottle()
+        _ = throttle.submit("测试一下")
+        _ = throttle.beginDebouncedRequest(for: "测试一下")
+        _ = throttle.submit("测试一下" + String(repeating: "增", count: 20))
 
         throttle.reset()
 
         XCTAssertFalse(throttle.inFlight)
         XCTAssertNil(throttle.pendingText)
-        XCTAssertEqual(throttle.submit("12345678"), .debounce)
-    }
-
-    func testShortExplicitCorrectionBypassesCharacterIncrement() {
-        var throttle = SpeculativeLLMThrottle()
-        let original = "预算已经确定为 30 万"
-        XCTAssertEqual(throttle.submit(original), .debounce)
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: original))
-        _ = throttle.requestCompleted(input: original)
-
-        let corrected = original + "改成 50 万"
-
-        XCTAssertLessThan(corrected.count - original.count, SpeculativeLLMThrottle.minimumCharacterIncrement)
-        XCTAssertEqual(throttle.submit(corrected), .debounce)
-    }
-
-    func testStableASRRewriteIsNewSourceData() {
-        var throttle = SpeculativeLLMThrottle()
-        let original = "今天下午三点开会"
-        XCTAssertEqual(throttle.submit(original), .debounce)
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: original))
-        _ = throttle.requestCompleted(input: original)
-
-        XCTAssertEqual(throttle.submit("今天下午四点开会"), .debounce)
-    }
-
-    func testCompletedSnapshotIsNotOptimizedAgain() {
-        var throttle = SpeculativeLLMThrottle()
-        let source = "同一份原始语音文本"
-        XCTAssertEqual(throttle.submit(source), .debounce)
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: source))
-        _ = throttle.requestCompleted(input: source)
-
-        XCTAssertEqual(throttle.submit(source), .duplicate)
-    }
-
-    func testNonconsecutiveSnapshotIsNotOptimizedAgain() {
-        var throttle = SpeculativeLLMThrottle()
-        let first = "第一份稳定语音文本"
-        let second = "第二份稳定语音文本"
-
-        XCTAssertEqual(throttle.submit(first), .debounce)
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: first))
-        _ = throttle.requestCompleted(input: first)
-        XCTAssertEqual(throttle.submit(second), .debounce)
-        XCTAssertTrue(throttle.beginDebouncedRequest(for: second))
-        _ = throttle.requestCompleted(input: second)
-
-        XCTAssertEqual(throttle.submit(first), .duplicate)
+        XCTAssertEqual(throttle.requestCount, 0)
+        XCTAssertEqual(throttle.submit("测试一下"), .debounce)
     }
 }

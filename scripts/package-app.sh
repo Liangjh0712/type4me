@@ -6,12 +6,12 @@ APP_FLAVOR="${APP_FLAVOR:-public}"  # public or personal
 
 case "$APP_FLAVOR" in
     public)
-        APP_NAME="${APP_NAME:-Type4Me}"
+        APP_NAME="${APP_NAME:-Type4Me Lab}"
         APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.type4me.app}"
         URL_SCHEME="${URL_SCHEME:-type4me}"
         ;;
     personal)
-        APP_NAME="${APP_NAME:-Type4Me CtriXin}"
+        APP_NAME="${APP_NAME:-Type4Me Lab CtriXin}"
         APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.ctrixin.type4me}"
         URL_SCHEME="${URL_SCHEME:-type4me-ctrixin}"
         ;;
@@ -24,14 +24,14 @@ esac
 APP_PATH="${APP_PATH:-$PROJECT_DIR/dist/${APP_NAME}.app}"
 APP_EXECUTABLE="${APP_EXECUTABLE:-Type4Me}"
 APP_ICON_NAME="${APP_ICON_NAME:-AppIcon}"
-APP_VERSION="${APP_VERSION:-2.0.0}"
+APP_VERSION="${APP_VERSION:-8.8.8}"
 APP_BUILD="${APP_BUILD:-1}"
 MIN_SYSTEM_VERSION="${MIN_SYSTEM_VERSION:-14.0}"
 VARIANT="${VARIANT:-cloud}"    # cloud or local
 ARCH="${ARCH:-universal}"      # arm64 or universal
-MICROPHONE_USAGE_DESCRIPTION="${MICROPHONE_USAGE_DESCRIPTION:-Type4Me 需要访问麦克风以录制语音并将其转换为文本。}"
-SPEECH_RECOGNITION_USAGE_DESCRIPTION="${SPEECH_RECOGNITION_USAGE_DESCRIPTION:-Type4Me 需要语音识别权限以将你的语音转写为文字。}"
-APPLE_EVENTS_USAGE_DESCRIPTION="${APPLE_EVENTS_USAGE_DESCRIPTION:-Type4Me 需要辅助功能权限来注入转写文字到其他应用}"
+MICROPHONE_USAGE_DESCRIPTION="${MICROPHONE_USAGE_DESCRIPTION:-${APP_NAME} 需要访问麦克风以录制语音并将其转换为文本。}"
+SPEECH_RECOGNITION_USAGE_DESCRIPTION="${SPEECH_RECOGNITION_USAGE_DESCRIPTION:-${APP_NAME} 需要语音识别权限以将你的语音转写为文字。}"
+APPLE_EVENTS_USAGE_DESCRIPTION="${APPLE_EVENTS_USAGE_DESCRIPTION:-${APP_NAME} 需要辅助功能权限来注入转写文字到其他应用}"
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 
 ENTITLEMENTS="$PROJECT_DIR/entitlements.plist"

@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && /bin/pwd -P)"
 APP_PATH="${APP_PATH:-/Applications/Type4Me.app}"
 APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.type4me.localfixed}"
-APP_VERSION="${APP_VERSION:-1.9.4-local}"
+APP_VERSION="${APP_VERSION:-8.8.8}"
 APP_BUILD="${APP_BUILD:-2}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Type4Me Local Dev}"
 ARCH="${ARCH:-arm64}"
@@ -32,8 +32,8 @@ if [ "$SKIP_QWEN3_BUILD" != "1" ] || [ ! -d "$PROJECT_DIR/qwen3-asr-server/dist/
     bash "$PROJECT_DIR/qwen3-asr-server/build.sh"
 fi
 
-osascript -e 'quit app "Type4Me"' 2>/dev/null || true
-pkill -f '/Applications/Type4Me.app/Contents/MacOS/Type4Me' 2>/dev/null || true
+osascript -e 'quit app "Type4Me Lab"' 2>/dev/null || osascript -e 'quit app "Type4Me"' 2>/dev/null || true
+pkill -f "$APP_PATH/Contents/MacOS/Type4Me" 2>/dev/null || true
 pkill -f 'qwen3-asr-server' 2>/dev/null || true
 sleep 2
 

@@ -3,279 +3,285 @@ import os
 
 actor DoubaoChatClient: LLMClient {
 
-    private let logger = Logger(subsystem: "com.type4me.llm", category: "DoubaoChatClient")
-    private let provider: LLMProvider
-    private let session: URLSession
-    private let metricsDelegate: LLMURLSessionMetricsDelegate
+  private let logger = Logger(subsystem: "com.type4me.llm", category: "DoubaoChatClient")
+  private let provider: LLMProvider
+  private let session: URLSession
+  private let metricsDelegate: LLMURLSessionMetricsDelegate
 
-    init(
-        provider: LLMProvider = .doubao,
-        bypassProxy: Bool = ProxyBypassMode.current.bypassLLM
-    ) {
-        self.provider = provider
-        let resources = LLMURLSessionFactory.make(
-            providerID: provider.rawValue,
-            bypassProxy: bypassProxy
-        )
-        session = resources.session
-        metricsDelegate = resources.metricsDelegate
+  init(
+    provider: LLMProvider = .doubao,
+    bypassProxy: Bool = ProxyBypassMode.current.bypassLLM
+  ) {
+    self.provider = provider
+    let resources = LLMURLSessionFactory.make(
+      providerID: provider.rawValue,
+      bypassProxy: bypassProxy
+    )
+    session = resources.session
+    metricsDelegate = resources.metricsDelegate
+  }
+
+  /// Pre-establish TCP+TLS connection so the first real request skips handshake.
+  func warmUp(baseURL: String) async {
+    guard let url = URL(string: baseURL) else { return }
+    var request = URLRequest(url: url)
+    request.httpMethod = "GET"
+    request.timeoutInterval = 5
+    _ = try? await session.data(for: request)
+    logger.info("LLM connection pre-warmed to \(baseURL)")
+  }
+
+  func invalidate() async {
+    session.invalidateAndCancel()
+  }
+
+  /// Process text through Doubao ARK API (OpenAI-compatible streaming).
+  /// Returns the full LLM response as a single string.
+  func process(text: String, prompt: String, config: LLMConfig) async throws -> String {
+    let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedText.isEmpty else { return text }
+    let finalPrompt = prompt.replacingOccurrences(of: "{text}", with: trimmedText)
+
+    guard let url = URL(string: "\(config.baseURL)/chat/completions") else {
+      throw LLMError.invalidURL
     }
 
-    /// Pre-establish TCP+TLS connection so the first real request skips handshake.
-    func warmUp(baseURL: String) async {
-        guard let url = URL(string: baseURL) else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 5
-        _ = try? await session.data(for: request)
-        logger.info("LLM connection pre-warmed to \(baseURL)")
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.timeoutInterval = 30
+
+    // tf_disableThinking: true (default) = disable thinking to save tokens;
+    // false = let the model use its default thinking behavior.
+    let disableThinking: Bool = {
+      guard let obj = UserDefaults.standard.object(forKey: "tf_disableThinking") else {
+        return true  // default: thinking disabled
+      }
+      return obj as? Bool ?? true
+    }()
+    let disableField = disableThinking ? provider.thinkingDisableField(for: config.model) : nil
+    let body = ChatRequest(
+      model: config.model,
+      messages: [ChatMessage(role: "user", content: finalPrompt)],
+      stream: true,
+      thinking: disableField == .thinking ? ThinkingConfig(type: "disabled") : nil,
+      enable_thinking: disableField == .enableThinking ? false : nil,
+      reasoning_effort: disableField == .reasoningEffort ? "none" : nil,
+      think: disableField == .think ? false : nil,
+      reasoning_split: provider.needsReasoningSplit ? true : nil
+    )
+    request.httpBody = try JSONEncoder().encode(body)
+
+    logger.info("LLM request: \(text.count) chars, endpoint=\(config.model), stream=true")
+
+    let result = try await streamChat(request: request, model: config.model)
+
+    logger.info("LLM result: \(result.count) chars")
+    return result.strippingThinkTags()
+  }
+
+  func processStreaming(
+    text: String,
+    prompt: String,
+    config: LLMConfig,
+    onDelta: @escaping @Sendable (String) async -> Void
+  ) async throws -> String {
+    let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedText.isEmpty else { return text }
+    let finalPrompt = prompt.replacingOccurrences(of: "{text}", with: trimmedText)
+
+    guard let url = URL(string: "\(config.baseURL)/chat/completions") else {
+      throw LLMError.invalidURL
     }
 
-    func invalidate() async {
-        session.invalidateAndCancel()
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.timeoutInterval = 30
+
+    let disableThinking: Bool = {
+      guard let obj = UserDefaults.standard.object(forKey: "tf_disableThinking") else {
+        return true
+      }
+      return obj as? Bool ?? true
+    }()
+    let disableField = disableThinking ? provider.thinkingDisableField : nil
+    let body = ChatRequest(
+      model: config.model,
+      messages: [ChatMessage(role: "user", content: finalPrompt)],
+      stream: true,
+      thinking: disableField == .thinking ? ThinkingConfig(type: "disabled") : nil,
+      enable_thinking: disableField == .enableThinking ? false : nil,
+      reasoning_effort: disableField == .reasoningEffort ? "none" : nil,
+      think: disableField == .think ? false : nil,
+      reasoning_split: provider.needsReasoningSplit ? true : nil
+    )
+    request.httpBody = try JSONEncoder().encode(body)
+
+    logger.info("LLM streaming request: \(text.count) chars, endpoint=\(config.model)")
+    let result = try await streamChat(request: request, model: config.model, onDelta: onDelta)
+    logger.info("LLM streaming result: \(result.count) chars")
+    return result.strippingThinkTags()
+  }
+
+  // MARK: - Streaming (SSE)
+
+  private func streamChat(
+    request: URLRequest,
+    model: String,
+    onDelta: (@Sendable (String) async -> Void)? = nil
+  ) async throws -> String {
+    let requestStart = ContinuousClock.now
+    DebugFileLogger.log("llm: request started model=\(model)")
+    let (bytes, response) = try await session.bytes(for: request)
+    guard let http = response as? HTTPURLResponse else {
+      throw LLMError.requestFailed(0)
+    }
+    guard http.statusCode == 200 else {
+      logger.error("LLM HTTP \(http.statusCode)")
+      DebugFileLogger.log("LLM[\(model)]: HTTP \(http.statusCode)")
+      throw LLMError.requestFailed(http.statusCode)
     }
 
-    /// Process text through Doubao ARK API (OpenAI-compatible streaming).
-    /// Returns the full LLM response as a single string.
-    func process(text: String, prompt: String, config: LLMConfig) async throws -> String {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else { return text }
-        let finalPrompt = prompt.replacingOccurrences(of: "{text}", with: trimmedText)
-
-        guard let url = URL(string: "\(config.baseURL)/chat/completions") else {
-            throw LLMError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
-
-        // tf_disableThinking: true (default) = disable thinking to save tokens;
-        // false = let the model use its default thinking behavior.
-        let disableThinking: Bool = {
-            guard let obj = UserDefaults.standard.object(forKey: "tf_disableThinking") else {
-                return true  // default: thinking disabled
-            }
-            return obj as? Bool ?? true
-        }()
-        let disableField = disableThinking ? provider.thinkingDisableField(for: config.model) : nil
-        let body = ChatRequest(
-            model: config.model,
-            messages: [ChatMessage(role: "user", content: finalPrompt)],
-            stream: true,
-            thinking: disableField == .thinking ? ThinkingConfig(type: "disabled") : nil,
-            enable_thinking: disableField == .enableThinking ? false : nil,
-            reasoning_effort: disableField == .reasoningEffort ? "none" : nil,
-            think: disableField == .think ? false : nil,
-            reasoning_split: provider.needsReasoningSplit ? true : nil
-        )
-        request.httpBody = try JSONEncoder().encode(body)
-
-        logger.info("LLM request: \(text.count) chars, endpoint=\(config.model), stream=true")
-
-        let result = try await streamChat(request: request, model: config.model)
-
-        logger.info("LLM result: \(result.count) chars")
-        return result.strippingThinkTags()
+    var result = ""
+    var lineCount = 0
+    var loggedFirstEvent = false
+    var loggedFirstToken = false
+    for try await line in bytes.lines {
+      lineCount += 1
+      guard line.hasPrefix("data: ") else { continue }
+      if !loggedFirstEvent {
+        loggedFirstEvent = true
+        DebugFileLogger.log(
+          "llm: first SSE event +\(ContinuousClock.now - requestStart) model=\(model)")
+      }
+      let payload = String(line.dropFirst(6))
+      if payload == "[DONE]" { break }
+      guard let data = payload.data(using: .utf8),
+        let chunk = try? JSONDecoder().decode(ChatStreamChunk.self, from: data),
+        let content = chunk.choices.first?.delta.content
+      else { continue }
+      if !loggedFirstToken, !content.isEmpty {
+        loggedFirstToken = true
+        DebugFileLogger.log(
+          "llm: first content token +\(ContinuousClock.now - requestStart) model=\(model)")
+      }
+      result += content
+      if !content.isEmpty {
+        await onDelta?(content)
+      }
     }
 
-    func processStreaming(
-        text: String,
-        prompt: String,
-        config: LLMConfig,
-        onDelta: @escaping @Sendable (String) async -> Void
-    ) async throws -> String {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else { return text }
-        let finalPrompt = prompt.replacingOccurrences(of: "{text}", with: trimmedText)
+    if result.isEmpty && lineCount > 0 {
+      DebugFileLogger.log("LLM[\(model)]: \(lineCount) lines but 0 content chars")
+      throw LLMError.emptyResponse(L("流式响应没有文本", "stream contained no text"))
+    }
+    if result.isEmpty {
+      DebugFileLogger.log("LLM[\(model)]: 0 lines received (connection closed immediately)")
+      throw LLMError.emptyResponse(nil)
+    }
+    DebugFileLogger.log(
+      "llm: completed +\(ContinuousClock.now - requestStart) chars=\(result.count) model=\(model)")
+    return result
+  }
 
-        guard let url = URL(string: "\(config.baseURL)/chat/completions") else {
-            throw LLMError.invalidURL
-        }
+  // MARK: - Non-streaming (single JSON response)
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
-
-        let disableThinking: Bool = {
-            guard let obj = UserDefaults.standard.object(forKey: "tf_disableThinking") else {
-                return true
-            }
-            return obj as? Bool ?? true
-        }()
-        let disableField = disableThinking ? provider.thinkingDisableField : nil
-        let body = ChatRequest(
-            model: config.model,
-            messages: [ChatMessage(role: "user", content: finalPrompt)],
-            stream: true,
-            thinking: disableField == .thinking ? ThinkingConfig(type: "disabled") : nil,
-            enable_thinking: disableField == .enableThinking ? false : nil,
-            reasoning_effort: disableField == .reasoningEffort ? "none" : nil,
-            think: disableField == .think ? false : nil,
-            reasoning_split: provider.needsReasoningSplit ? true : nil
-        )
-        request.httpBody = try JSONEncoder().encode(body)
-
-        logger.info("LLM streaming request: \(text.count) chars, endpoint=\(config.model)")
-        let result = try await streamChat(request: request, model: config.model, onDelta: onDelta)
-        logger.info("LLM streaming result: \(result.count) chars")
-        return result.strippingThinkTags()
+  private func processNonStreaming(request: URLRequest, model: String) async throws -> String {
+    let (data, response) = try await session.data(for: request)
+    guard let http = response as? HTTPURLResponse else {
+      throw LLMError.requestFailed(0)
+    }
+    guard http.statusCode == 200 else {
+      logger.error("LLM HTTP \(http.statusCode)")
+      DebugFileLogger.log("LLM[\(model)]: HTTP \(http.statusCode)")
+      throw LLMError.requestFailed(http.statusCode)
     }
 
-    // MARK: - Streaming (SSE)
-
-    private func streamChat(
-        request: URLRequest,
-        model: String,
-        onDelta: (@Sendable (String) async -> Void)? = nil
-    ) async throws -> String {
-        let requestStart = ContinuousClock.now
-        DebugFileLogger.log("llm: request started model=\(model)")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMError.requestFailed(0)
-        }
-        guard http.statusCode == 200 else {
-            logger.error("LLM HTTP \(http.statusCode)")
-            DebugFileLogger.log("LLM[\(model)]: HTTP \(http.statusCode)")
-            throw LLMError.requestFailed(http.statusCode)
-        }
-
-        var result = ""
-        var lineCount = 0
-        var loggedFirstEvent = false
-        var loggedFirstToken = false
-        for try await line in bytes.lines {
-            lineCount += 1
-            guard line.hasPrefix("data: ") else { continue }
-            if !loggedFirstEvent {
-                loggedFirstEvent = true
-                DebugFileLogger.log("llm: first SSE event +\(ContinuousClock.now - requestStart) model=\(model)")
-            }
-            let payload = String(line.dropFirst(6))
-            if payload == "[DONE]" { break }
-            guard let data = payload.data(using: .utf8),
-                  let chunk = try? JSONDecoder().decode(ChatStreamChunk.self, from: data),
-                  let content = chunk.choices.first?.delta.content
-            else { continue }
-            if !loggedFirstToken, !content.isEmpty {
-                loggedFirstToken = true
-                DebugFileLogger.log("llm: first content token +\(ContinuousClock.now - requestStart) model=\(model)")
-            }
-            result += content
-            if !content.isEmpty {
-                await onDelta?(content)
-            }
-        }
-
-        if result.isEmpty && lineCount > 0 {
-            DebugFileLogger.log("LLM[\(model)]: \(lineCount) lines but 0 content chars")
-            throw LLMError.emptyResponse(L("流式响应没有文本", "stream contained no text"))
-        }
-        if result.isEmpty {
-            DebugFileLogger.log("LLM[\(model)]: 0 lines received (connection closed immediately)")
-            throw LLMError.emptyResponse(nil)
-        }
-        DebugFileLogger.log("llm: completed +\(ContinuousClock.now - requestStart) chars=\(result.count) model=\(model)")
-        return result
+    guard let json = try? JSONDecoder().decode(ChatCompletionResponse.self, from: data),
+      let content = json.choices.first?.message.content, !content.isEmpty
+    else {
+      DebugFileLogger.log("LLM[\(model)]: non-streaming empty response")
+      throw LLMError.emptyResponse(L("响应正文为空", "empty response body"))
     }
-
-    // MARK: - Non-streaming (single JSON response)
-
-    private func processNonStreaming(request: URLRequest, model: String) async throws -> String {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMError.requestFailed(0)
-        }
-        guard http.statusCode == 200 else {
-            logger.error("LLM HTTP \(http.statusCode)")
-            DebugFileLogger.log("LLM[\(model)]: HTTP \(http.statusCode)")
-            throw LLMError.requestFailed(http.statusCode)
-        }
-
-        guard let json = try? JSONDecoder().decode(ChatCompletionResponse.self, from: data),
-              let content = json.choices.first?.message.content, !content.isEmpty
-        else {
-            DebugFileLogger.log("LLM[\(model)]: non-streaming empty response")
-            throw LLMError.emptyResponse(L("响应正文为空", "empty response body"))
-        }
-        return content
-    }
+    return content
+  }
 }
 
 // MARK: - Request/Response Types
 
 struct ThinkingConfig: Encodable, Sendable {
-    let type: String
+  let type: String
 }
 
 struct ChatRequest: Encodable, Sendable {
-    let model: String
-    let messages: [ChatMessage]
-    let stream: Bool
-    let thinking: ThinkingConfig?
-    let enable_thinking: Bool?
-    let reasoning_effort: String?
-    let think: Bool?
-    let reasoning_split: Bool?
+  let model: String
+  let messages: [ChatMessage]
+  let stream: Bool
+  let thinking: ThinkingConfig?
+  let enable_thinking: Bool?
+  let reasoning_effort: String?
+  let think: Bool?
+  let reasoning_split: Bool?
 }
 
 struct ChatMessage: Codable, Sendable, Equatable {
-    let role: String
-    let content: String
+  let role: String
+  let content: String
 }
 
 // Non-streaming response
 struct ChatCompletionResponse: Decodable, Sendable {
-    let choices: [CompletionChoice]
+  let choices: [CompletionChoice]
 }
 
 struct CompletionChoice: Decodable, Sendable {
-    let message: CompletionMessage
+  let message: CompletionMessage
 }
 
 struct CompletionMessage: Decodable, Sendable {
-    let content: String?
+  let content: String?
 }
 
 // Streaming response (SSE chunks)
 struct ChatStreamChunk: Decodable, Sendable {
-    let choices: [ChunkChoice]
+  let choices: [ChunkChoice]
 }
 
 struct ChunkChoice: Decodable, Sendable {
-    let delta: ChunkDelta
+  let delta: ChunkDelta
 }
 
 struct ChunkDelta: Decodable, Sendable {
-    let content: String?
+  let content: String?
 }
 
 enum LLMError: Error, LocalizedError {
-    case invalidURL
-    case requestFailed(Int)
-    case emptyResponse(String?)
+  case invalidURL
+  case requestFailed(Int)
+  case emptyResponse(String?)
+  case invalidOutput(String)
 
-    var errorDescription: String? {
-        switch self {
-        case .invalidURL:
-            return L("LLM 地址无效", "Invalid LLM URL")
-        case .requestFailed(let code):
-            switch code {
-            case 401: return L("LLM 鉴权失败，请检查 API Key", "LLM auth failed, check API Key")
-            case 429: return L("LLM 请求超限或余额不足", "LLM rate limit or insufficient balance")
-            case 500, 502, 503: return L("LLM 服务异常 (\(code))", "LLM service error (\(code))")
-            default:  return L("LLM 请求失败 (\(code))", "LLM request failed (\(code))")
-            }
-        case .emptyResponse(let raw):
-            if let raw {
-                return L("LLM 未返回内容: \(raw)", "LLM returned no content: \(raw)")
-            }
-            return L("LLM 未返回内容", "LLM returned no content")
-        }
+  var errorDescription: String? {
+    switch self {
+    case .invalidURL:
+      return L("LLM 地址无效", "Invalid LLM URL")
+    case .requestFailed(let code):
+      switch code {
+      case 401: return L("LLM 鉴权失败，请检查 API Key", "LLM auth failed, check API Key")
+      case 429: return L("LLM 请求超限或余额不足", "LLM rate limit or insufficient balance")
+      case 500, 502, 503: return L("LLM 服务异常 (\(code))", "LLM service error (\(code))")
+      default: return L("LLM 请求失败 (\(code))", "LLM request failed (\(code))")
+      }
+    case .emptyResponse(let raw):
+      if let raw {
+        return L("LLM 未返回内容: \(raw)", "LLM returned no content: \(raw)")
+      }
+      return L("LLM 未返回内容", "LLM returned no content")
+    case .invalidOutput(let reason):
+      return L("LLM 输出不符合要求: \(reason)", "LLM output violated the required format: \(reason)")
     }
+  }
 }

@@ -5,15 +5,21 @@ final class HistoryStoreTests: XCTestCase {
 
     private var store: HistoryStore!
     private var testPath: String!
+    private var testDirectory: URL!
 
     override func setUp() async throws {
-        testPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("type4me-test-\(UUID().uuidString).db").path
-        store = HistoryStore(path: testPath)
+        testDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("type4me-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: testDirectory, withIntermediateDirectories: true)
+        testPath = testDirectory.appendingPathComponent("history.db").path
+        store = HistoryStore(
+            path: testPath,
+            audioArchive: AudioArchive(baseURL: testDirectory)
+        )
     }
 
     override func tearDown() async throws {
-        try? FileManager.default.removeItem(atPath: testPath)
+        try? FileManager.default.removeItem(at: testDirectory)
     }
 
     func testInsertAndFetchAll() async {
@@ -56,6 +62,45 @@ final class HistoryStoreTests: XCTestCase {
         let all = await store.fetchAll()
         XCTAssertTrue(all.isEmpty)
     }
+    func testDeleteRemovesAudioFromInjectedArchive() async throws {
+        let id = UUID().uuidString
+        let archive = AudioArchive(baseURL: testDirectory)
+        let writer = try archive.beginJournal(metadata: AudioJournalMetadata(
+            recordID: id,
+            createdAt: Date(),
+            processingMode: nil,
+            asrProvider: "Test",
+            asrModel: nil,
+            partialTranscript: "",
+            state: .recording,
+            audioRelativePath: nil,
+            audioBytes: 0
+        ))
+        writer.append(Data(repeating: 0x77, count: AudioArchive.bytesPerSecond))
+        let audio = try XCTUnwrap(writer.finalize())
+        writer.commit()
+        await store.insert(HistoryRecord(
+            id: id,
+            createdAt: Date(),
+            durationSeconds: 1,
+            rawText: "fixture",
+            processingMode: nil,
+            processedText: nil,
+            finalText: "fixture",
+            status: "completed",
+            characterCount: 7,
+            asrProvider: "Test",
+            audioPath: audio.relativePath,
+            audioBytes: audio.byteCount,
+            audioDurationSeconds: audio.durationSeconds,
+            audioStatus: "retained"
+        ))
+
+        await store.delete(id: id)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archive.fileURL(relativePath: audio.relativePath).path))
+    }
+
 
     func testFetchAllOrderedByDate() async {
         let old = HistoryRecord(
@@ -216,5 +261,80 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(byModel["ElevenLabs"]?.allTimeDuration ?? 0, 120, accuracy: 0.01)
         XCTAssertEqual(rows.last?.modelName, L("未知", "Unknown"))
         XCTAssertEqual(rows.dropLast().map(\.allTimeDuration), rows.dropLast().map(\.allTimeDuration).sorted(by: >))
+    }
+
+    func testAudioMetadataRoundTripAndRetranscriptionUpdate() async {
+        let id = UUID().uuidString
+        await store.insert(HistoryRecord(
+            id: id,
+            createdAt: Date(),
+            durationSeconds: 12,
+            rawText: "",
+            processingMode: "语音润色",
+            processedText: nil,
+            finalText: "",
+            status: "crash_recoverable",
+            characterCount: 0,
+            asrProvider: "Original ASR",
+            audioPath: "Audio/\(id).wav",
+            audioBytes: 384_044,
+            audioDurationSeconds: 12,
+            audioStatus: "recoverable"
+        ))
+        let exists = await store.contains(id: id)
+        XCTAssertTrue(exists)
+
+        var record = await store.fetchAll().first
+        XCTAssertEqual(record?.audioPath, "Audio/\(id).wav")
+        XCTAssertEqual(record?.audioBytes, 384_044)
+        XCTAssertEqual(record?.audioDurationSeconds ?? 0, 12, accuracy: 0.001)
+
+        await store.updateRetranscription(
+            id: id,
+            text: "恢复后的完整文本",
+            provider: "Current ASR",
+            model: "current-model"
+        )
+        record = await store.fetchAll().first
+        XCTAssertEqual(record?.finalText, "恢复后的完整文本")
+        XCTAssertEqual(record?.retranscribedText, "恢复后的完整文本")
+        XCTAssertEqual(record?.retranscriptionProvider, "Current ASR")
+        XCTAssertEqual(record?.retranscriptionModel, "current-model")
+    }
+
+    func testPruneAudioKeepsNewestWithinCountLimit() async {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for index in 0..<3 {
+            await store.insert(HistoryRecord(
+                id: "audio-\(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                durationSeconds: 1,
+                rawText: "text",
+                processingMode: nil,
+                processedText: nil,
+                finalText: "text",
+                status: "completed",
+                characterCount: 4,
+                asrProvider: "Test",
+                audioPath: "Audio/test-\(UUID().uuidString).wav",
+                audioBytes: 100,
+                audioDurationSeconds: 1,
+                audioStatus: "retained"
+            ))
+        }
+
+        await store.pruneAudio(
+            now: now.addingTimeInterval(10),
+            maximumAge: 1_000,
+            maximumCount: 1,
+            maximumBytes: 1_000
+        )
+
+        let records = await store.fetchAll()
+        XCTAssertNotNil(records.first(where: { $0.id == "audio-2" })?.audioPath)
+        XCTAssertNil(records.first(where: { $0.id == "audio-1" })?.audioPath)
+        XCTAssertNil(records.first(where: { $0.id == "audio-0" })?.audioPath)
+        let retainedBytes = await store.audioStorageBytes()
+        XCTAssertEqual(retainedBytes, 100)
     }
 }

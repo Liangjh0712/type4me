@@ -22,6 +22,8 @@ enum AppLanguage: String, CaseIterable {
     }
 }
 
+let appDisplayName = "Type4Me Lab"
+
 /// Inline localization helper. Returns Chinese or English based on app language setting.
 func L(_ zh: String, _ en: String) -> String {
     AppLanguage.current == .zh ? zh : en

@@ -93,15 +93,14 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.pinsTranscriptPopup)
   }
 
-  func testHiddenRecordingVisualDoesNotShowPanelUntilProcessing() {
-    let previousStyle = UserDefaults.standard.string(forKey: RecordingVisualStyle.storageKey)
-    UserDefaults.standard.set(
-      RecordingVisualStyle.hidden.rawValue, forKey: RecordingVisualStyle.storageKey)
+  func testHiddenRecordingPanelDoesNotShowPanelUntilProcessing() {
+    let previous = UserDefaults.standard.object(forKey: RecordingPanelPreference.storageKey)
+    UserDefaults.standard.set(false, forKey: RecordingPanelPreference.storageKey)
     defer {
-      if let previousStyle {
-        UserDefaults.standard.set(previousStyle, forKey: RecordingVisualStyle.storageKey)
+      if let previous {
+        UserDefaults.standard.set(previous, forKey: RecordingPanelPreference.storageKey)
       } else {
-        UserDefaults.standard.removeObject(forKey: RecordingVisualStyle.storageKey)
+        UserDefaults.standard.removeObject(forKey: RecordingPanelPreference.storageKey)
       }
     }
 

@@ -14,7 +14,7 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
     @AppStorage("tf_startSound") private var startSound = StartSoundStyle.chime.rawValue
     @AppStorage("tf_launchAtLogin") private var launchAtLogin = true
     @AppStorage("tf_volumeReduction") private var volumeReduction = -1
-    @AppStorage(RecordingVisualStyle.storageKey) private var visualStyle = RecordingVisualStyle.defaultValue
+    @AppStorage(RecordingPanelPreference.storageKey) private var showsRecordingPanel = true
     @AppStorage("tf_language") private var language = AppLanguage.systemDefault
     @AppStorage("tf_preserveClipboard") private var preserveClipboard = true
     @AppStorage("tf_showDockIcon") private var showDockIcon = true
@@ -310,13 +310,19 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
     private var visualStyleRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(L("录音动效", "Visual Style").uppercased())
+            Text(L("录音面板", "Recording Panel").uppercased())
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(TF.settingsTextTertiary)
             settingsDropdown(
-                selection: $visualStyle,
-                options: RecordingVisualStyle.allCases.map { ($0.rawValue, $0.displayName) }
+                selection: Binding(
+                    get: { showsRecordingPanel ? "on" : "off" },
+                    set: { showsRecordingPanel = $0 == "on" }
+                ),
+                options: [
+                    ("on", L("显示", "Show")),
+                    ("off", L("关闭", "Off")),
+                ]
             )
         }
         .padding(.vertical, 6)

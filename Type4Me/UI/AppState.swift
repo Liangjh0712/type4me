@@ -12,31 +12,31 @@ enum FloatingBarPhase: Equatable {
   case error
 }
 
-enum RecordingVisualStyle: String, CaseIterable {
-  static let storageKey = "tf_visualStyle"
-  static let defaultValue = Self.timeline.rawValue
+/// Whether the transcript deck appears while recording. When off, only the
+/// screen-bottom tally lamp is shown (minimal mode).
+///
+/// Replaces the retired 录音动效 dropdown (lines/particles/levels): after the
+/// Signal Desk redesign the deck + meter bridge + tally lamp are the single
+/// recording visualization, so the only live choice is panel or no panel.
+enum RecordingPanelPreference {
+  static let storageKey = "tf_showsRecordingPanel"
+  private static let legacyKey = "tf_visualStyle"
 
-  case classic
-  case dual
-  case timeline
-  case hidden
-
-  var displayName: String {
-    switch self {
-    case .classic: return L("线条", "Lines")
-    case .dual: return L("粒子云", "Particles")
-    case .timeline: return L("电平", "Levels")
-    case .hidden: return L("关闭", "Off")
+  static func showsRecordingPanel(userDefaults: UserDefaults = .standard) -> Bool {
+    if let value = userDefaults.object(forKey: storageKey) as? Bool {
+      return value
     }
+    // Pre-migration installs: only "hidden" meant no panel.
+    return userDefaults.string(forKey: legacyKey) != "hidden"
   }
 
-  var showsRecordingPanel: Bool { self != .hidden }
-
-  static func current(userDefaults: UserDefaults = .standard) -> Self {
-    guard let raw = userDefaults.string(forKey: storageKey),
-      let style = Self(rawValue: raw)
-    else { return .timeline }
-    return style
+  /// One-time migration of the retired dropdown value into the boolean key.
+  static func migrateLegacyValueIfNeeded(userDefaults: UserDefaults = .standard) {
+    guard userDefaults.object(forKey: storageKey) == nil,
+      let legacy = userDefaults.string(forKey: legacyKey)
+    else { return }
+    userDefaults.set(legacy != "hidden", forKey: storageKey)
+    userDefaults.removeObject(forKey: legacyKey)
   }
 }
 
@@ -1041,6 +1041,7 @@ final class AppState {
   #endif
 
   init() {
+    RecordingPanelPreference.migrateLegacyValueIfNeeded()
     let modes = ModeStorage().load()
     availableModes = modes
     currentMode =
@@ -1066,7 +1067,7 @@ final class AppState {
     finalOptimizationFailureMessage = nil
     resetLiveOptimization()
     barPhase = .preparing
-    if RecordingVisualStyle.current().showsRecordingPanel {
+    if RecordingPanelPreference.showsRecordingPanel() {
       onShowPanel?()
     } else {
       onHidePanel?()

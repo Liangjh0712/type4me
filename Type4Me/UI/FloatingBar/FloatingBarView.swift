@@ -65,18 +65,13 @@ struct FloatingBarView<S: FloatingBarState>: View {
   @State private var recordingPeakWidth: CGFloat = TF.barHeight
   @State private var processingStartDate: Date?
   @State private var doneStartDate: Date?
-  @AppStorage(RecordingVisualStyle.storageKey) private var visualStyle = RecordingVisualStyle
-    .defaultValue
+  @AppStorage(RecordingPanelPreference.storageKey) private var showsRecordingPanel = true
 
   // MARK: - Transcript Popup
 
-  private var recordingVisualStyle: RecordingVisualStyle {
-    RecordingVisualStyle(rawValue: visualStyle) ?? .timeline
-  }
-
   private var showExpandedRecording: Bool {
     if state.finalOptimizationFailureMessage != nil { return true }
-    guard recordingVisualStyle.showsRecordingPanel else { return false }
+    guard showsRecordingPanel else { return false }
     switch state.barPhase {
     case .preparing, .recording, .processing:
       return true
@@ -90,7 +85,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
   private var shouldRenderCapsule: Bool {
     guard state.barPhase != .hidden else { return false }
     if showExpandedRecording { return false }
-    if !recordingVisualStyle.showsRecordingPanel,
+    if !showsRecordingPanel,
       state.barPhase == .preparing || state.barPhase == .recording
     {
       return false
@@ -947,12 +942,6 @@ struct FloatingBarView<S: FloatingBarState>: View {
     ZStack {
       glassBackground
 
-      if state.barPhase == .recording {
-        AudioRipple(meter: state.audioLevel, style: recordingVisualStyle)
-          .id(recordingVisualStyle.rawValue)
-          .transition(.opacity)
-      }
-
       if state.barPhase == .processing || state.barPhase == .recovering || state.barPhase == .done {
         ProcessingProgress(
           finishTime: state.processingFinishTime,
@@ -1638,200 +1627,6 @@ struct ProcessingProgress: View {
   }
 }
 
-// MARK: - Audio Ripple
-
-/// Audio visualizer with three selectable styles:
-/// - classic: two sine-wave stroke lines
-/// - dual: particles clustered around two sine-wave spines
-/// - timeline: scrolling level history, right = now
-struct AudioRipple: View {
-
-  let meter: AudioLevelMeter
-  let style: RecordingVisualStyle
-  @State private var smootherSlow = LevelSmoother(timeConstant: 0.8)
-  @State private var smootherFast = LevelSmoother(timeConstant: 0)
-  @State private var startTime: Double = 0
-  @State private var levelTimeline = LevelTimeline()
-
-  var body: some View {
-    TimelineView(.animation) { timeline in
-      let time = timeline.date.timeIntervalSinceReferenceDate
-      Canvas { context, size in
-        switch style {
-        case .classic: drawClassicWaves(context: &context, size: size, time: time)
-        case .dual: drawDualSpine(context: &context, size: size, time: time)
-        case .timeline, .hidden: drawTimeline(context: &context, size: size, time: time)
-        }
-      }
-    }
-    .drawingGroup()
-  }
-
-  // MARK: - Classic Waves (stroke lines only)
-
-  private func drawClassicWaves(context: inout GraphicsContext, size: CGSize, time: Double) {
-    let rawLevel = CGFloat(max(0.0, min(1.0, meter.current)))
-    smootherSlow.target = max(0.012, rawLevel)
-    let level = smootherSlow.update(time: time)
-    let amp = min(1.0, pow(max(0, (level - 0.012) / 0.45), 0.7))
-    let center = size.height / 2
-    let maxAmp = size.height * (0.15 + amp * 0.35)
-    let opacity = 0.4 + Double(amp) * 0.4
-
-    for w in 0..<2 {
-      let period: Double = w == 0 ? 130.0 : 90.0
-      let speed: Double = w == 0 ? 1.0 : 0.7
-      let phase: Double = w == 0 ? 0.0 : 1.3
-
-      var path = Path()
-      var first = true
-      var xi: CGFloat = 0
-      while xi <= size.width {
-        let nx = Double(xi / size.width)
-        let env = 0.07 + pow(nx, 1.5) * (0.10 + Double(amp))
-        let y =
-          center + CGFloat(sin(Double(xi) / period * .pi * 2 + time * speed * .pi + phase) * env)
-          * maxAmp
-        if first {
-          path.move(to: CGPoint(x: xi, y: y))
-          first = false
-        } else {
-          path.addLine(to: CGPoint(x: xi, y: y))
-        }
-        xi += 2
-      }
-
-      context.stroke(
-        path,
-        with: .linearGradient(
-          Gradient(colors: [
-            Color(red: 0.82, green: 0.85, blue: 1.0).opacity(opacity * 0.7),
-            Color(red: 0.40, green: 0.60, blue: 1.0).opacity(opacity),
-          ]),
-          startPoint: CGPoint(x: 0, y: center),
-          endPoint: CGPoint(x: size.width, y: center)
-        ), lineWidth: 1.5)
-    }
-  }
-
-  // MARK: - Dual Spine Particles
-
-  private func drawDualSpine(context: inout GraphicsContext, size: CGSize, time: Double) {
-    let rawLevel = CGFloat(max(0.0, min(1.0, meter.current)))
-    smootherSlow.target = max(0.012, rawLevel)
-    let level = smootherSlow.update(time: time)
-    let amp = min(1.0, pow(max(0, (level - 0.012) / 0.45), 0.7))
-    let center = size.height / 2
-    let maxAmp = size.height * (0.15 + amp * 0.35)
-    let levelBright: CGFloat = 0.75 + amp * 0.25
-    let bandHalf: CGFloat = size.height * (0.2 + amp * 0.3)
-
-    var xi: CGFloat = 0
-    var col = 0
-    while xi <= size.width {
-      let nx = xi / size.width
-      let env = 0.07 + pow(Double(nx), 1.5) * (0.10 + Double(amp))
-      let s1y = center + CGFloat(sin(Double(xi) / 130.0 * .pi * 2 + time * .pi) * env) * maxAmp
-      let s2y = center + CGFloat(sin(Double(xi) / 90.0 * .pi * 2 + time * 0.7 * .pi) * env) * maxAmp
-      let localAmp = (abs(s1y - center) + abs(s2y - center)) / 2
-      let localIntensity = min(1.0, localAmp / max(maxAmp * 0.5, 1))
-      let posBright: CGFloat = 0.6 + pow(nx, 0.8) * 0.4
-
-      let cr: Double = 0.82 - Double(nx) * 0.42
-      let cg: Double = 0.85 - Double(nx) * 0.25
-      let coreColor = Color(red: cr, green: cg, blue: 1.0)
-
-      let count = 160 + Int(localIntensity * 120)
-      let posScale: CGFloat = 0.4 + pow(nx, 0.8) * 0.6
-      let localBand = bandHalf * posScale * (0.5 + amp * 1.0)
-
-      for j in 0..<count {
-        let h1 = hash(col, j)
-        let h2 = hash(col, j &+ 53)
-        let h3 = hash(col, j &+ 137)
-        let h5 = hash(col, j &+ 293)
-
-        let spineY = h5 > 0.5 ? s1y : s2y
-        let scatter = (h1 - 0.5) * 2
-        let py = spineY + scatter * abs(scatter) * localBand
-
-        let distFromSpine = abs(py - spineY)
-        let normDist = distFromSpine / max(localBand, 1)
-        let distFade: CGFloat = normDist < 0.25 ? 1.0 : max(0, 1.0 - (normDist - 0.25) / 0.75)
-
-        let freq = 3.0 + Double(h2) * 10.0
-        let twinkle: CGFloat = 0.45 + 0.55 * CGFloat(sin(time * freq + Double(h3) * .pi * 2))
-
-        let baseOp = posBright * distFade * twinkle * levelBright
-        guard baseOp > 0.02 else { continue }
-
-        let dotR = CGRect(x: xi - 0.25, y: py - 0.25, width: 0.5, height: 0.5)
-        context.fill(
-          Circle().path(in: dotR), with: .color(coreColor.opacity(Double(min(1.0, baseOp)))))
-      }
-
-      col += 1
-      xi += 2
-    }
-  }
-
-  // MARK: - Timeline Particles (scrolling history)
-
-  private func drawTimeline(context: inout GraphicsContext, size: CGSize, time: Double) {
-    if startTime == 0 { DispatchQueue.main.async { startTime = time } }
-    let rawLevel = CGFloat(max(0.0, min(1.0, meter.current)))
-    smootherFast.target = max(0.005, rawLevel)
-    let smoothed = smootherFast.update(time: time)
-    let levels = levelTimeline.update(time: time, currentLevel: smoothed)
-
-    let center = size.height / 2
-    let bufCount = levels.count
-    let colCount = Int(size.width / 2) + 1
-
-    for col in 0..<colCount {
-      let xi = CGFloat(col) * 2
-      let nx = xi / size.width
-
-      let histIdx = min(Int(nx * CGFloat(bufCount - 1)), bufCount - 1)
-      let histLevel = levels[histIdx]
-      let amp = min(1.0, pow(max(0, (histLevel - 0.08) / 0.62), 0.85))
-
-      let bandHalf = size.height * (0.03 + amp * 0.45)
-      let posBright: CGFloat = 0.4 + pow(nx, 0.8) * 0.3
-      let levelBright: CGFloat = 0.45 + amp * 0.35
-
-      let cr: Double = 0.82 - Double(nx) * 0.42
-      let cg: Double = 0.85 - Double(nx) * 0.25
-      let coreColor = Color(red: cr, green: cg, blue: 1.0)
-
-      for j in 0..<180 {
-        let h1 = hash(col, j)
-        let h2 = hash(col, j &+ 53)
-        let h3 = hash(col, j &+ 137)
-
-        let scatter = (h1 - 0.5) * 2
-        let py = center + scatter * abs(scatter) * bandHalf
-
-        let freq = 3.0 + Double(h2) * 10.0
-        let twinkle: CGFloat = 0.45 + 0.55 * CGFloat(sin(time * freq + Double(h3) * .pi * 2))
-
-        let baseOp = posBright * twinkle * levelBright
-        guard baseOp > 0.02 else { continue }
-
-        let dotR = CGRect(x: xi - 0.25, y: py - 0.25, width: 0.5, height: 0.5)
-        context.fill(
-          Circle().path(in: dotR), with: .color(coreColor.opacity(Double(min(1.0, baseOp)))))
-      }
-    }
-  }
-
-  private func hash(_ a: Int, _ b: Int) -> CGFloat {
-    var h = a &* 374_761_393 &+ b &* 668_265_263
-    h = (h ^ (h >> 13)) &* 1_274_126_177
-    h = h ^ (h >> 16)
-    return CGFloat(abs(h) % 10000) / 10000.0
-  }
-}
 
 /// Frame-rate-independent exponential smoothing for audio level.
 private final class LevelSmoother {

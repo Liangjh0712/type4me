@@ -207,7 +207,10 @@ final class FloatingBarController {
   private var lastPanelCollapsed = false
   private var recenterPanelOnNextResize = false
   private var collapsedPanelOrigin: NSPoint?
-  private var screenBottomIndicatorOrigin: NSPoint?
+  /// Last position of the bottom indicator, keyed by display ID. The indicator
+  /// always appears on the target (frontmost) screen; a position is only
+  /// restored when recording again on the same display where the user left it.
+  private var screenBottomIndicatorOrigins: [NSNumber: NSPoint] = [:]
 
   init(state: AppState) {
     self.state = state
@@ -443,18 +446,11 @@ final class FloatingBarController {
 
     configureForCurrentTarget()
     guard let targetScreen else { return }
-    if let screenBottomIndicatorOrigin {
+    if let displayID = Self.displayID(for: targetScreen),
+      let savedOrigin = screenBottomIndicatorOrigins[displayID]
+    {
       let indicatorSize = screenBottomIndicatorPanel.frame.size
-      let indicatorRect = NSRect(origin: screenBottomIndicatorOrigin, size: indicatorSize)
-      let restoreScreen =
-        NSScreen.screens.first {
-          $0.visibleFrame.contains(NSPoint(x: indicatorRect.midX, y: indicatorRect.midY))
-        } ?? targetScreen
-      let origin = constrainedPanelOrigin(
-        screenBottomIndicatorOrigin,
-        size: indicatorSize,
-        in: restoreScreen
-      )
+      let origin = constrainedPanelOrigin(savedOrigin, size: indicatorSize, in: targetScreen)
       screenBottomIndicatorPanel.setFrame(
         NSRect(origin: origin, size: indicatorSize),
         display: false
@@ -469,9 +465,20 @@ final class FloatingBarController {
 
   private func hideScreenBottomIndicator() {
     guard screenBottomIndicatorPanel.isVisible else { return }
-    screenBottomIndicatorOrigin = screenBottomIndicatorPanel.frame.origin
+    let frame = screenBottomIndicatorPanel.frame
+    if let screen = NSScreen.screens.first(where: {
+      $0.frame.contains(NSPoint(x: frame.midX, y: frame.midY))
+    }),
+      let displayID = Self.displayID(for: screen)
+    {
+      screenBottomIndicatorOrigins[displayID] = frame.origin
+    }
     screenBottomIndicatorPanel.alphaValue = 0
     screenBottomIndicatorPanel.orderOut(nil)
+  }
+
+  private static func displayID(for screen: NSScreen) -> NSNumber? {
+    screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
   }
 
   func show() {

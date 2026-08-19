@@ -270,6 +270,9 @@ actor RecognitionSession {
 
   private var speculativeLLMTask: Task<String?, Never>?
   private var speculativeLLMText: String = ""
+  /// Last successfully completed speculative result; reused at stop when the
+  /// transcript hasn't drifted, so pause-then-stop inserts without re-requesting.
+  private var speculativeLLMResult: String?
   private var speculativeLLMModeID: UUID?
   private var speculativeLLMPrompt: String?
   private var speculativeDebounceTask: Task<Void, Never>?
@@ -1207,9 +1210,13 @@ actor RecognitionSession {
     state = .finishing
     maxDurationTask?.cancel()
     maxDurationTask = nil
-    // Preview work is never authoritative. Cancel it before any stop-time await
-    // so it cannot consume quota or surface while final ASR is being collected.
-    cancelSpeculativeLLM()
+    // Preview scheduling stops here, but a request already in flight is kept
+    // alive: when its source still matches the session-final transcript, the
+    // stop path awaits it below instead of firing an identical final request.
+    // (state is already .finishing, so its completion emits no events and
+    // reschedules nothing — only the return value is consumed.)
+    speculativeDebounceTask?.cancel()
+    speculativeDebounceTask = nil
 
     let stopT0 = ContinuousClock.now
     SystemVolumeManager.restore()
@@ -1431,7 +1438,48 @@ actor RecognitionSession {
       // Apply snippet replacements before LLM (e.g. "我的邮箱" → actual email)
       finalText = SnippetStorage.applyEffective(to: finalText, bundleId: targetBundleId)
 
-      if Self.requiresAuthoritativeFinalLLM(needsLLM: needsLLM, finalText: finalText) {
+      // Pause-then-stop with no further speech: a completed speculative preview
+      // whose source still matches the session-final transcript is already the
+      // answer — insert it instead of firing a redundant final request.
+      //
+      // If the preview request is still in flight (pause shorter than the
+      // debounce + round trip), await it rather than cancelling and re-asking
+      // the identical question.
+      if speculativeLLMResult == nil,
+        let inFlight = speculativeLLMTask,
+        Self.speculativePreviewMatchesFinal(
+          sourceText: speculativeLLMText,
+          finalText: finalText,
+          speculativeModeID: speculativeLLMModeID,
+          currentModeID: currentMode.id
+        )
+      {
+        DebugFileLogger.log("stop: awaiting in-flight speculative preview")
+        if let awaited = await awaitWithTimeout(inFlight, after: .seconds(15)) {
+          let cleaned = awaited.collapsingExtraSpaces
+          if !cleaned.isEmpty {
+            speculativeLLMResult = cleaned
+          }
+        }
+      }
+
+      let reusablePreview = Self.reusableSpeculativeResult(
+        result: speculativeLLMResult,
+        sourceText: speculativeLLMText,
+        finalText: finalText,
+        speculativeModeID: speculativeLLMModeID,
+        currentModeID: currentMode.id
+      )
+
+      if let reusablePreview,
+        Self.requiresAuthoritativeFinalLLM(needsLLM: needsLLM, finalText: finalText)
+      {
+        DebugFileLogger.log(
+          "stop: reusing completed speculative preview (\(reusablePreview.count) chars)")
+        processedText = reusablePreview
+        finalText = reusablePreview
+        onASREvent?(.processingResult(text: reusablePreview))
+      } else if Self.requiresAuthoritativeFinalLLM(needsLLM: needsLLM, finalText: finalText) {
         state = .postProcessing
         if let llmConfig = loadEffectiveLLMConfig() {
           DebugFileLogger.log(
@@ -2146,6 +2194,7 @@ actor RecognitionSession {
                 sourceText: rawSourceText
               ))
           } else {
+            self.speculativeLLMResult = cleaned
             self.onASREvent?(
               .liveOptimizationResult(
                 text: cleaned,
@@ -2209,6 +2258,43 @@ actor RecognitionSession {
     needsLLM && !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
+  /// True when the speculative request's source still matches the session-final
+  /// transcript (exact / punctuation / whitespace drift only) for the same mode.
+  /// Mac Action modes never match: their "result" is a command reply that must
+  /// go through dispatch, not insertion.
+  static func speculativePreviewMatchesFinal(
+    sourceText: String,
+    finalText: String,
+    speculativeModeID: UUID?,
+    currentModeID: UUID
+  ) -> Bool {
+    guard speculativeModeID == currentModeID,
+      currentModeID != ProcessingMode.macActionId,
+      !sourceText.isEmpty
+    else { return false }
+    return TranscriptDiff.classify(source: sourceText, final: finalText).canReuseLLMResult
+  }
+
+  /// A completed in-recording preview is insertion-eligible at stop when its
+  /// source still matches the session-final transcript.
+  static func reusableSpeculativeResult(
+    result: String?,
+    sourceText: String,
+    finalText: String,
+    speculativeModeID: UUID?,
+    currentModeID: UUID
+  ) -> String? {
+    guard let result, !result.isEmpty,
+      speculativePreviewMatchesFinal(
+        sourceText: sourceText,
+        finalText: finalText,
+        speculativeModeID: speculativeModeID,
+        currentModeID: currentModeID
+      )
+    else { return nil }
+    return result
+  }
+
   private func cancelSpeculativeLLM() {
     speculativeDebounceTask?.cancel()
     speculativeDebounceTask = nil
@@ -2226,10 +2312,44 @@ actor RecognitionSession {
     speculativeLLMTask?.cancel()
     speculativeLLMTask = nil
     speculativeLLMText = ""
+    speculativeLLMResult = nil
     speculativeLLMModeID = nil
     speculativeLLMPrompt = nil
     speculativeThrottle.reset()
     speculativeLLMUnavailable = false
+  }
+
+  /// Await an in-flight speculative task with a hard deadline; on timeout the
+  /// task is cancelled and nil is returned so the caller can fire the final
+  /// request itself.
+  private func awaitWithTimeout(
+    _ task: Task<String?, Never>,
+    after duration: Duration
+  ) async -> String? {
+    await withCheckedContinuation { continuation in
+      let finished = OSAllocatedUnfairLock(initialState: false)
+      Task {
+        let value = await task.value
+        if finished.withLock({
+          let old = $0
+          $0 = true
+          return !old
+        }) {
+          continuation.resume(returning: value)
+        }
+      }
+      Task {
+        try? await Task.sleep(for: duration)
+        if finished.withLock({
+          let old = $0
+          $0 = true
+          return !old
+        }) {
+          task.cancel()
+          continuation.resume(returning: nil)
+        }
+      }
+    }
   }
 
   // MARK: - Timeout Helper

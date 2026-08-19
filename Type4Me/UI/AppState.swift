@@ -1163,10 +1163,13 @@ final class AppState {
       liveOptimizationSourceText = sourceText
       liveOptimizationPhase = .stale
     case .prefixAdded, .semanticChange:
-      DebugFileLogger.log("discarding stale live optimization result diff=\(diff.type.rawValue)")
-      liveOptimizedText = ""
-      liveOptimizationSourceText = ""
-      liveOptimizationPhase = .waiting
+      // ASR rewrote earlier text while the request was in flight. The result
+      // still reflects what the user said moments ago — show it as stale
+      // instead of dropping back to an empty "waiting" column.
+      DebugFileLogger.log("keeping stale live optimization result diff=\(diff.type.rawValue)")
+      liveOptimizedText = result
+      liveOptimizationSourceText = sourceText
+      liveOptimizationPhase = .stale
     }
   }
 
@@ -1426,10 +1429,11 @@ final class AppState {
         liveOptimizationPhase = .stale
       }
     case .prefixAdded, .semanticChange:
-      liveOptimizedText = ""
-      liveOptimizationSourceText = ""
+      // Keep the last good preview visible as stale; the next speculative
+      // request refreshes it. Clearing it made the column flicker back to
+      // "waiting for a pause" on every ASR self-correction.
       if liveOptimizationPhase != .updating {
-        liveOptimizationPhase = .waiting
+        liveOptimizationPhase = .stale
       }
     }
   }

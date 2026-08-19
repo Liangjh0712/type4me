@@ -189,4 +189,62 @@ final class RecognitionSessionTests: XCTestCase {
     )
     XCTAssertEqual("第 3 个".removingCJKLatinSpaces, "第3个")
   }
+
+  // MARK: - Speculative preview reuse at stop
+
+  private func reuse(
+    result: String? = "优化后的稿子。",
+    source: String = "优化后的稿子",
+    final: String = "优化后的稿子",
+    speculativeMode: UUID? = UUID(),
+    currentMode: UUID = UUID()
+  ) -> String? {
+    RecognitionSession.reusableSpeculativeResult(
+      result: result,
+      sourceText: source,
+      finalText: final,
+      speculativeModeID: speculativeMode,
+      currentModeID: currentMode
+    )
+  }
+
+  func testSpeculativePreviewReusedWhenTranscriptUnchanged() {
+    let mode = UUID()
+    XCTAssertEqual(
+      reuse(source: "今天下午三点开会", final: "今天下午三点开会", speculativeMode: mode, currentMode: mode),
+      "优化后的稿子。"
+    )
+  }
+
+  func testSpeculativePreviewReusedWhenOnlyPunctuationDrifted() {
+    let mode = UUID()
+    XCTAssertEqual(
+      reuse(source: "今天下午三点开会", final: "今天下午三点开会。", speculativeMode: mode, currentMode: mode),
+      "优化后的稿子。"
+    )
+  }
+
+  func testSpeculativePreviewNotReusedWhenTranscriptSemanticallyChanged() {
+    let mode = UUID()
+    XCTAssertNil(
+      reuse(source: "今天下午三点开会", final: "今天下午四点开会", speculativeMode: mode, currentMode: mode)
+    )
+  }
+
+  func testSpeculativePreviewNotReusedAfterModeSwitch() {
+    XCTAssertNil(reuse(speculativeMode: UUID(), currentMode: UUID()))
+  }
+
+  func testSpeculativePreviewNotReusedWhenMissing() {
+    let mode = UUID()
+    XCTAssertNil(reuse(result: nil, speculativeMode: mode, currentMode: mode))
+    XCTAssertNil(reuse(result: "", speculativeMode: mode, currentMode: mode))
+    XCTAssertNil(reuse(source: "", speculativeMode: mode, currentMode: mode))
+  }
+
+  func testSpeculativePreviewNeverReusedForMacAction() {
+    XCTAssertNil(
+      reuse(speculativeMode: ProcessingMode.macActionId, currentMode: ProcessingMode.macActionId)
+    )
+  }
 }

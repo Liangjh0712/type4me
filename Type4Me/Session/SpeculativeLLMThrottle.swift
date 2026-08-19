@@ -5,7 +5,7 @@ struct SpeculativeLLMThrottle: Sendable {
     static let minimumTextLength = 4
     static let minimumCharacterIncrement = 20
     static let minimumRequestInterval: Duration = .seconds(5)
-    static let maximumRequestsPerSession = 3
+    static let maximumRequestsPerSession = 10
 
     private static let correctionTriggers = [
         "不对", "哦不", "不是", "算了", "改成", "应该是", "重说",

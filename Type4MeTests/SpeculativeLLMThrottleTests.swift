@@ -113,21 +113,23 @@ final class SpeculativeLLMThrottleTests: XCTestCase {
         )
     }
 
-    func testSessionRequestCapStopsAfterThreePreviews() {
+    func testSessionRequestCapStopsAfterLimit() {
         var throttle = SpeculativeLLMThrottle()
         let start = ContinuousClock.now
         var text = "测试一下"
+        var lastNow = start
         for index in 0..<SpeculativeLLMThrottle.maximumRequestsPerSession {
             if index > 0 { text += String(repeating: "增", count: 20) }
             let now = start + .seconds(index * 5)
+            lastNow = now
             XCTAssertEqual(throttle.submit(text, now: now), .debounce)
             XCTAssertTrue(throttle.beginDebouncedRequest(for: text, now: now))
             _ = throttle.requestCompleted(input: text)
         }
 
         let extra = text + String(repeating: "额", count: 20)
-        XCTAssertEqual(throttle.submit(extra, now: start + .seconds(15)), .limitReached)
-        XCTAssertEqual(throttle.requestCount, 3)
+        XCTAssertEqual(throttle.submit(extra, now: lastNow + .seconds(5)), .limitReached)
+        XCTAssertEqual(throttle.requestCount, SpeculativeLLMThrottle.maximumRequestsPerSession)
     }
 
     func testRateLimitCircuitSuppressesRemainingPreviewsUntilReset() {

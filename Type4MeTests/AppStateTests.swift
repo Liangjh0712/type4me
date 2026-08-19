@@ -291,7 +291,7 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.liveOptimizedText.isEmpty)
   }
 
-  func testOptimizationForDifferentSourceIsDiscarded() {
+  func testOptimizationForDifferentSourceStaysVisibleAsStale() {
     let appState = AppState()
     appState.currentMode = .formalWriting
     appState.startRecording()
@@ -304,11 +304,11 @@ final class AppStateTests: XCTestCase {
       modeID: appState.currentMode.id
     )
 
-    XCTAssertEqual(appState.liveOptimizationPhase, .waiting)
-    XCTAssertTrue(appState.liveOptimizedText.isEmpty)
+    XCTAssertEqual(appState.liveOptimizationPhase, .stale)
+    XCTAssertEqual(appState.liveOptimizedText, "第二版优化稿")
   }
 
-  func testSemanticTranscriptRewriteClearsVisiblePreview() {
+  func testSemanticTranscriptRewriteKeepsPreviewAsStale() {
     let appState = AppState()
     appState.currentMode = .formalWriting
     appState.startRecording()
@@ -322,9 +322,9 @@ final class AppStateTests: XCTestCase {
 
     appState.setLiveTranscript(makeTranscript("重新帮我测试一下，因为"))
 
-    XCTAssertEqual(appState.liveOptimizationPhase, .waiting)
-    XCTAssertTrue(appState.liveOptimizedText.isEmpty)
-    XCTAssertTrue(appState.liveOptimizationSourceText.isEmpty)
+    XCTAssertEqual(appState.liveOptimizationPhase, .stale)
+    XCTAssertFalse(appState.liveOptimizedText.isEmpty)
+    XCTAssertFalse(appState.liveOptimizationSourceText.isEmpty)
   }
 
   func testFormalWritingPromptMarksCommandsAsTranscriptData() {

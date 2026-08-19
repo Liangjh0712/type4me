@@ -63,6 +63,30 @@ enum TF {
   static let settingsAccentRed = Color(red: 0.80, green: 0.28, blue: 0.22)
   static let settingsAccentBlue = Color(red: 0.20, green: 0.45, blue: 0.75)
 
+  // MARK: Signal Desk Palette (floating deck + tally lamp)
+
+  /// Deep teal-ink glass tones lifted from the app icon.
+  static let ink0 = Color(red: 0.031, green: 0.067, blue: 0.102)
+  static let ink1 = Color(red: 0.051, green: 0.102, blue: 0.141)
+  static let ink2 = Color(red: 0.078, green: 0.153, blue: 0.212)
+  static let ink3 = Color(red: 0.106, green: 0.200, blue: 0.278)
+
+  /// Warm paper text tones.
+  static let paper = Color(red: 0.949, green: 0.925, blue: 0.875)
+  static let paperDim = Color(red: 0.949, green: 0.925, blue: 0.875).opacity(0.60)
+  static let paperFaint = Color(red: 0.949, green: 0.925, blue: 0.875).opacity(0.34)
+
+  /// Warm hairline borders on ink glass.
+  static let deckLine = Color(red: 0.922, green: 0.894, blue: 0.831).opacity(0.11)
+  static let deckLineStrong = Color(red: 0.922, green: 0.894, blue: 0.831).opacity(0.20)
+
+  /// Teal signal color: meter bridge, processing ring, live LEDs.
+  static let signalTeal = Color(red: 0.373, green: 0.827, blue: 0.753)
+
+  /// Hot filament amber for the tally lamp core and active LEDs.
+  static let lampAmber = Color(red: 1.0, green: 0.714, blue: 0.282)
+  static let lampAmberHot = Color(red: 1.0, green: 0.890, blue: 0.690)
+
   // MARK: Spacing
 
   static let spacingXS: CGFloat = 4
@@ -84,7 +108,7 @@ enum TF {
   static let barHeight: CGFloat = 40
   static let barBottomOffset: CGFloat = 32
   static let screenBottomIndicatorWidth: CGFloat = 132
-  static let screenBottomIndicatorHeight: CGFloat = 116
+  static let screenBottomIndicatorHeight: CGFloat = 130
 
   // MARK: Transcript Popup (hover preview above bar)
 
@@ -96,7 +120,8 @@ enum TF {
   static let topTranscriptPanelOuterInset: CGFloat = 10
   static let topTranscriptPanelHeaderHeight: CGFloat = 34
   static let topTranscriptPanelCollapsedHeaderHeight: CGFloat = 34
-  static let topTranscriptPanelColumnHeaderHeight: CGFloat = 22
+  static let topTranscriptPanelMeterBridgeHeight: CGFloat = 13
+  static let topTranscriptPanelColumnHeaderHeight: CGFloat = 24
   static let topTranscriptPanelHorizontalPadding: CGFloat = 12
   static let topTranscriptPanelBodyTopPadding: CGFloat = 6
   static let topTranscriptPanelBodyBottomPadding: CGFloat = 8

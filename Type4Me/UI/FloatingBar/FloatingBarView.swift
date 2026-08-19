@@ -35,6 +35,7 @@ protocol FloatingBarState: AnyObject, Observable {
   func selectPanelMode(_ mode: ProcessingMode)
   func toggleTranscriptPanelCollapsed()
   func requestPanelStop()
+  func requestPanelCancel()
   func retryFinalOptimization()
   func insertRawAfterOptimizationFailure()
 }
@@ -358,68 +359,45 @@ struct FloatingBarView<S: FloatingBarState>: View {
     return VStack(spacing: 0) {
       topPanelHeader
       if !state.isTranscriptPanelCollapsed {
-        Divider().overlay(.white.opacity(0.08))
+        meterBridge
         topPanelColumns
       }
     }
     .frame(width: width)
-    .background(topPanelGlassBackground)
-    .clipShape(
-      RoundedRectangle(cornerRadius: state.isTranscriptPanelCollapsed ? 10 : 12, style: .continuous)
-    )
+    .background(deckGlassBackground)
+    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
     .overlay {
-      RoundedRectangle(cornerRadius: state.isTranscriptPanelCollapsed ? 10 : 12, style: .continuous)
-        .stroke(
-          LinearGradient(
-            colors: [.white.opacity(0.24), .white.opacity(0.07), TF.amber.opacity(0.08)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-          ),
-          lineWidth: 1
-        )
+      RoundedRectangle(cornerRadius: 13, style: .continuous)
+        .stroke(TF.deckLineStrong, lineWidth: 1)
     }
-    .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+    .shadow(color: .black.opacity(0.30), radius: 22, y: 9)
+    .shadow(color: .black.opacity(0.20), radius: 5, y: 2)
+  }
+
+  // MARK: - Meter Bridge
+
+  /// Live VU hairline strip between the channel strip and the transcript columns.
+  private var meterBridge: some View {
+    MeterBridge(meter: state.audioLevel, active: state.barPhase == .recording)
+      .frame(height: TF.topTranscriptPanelMeterBridgeHeight)
+      .background(Color.black.opacity(0.22))
+      .overlay(alignment: .top) { Rectangle().fill(TF.deckLine).frame(height: 1) }
+      .overlay(alignment: .bottom) { Rectangle().fill(TF.deckLine).frame(height: 1) }
   }
 
   private var topPanelHeader: some View {
-    HStack(spacing: 6) {
-      if state.barPhase == .recording || state.barPhase == .preparing {
-        RecordingDot(meter: state.audioLevel)
-          .scaleEffect(0.42)
-          .frame(width: 12, height: 12)
-      } else if state.barPhase == .done {
-        Image(systemName: "checkmark.circle.fill")
-          .foregroundStyle(TF.success)
-      } else if state.finalOptimizationFailureMessage != nil || state.barPhase == .error {
-        Image(systemName: "exclamationmark.circle.fill")
-          .foregroundStyle(TF.settingsAccentRed)
-      } else {
-        ProcessingOrb()
-          .scaleEffect(0.42)
-          .frame(width: 12, height: 12)
-      }
+    HStack(spacing: 10) {
+      deckTally
+
+      headerHairline
 
       panelModeMenu
 
-      Rectangle()
-        .fill(.white.opacity(0.10))
-        .frame(width: 1, height: 14)
+      headerHairline
 
       llmTimingStatus
 
       Spacer(minLength: 4)
-
-      if let startDate = state.recordingStartDate {
-        HStack(spacing: 4) {
-          Text(state.barPhase == .recording ? L("录音", "REC") : L("已停止", "STOPPED"))
-          RecordingTimer(
-            startDate: startDate,
-            endDate: state.barPhase == .recording ? nil : state.recordingStopDate
-          )
-        }
-        .font(.system(size: 9, weight: .medium))
-        .foregroundStyle(.white.opacity(0.48))
-      }
 
       topPanelButton(
         systemName: state.isTranscriptPanelCollapsed ? "chevron.down" : "chevron.up",
@@ -432,21 +410,96 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
       if state.barPhase == .recording || state.barPhase == .preparing {
         topPanelButton(
+          systemName: "xmark",
+          accessibilityLabel: L("撤销并丢弃本次录音", "Cancel and discard this recording")
+        ) {
+          state.requestPanelCancel()
+        }
+
+        topPanelButton(
           systemName: "stop.fill",
           accessibilityLabel: L("停止并插入", "Stop and insert"),
-          tint: TF.settingsAccentRed
+          tint: TF.recording
         ) {
           state.requestPanelStop()
         }
       }
     }
-    .padding(.horizontal, 10)
+    .padding(.horizontal, 12)
     .frame(
       height: state.isTranscriptPanelCollapsed
         ? TF.topTranscriptPanelCollapsedHeaderHeight
         : TF.topTranscriptPanelHeaderHeight
     )
-    .background(.black.opacity(0.035))
+    .background(
+      LinearGradient(
+        colors: [.white.opacity(0.035), .black.opacity(0.10)],
+        startPoint: .top,
+        endPoint: .bottom
+      )
+    )
+  }
+
+  /// Phase status cluster at the left of the channel strip:
+  /// tally lamp + mono label + recording clock.
+  @ViewBuilder
+  private var deckTally: some View {
+    HStack(spacing: 7) {
+      switch state.barPhase {
+      case .preparing, .recording:
+        TallyDot()
+        tallyLabel(L("录音", "REC"))
+      case .done:
+        Image(systemName: "checkmark.circle.fill")
+          .font(.system(size: 11))
+          .foregroundStyle(TF.success)
+        tallyLabel(L("完成", "DONE"))
+      case .error:
+        Image(systemName: "exclamationmark.circle.fill")
+          .font(.system(size: 11))
+          .foregroundStyle(TF.settingsAccentRed)
+        tallyLabel(L("失败", "ERROR"))
+      case .processing, .recovering:
+        if state.finalOptimizationFailureMessage != nil {
+          Image(systemName: "exclamationmark.circle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(TF.settingsAccentRed)
+          tallyLabel(L("失败", "ERROR"))
+        } else {
+          PreparingDot(color: TF.signalTeal)
+            .scaleEffect(0.5)
+            .frame(width: 12, height: 12)
+          tallyLabel(L("优化", "PROC"))
+        }
+      case .hidden:
+        EmptyView()
+      }
+    }
+  }
+
+  private func tallyLabel(_ label: String) -> some View {
+    HStack(spacing: 6) {
+      Text(label)
+      if let startDate = state.recordingStartDate {
+        RecordingTimer(
+          startDate: startDate,
+          endDate: state.barPhase == .recording || state.barPhase == .preparing
+            ? nil : state.recordingStopDate
+        )
+        .foregroundStyle(TF.paper)
+      }
+    }
+    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+    .tracking(1.2)
+    .foregroundStyle(TF.paperDim)
+    .lineLimit(1)
+    .fixedSize()
+  }
+
+  private var headerHairline: some View {
+    Rectangle()
+      .fill(TF.deckLine)
+      .frame(width: 1, height: 14)
   }
 
   private var panelModeMenu: some View {
@@ -468,22 +521,33 @@ struct FloatingBarView<S: FloatingBarState>: View {
         }
       }
     } label: {
-      HStack(spacing: 4) {
+      HStack(spacing: 6) {
         Text(state.currentMode.name)
-          .font(.system(size: 10, weight: .semibold))
+          .font(.system(size: 10, weight: .semibold, design: .monospaced))
+          .tracking(1.2)
           .lineLimit(1)
         Image(systemName: "chevron.down")
           .font(.system(size: 7, weight: .bold))
-          .opacity(canSelectPanelMode ? 0.7 : 0.25)
+          .opacity(canSelectPanelMode ? 0.6 : 0.25)
       }
-      .foregroundStyle(.white.opacity(0.86))
-      .padding(.horizontal, 6)
+      .foregroundStyle(TF.paper.opacity(canSelectPanelMode ? 1 : 0.55))
+      .padding(.horizontal, 9)
       .frame(height: 22)
-      .background(
-        Capsule()
-          .fill(.white.opacity(canSelectPanelMode ? 0.055 : 0.025))
-      )
-      .contentShape(Capsule())
+      .background {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+          .fill(
+            LinearGradient(
+              colors: [TF.ink2, TF.ink1],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+          )
+      }
+      .overlay {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+          .stroke(TF.deckLine, lineWidth: 1)
+      }
+      .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
@@ -517,40 +581,66 @@ struct FloatingBarView<S: FloatingBarState>: View {
     if let active = state.activeLLMCall {
       TimelineView(.periodic(from: .now, by: 0.1)) { context in
         let elapsed = max(0, context.date.timeIntervalSince(active.startedAt))
-        HStack(spacing: 6) {
-          Text(
-            state.isTranscriptPanelCollapsed ? active.model : "\(active.provider) / \(active.model)"
-          )
-          .lineLimit(1)
-          Text(String(format: "%.2fs", elapsed))
-            .monospacedDigit()
-        }
-        .font(.system(size: 9, weight: .medium))
-        .foregroundStyle(TF.amber.opacity(0.92))
+        deckStatus(
+          led: TF.lampAmber,
+          ledOpacity: 0.55 + 0.45 * (0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 4)),
+          text: state.isTranscriptPanelCollapsed ? active.model : "\(active.provider) / \(active.model)",
+          trailing: String(format: "%.2fs", elapsed),
+          tone: TF.lampAmber.opacity(0.9)
+        )
       }
     } else if let status = emptyPreviewStatusLabel {
-      Text(status)
-        .font(.system(size: 9, weight: .medium))
-        .foregroundStyle(TF.amber.opacity(0.88))
-        .lineLimit(1)
+      deckStatus(
+        led: TF.paper.opacity(0.25),
+        ledOpacity: 1,
+        text: status,
+        trailing: nil,
+        tone: TF.paperFaint
+      )
     } else if let attempt = state.llmCallAttempts.last {
-      HStack(spacing: 6) {
-        Text(
-          state.isTranscriptPanelCollapsed
-            ? attempt.model : "\(attempt.provider) / \(attempt.model)"
-        )
+      deckStatus(
+        led: attempt.succeeded ? TF.signalTeal : TF.settingsAccentRed,
+        ledOpacity: 1,
+        text: state.isTranscriptPanelCollapsed
+          ? attempt.model : "\(attempt.provider) / \(attempt.model)",
+        trailing: String(format: "%.2fs", attempt.durationSeconds),
+        tone: attempt.succeeded ? TF.paperDim : TF.settingsAccentRed
+      )
+    } else {
+      deckStatus(
+        led: TF.paper.opacity(0.25),
+        ledOpacity: 1,
+        text: state.effectiveProcessingLabel,
+        trailing: nil,
+        tone: TF.paperFaint
+      )
+    }
+  }
+
+  /// Mono LED + label + optional tabular reading, used in the channel strip.
+  private func deckStatus(
+    led: Color,
+    ledOpacity: Double,
+    text: String,
+    trailing: String?,
+    tone: Color
+  ) -> some View {
+    HStack(spacing: 6) {
+      Circle()
+        .fill(led)
+        .opacity(ledOpacity)
+        .frame(width: 5, height: 5)
+        .shadow(color: led.opacity(0.8), radius: 2.5)
+      Text(text)
         .lineLimit(1)
-        Text(String(format: "%.2fs", attempt.durationSeconds))
+      if let trailing {
+        Text(trailing)
           .monospacedDigit()
       }
-      .font(.system(size: 9, weight: .medium))
-      .foregroundStyle(attempt.succeeded ? .white.opacity(0.60) : TF.settingsAccentRed)
-    } else {
-      Text(state.effectiveProcessingLabel)
-        .font(.system(size: 9, weight: .medium))
-        .foregroundStyle(.white.opacity(0.48))
-        .lineLimit(1)
     }
+    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+    .tracking(0.5)
+    .foregroundStyle(tone)
   }
 
   private var topPanelColumns: some View {
@@ -562,19 +652,21 @@ struct FloatingBarView<S: FloatingBarState>: View {
       topPanelColumn(
         title: L("原文", "RAW"),
         metadata: L("实时转写", "LIVE"),
+        tone: .live,
         width: leftWidth,
         content: rawPanelText,
         isOptimized: false
       )
 
       Rectangle()
-        .fill(.white.opacity(0.08))
+        .fill(TF.deckLine)
         .frame(width: dividerWidth)
         .frame(maxHeight: .infinity)
 
       topPanelColumn(
         title: L("优化稿", "EDIT"),
         metadata: optimizedColumnStatus,
+        tone: optimizedMetaTone,
         width: rightWidth,
         content: optimizedPanelText,
         isOptimized: true
@@ -643,32 +735,69 @@ struct FloatingBarView<S: FloatingBarState>: View {
     }
   }
 
+  private enum DeckMetaTone {
+    case live, working, ok, failed, idle
+
+    var ledColor: Color {
+      switch self {
+      case .live, .ok: return TF.signalTeal
+      case .working: return TF.lampAmber
+      case .failed: return TF.settingsAccentRed
+      case .idle: return TF.paper.opacity(0.25)
+      }
+    }
+
+    var pulsing: Bool { self == .working }
+
+    var textColor: Color {
+      switch self {
+      case .working: return TF.lampAmber.opacity(0.85)
+      case .failed: return TF.settingsAccentRed.opacity(0.9)
+      default: return TF.paperFaint
+      }
+    }
+  }
+
+  private var optimizedMetaTone: DeckMetaTone {
+    if state.finalOptimizationFailureMessage != nil { return .failed }
+    switch state.liveOptimizationPhase {
+    case .updating: return .working
+    case .ready: return .ok
+    case .failed, .unavailable: return .failed
+    case .waiting, .stale, .inactive: return .idle
+    }
+  }
+
   private func topPanelColumn(
     title: String,
     metadata: String,
+    tone: DeckMetaTone,
     width: CGFloat,
     content: Text,
     isOptimized: Bool
   ) -> some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack(spacing: 6) {
+      HStack(spacing: 8) {
         Text(title.uppercased())
-          .font(.system(size: 8.5, weight: .semibold))
-          .tracking(0.7)
+          .font(.system(size: 9, weight: .semibold, design: .monospaced))
+          .tracking(2.2)
+          .foregroundStyle(TF.paperFaint)
         Spacer()
+        StatusLED(color: tone.ledColor, pulsing: tone.pulsing)
         Text(metadata)
-          .font(.system(size: 8, weight: .medium))
+          .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+          .tracking(1)
+          .foregroundStyle(tone.textColor)
       }
-      .foregroundStyle(.white.opacity(0.44))
       .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
       .frame(height: TF.topTranscriptPanelColumnHeaderHeight)
       .overlay(alignment: .bottom) {
-        Rectangle().fill(.white.opacity(0.06)).frame(height: 1)
+        Rectangle().fill(TF.deckLine).frame(height: 1)
       }
 
       content
         .font(.system(size: TF.topTranscriptPanelBodyFontSize, weight: .regular))
-        .foregroundStyle(isOptimized ? .white.opacity(0.96) : .white.opacity(0.78))
+        .foregroundStyle(isOptimized ? TF.paper.opacity(0.85) : TF.paperDim)
         .lineSpacing(TF.topTranscriptPanelBodyLineSpacing)
         .textSelection(.disabled)
         .fixedSize(horizontal: false, vertical: true)
@@ -682,21 +811,21 @@ struct FloatingBarView<S: FloatingBarState>: View {
       }
     }
     .frame(width: width, alignment: .topLeading)
-    .background(Color.white.opacity(isOptimized ? 0.012 : 0.004))
+    .background(Color.white.opacity(isOptimized ? 0.016 : 0.004))
   }
 
   private func finalOptimizationFailureActions(message: String) -> some View {
     VStack(alignment: .leading, spacing: 8) {
-      Divider().overlay(.white.opacity(0.08))
       HStack(alignment: .top, spacing: 7) {
         Image(systemName: "exclamationmark.circle.fill")
           .foregroundStyle(TF.settingsAccentRed)
         VStack(alignment: .leading, spacing: 2) {
           Text(L("优化失败，原文仍已保留", "Optimization failed; raw text is retained"))
             .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(TF.paper)
           Text(message)
             .font(.system(size: 9))
-            .foregroundStyle(.white.opacity(0.5))
+            .foregroundStyle(TF.paperFaint)
         }
       }
 
@@ -707,31 +836,43 @@ struct FloatingBarView<S: FloatingBarState>: View {
           Text(String(format: "%.2fs", attempt.durationSeconds))
             .monospacedDigit()
         }
-        .font(.system(size: 8.5, weight: .medium))
-        .foregroundStyle(.white.opacity(0.38))
+        .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+        .foregroundStyle(TF.paper.opacity(0.30))
       }
 
-      HStack(spacing: 7) {
+      HStack(spacing: 8) {
         Button(L("重试优化", "Retry optimization")) {
           state.retryFinalOptimization()
         }
         .buttonStyle(.plain)
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundStyle(Color.black.opacity(0.82))
-        .padding(.horizontal, 11)
-        .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: 7).fill(TF.amber))
+        .font(.system(size: 10.5, weight: .semibold))
+        .foregroundStyle(TF.ink0.opacity(0.9))
+        .padding(.horizontal, 12)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 6).fill(TF.lampAmber))
 
         Button(L("插入原文", "Insert raw text")) {
           state.insertRawAfterOptimizationFailure()
         }
         .buttonStyle(.plain)
-        .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(.white.opacity(0.7))
-        .padding(.horizontal, 11)
-        .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.06)))
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(TF.paperDim)
+        .padding(.horizontal, 12)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.04)))
+        .overlay {
+          RoundedRectangle(cornerRadius: 6).stroke(TF.deckLineStrong, lineWidth: 1)
+        }
       }
+    }
+    .padding(10)
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(TF.settingsAccentRed.opacity(0.05))
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .stroke(TF.settingsAccentRed.opacity(0.22), lineWidth: 1)
     }
     .padding(.horizontal, 12)
     .padding(.bottom, 12)
@@ -740,7 +881,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
   private func topPanelButton(
     systemName: String,
     accessibilityLabel: String,
-    tint: Color = .white.opacity(0.64),
+    tint: Color = TF.paperFaint,
     action: @escaping () -> Void
   ) -> some View {
     Button(action: action) {
@@ -748,20 +889,33 @@ struct FloatingBarView<S: FloatingBarState>: View {
         .font(.system(size: 8.5, weight: .semibold))
         .foregroundStyle(tint)
         .frame(width: 22, height: 22)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.055)))
+        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.white.opacity(0.05)))
+        .overlay {
+          RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .stroke(TF.deckLine, lineWidth: 1)
+        }
     }
     .buttonStyle(.plain)
     .accessibilityLabel(accessibilityLabel)
   }
 
-  private var topPanelGlassBackground: some View {
+  /// Signal Desk glass: teal-ink gradient over frosted material with a top sheen.
+  private var deckGlassBackground: some View {
     ZStack {
       Rectangle().fill(.ultraThinMaterial)
-      Color(red: 0.15, green: 0.19, blue: 0.23).opacity(0.88)
       LinearGradient(
-        colors: [.white.opacity(0.075), .clear, Color.black.opacity(0.10)],
+        colors: [
+          TF.ink3.opacity(0.82),
+          TF.ink1.opacity(0.92),
+          TF.ink0.opacity(0.96),
+        ],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
+      )
+      LinearGradient(
+        colors: [.white.opacity(0.05), .clear],
+        startPoint: .top,
+        endPoint: UnitPoint(x: 0.5, y: 0.4)
       )
     }
   }
@@ -917,22 +1071,23 @@ struct FloatingBarView<S: FloatingBarState>: View {
   }
 }
 
-// MARK: - Recording Dot
+// MARK: - Preparing Dot
 
 struct PreparingDot: View {
 
+  var color: Color = TF.recording
   @State private var rotation = 0.0
 
   var body: some View {
     ZStack {
       Circle()
-        .stroke(TF.recording.opacity(0.16), lineWidth: 1.6)
+        .stroke(color.opacity(0.16), lineWidth: 1.6)
         .frame(width: 14, height: 14)
 
       Circle()
         .trim(from: 0.16, to: 0.76)
         .stroke(
-          TF.recording,
+          color,
           style: StrokeStyle(lineWidth: 1.8, lineCap: .round)
         )
         .frame(width: 14, height: 14)
@@ -945,6 +1100,98 @@ struct PreparingDot: View {
         rotation = 360
       }
     }
+  }
+}
+
+// MARK: - Tally Dot
+
+/// Pulsing red lamp shown in the deck header while recording.
+struct TallyDot: View {
+
+  @State private var pulse = false
+
+  var body: some View {
+    Circle()
+      .fill(TF.recording)
+      .frame(width: 8, height: 8)
+      .shadow(color: TF.recording.opacity(0.9), radius: pulse ? 5 : 2)
+      .opacity(pulse ? 1 : 0.55)
+      .onAppear {
+        withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+          pulse = true
+        }
+      }
+  }
+}
+
+// MARK: - Status LED
+
+/// 5pt indicator LED used by deck column headers.
+struct StatusLED: View {
+
+  let color: Color
+  var pulsing: Bool = false
+  @State private var lit = false
+
+  var body: some View {
+    Circle()
+      .fill(color.opacity(pulsing && !lit ? 0.35 : 1))
+      .frame(width: 5, height: 5)
+      .shadow(color: color.opacity(0.8), radius: 3)
+      .onAppear {
+        guard pulsing else { return }
+        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+          lit = true
+        }
+      }
+  }
+}
+
+// MARK: - Meter Bridge
+
+/// Scrolling VU tick strip: right edge is now, history drifts left.
+struct MeterBridge: View {
+
+  let meter: AudioLevelMeter
+  var active: Bool = true
+
+  @State private var smoother = LevelSmoother(timeConstant: 0.09)
+  @State private var history = LevelTimeline(bufferSize: 320, scrollSpeed: 110)
+
+  var body: some View {
+    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+      Canvas { context, size in
+        let time = timeline.date.timeIntervalSinceReferenceDate
+        smoother.target = max(0.005, CGFloat(max(0, min(1, meter.current))))
+        let level = smoother.update(time: time)
+        let levels = history.update(time: time, currentLevel: level)
+
+        let step: CGFloat = 3
+        let columns = max(1, Int(size.width / step))
+        let base = size.height * 0.5
+        let bufCount = levels.count
+
+        for i in 0..<columns {
+          let histIdx = min(Int(CGFloat(i) / CGFloat(columns) * CGFloat(bufCount - 1)), bufCount - 1)
+          let amp = pow(max(0, (levels[histIdx] - 0.015) / 0.7), 0.8)
+          let tickHeight = max(1, amp * size.height * 0.86)
+          let fresh = CGFloat(i) / CGFloat(columns)
+          let alpha = 0.10 + 0.72 * amp * (0.4 + 0.6 * fresh)
+          let rect = CGRect(
+            x: CGFloat(i) * step,
+            y: base - tickHeight / 2,
+            width: 1.8,
+            height: tickHeight
+          )
+          context.fill(
+            Path(rect),
+            with: .color(Color(red: 0.78, green: 0.96, blue: 0.90).opacity(Double(alpha)))
+          )
+        }
+      }
+    }
+    .drawingGroup()
+    .opacity(active ? 1 : 0.35)
   }
 }
 
@@ -1000,180 +1247,234 @@ struct RecordingDot: View {
 
 // MARK: - Screen Bottom Recording Indicator
 
-/// Siri-style recording feedback shown independently at screen bottom.
-/// It stays subtly animated while listening and responds strongly to speech energy.
+/// Signal Desk tally lamp shown independently at screen bottom.
+/// A machined dial with a VU tick ring around a breathing filament core.
 struct ScreenBottomRecordingIndicator: View {
   let meter: AudioLevelMeter
   let modeName: String
-  let onCancel: () -> Void
 
   var body: some View {
-    VStack(spacing: 3) {
-      SiriRecordingOrb(meter: meter)
+    VStack(spacing: 7) {
+      TallyLampOrb(meter: meter)
+        .frame(width: 96, height: 96)
 
-      Text(modeName)
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundStyle(.white.opacity(0.84))
-        .lineLimit(1)
-        .truncationMode(.tail)
-        .padding(.horizontal, 8)
-        .frame(height: 18)
-        .background {
-          Capsule()
-            .fill(Color(red: 0.10, green: 0.13, blue: 0.16).opacity(0.80))
-            .overlay {
-              Capsule().stroke(.white.opacity(0.12), lineWidth: 0.8)
-            }
-        }
+      HStack(spacing: 6) {
+        StatusLED(color: TF.lampAmber, pulsing: true)
+        Text(modeName)
+          .font(.system(size: 9, weight: .semibold, design: .monospaced))
+          .tracking(2)
+          .foregroundStyle(TF.paperDim)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
+      .padding(.horizontal, 10)
+      .frame(height: 19)
+      .background {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+          .fill(
+            LinearGradient(
+              colors: [TF.ink2, TF.ink1],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+          )
+      }
+      .overlay {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+          .stroke(TF.deckLine, lineWidth: 1)
+      }
+      .frame(maxWidth: TF.screenBottomIndicatorWidth - 24)
     }
     .frame(width: TF.screenBottomIndicatorWidth, height: TF.screenBottomIndicatorHeight)
-    .overlay(alignment: .topTrailing) {
-      Button(action: onCancel) {
-        Image(systemName: "xmark")
-          .font(.system(size: 8, weight: .bold))
-          .foregroundStyle(.white.opacity(0.74))
-          .frame(width: 20, height: 20)
-          .background {
-            Circle()
-              .fill(Color(red: 0.10, green: 0.13, blue: 0.16).opacity(0.88))
-              .overlay { Circle().stroke(.white.opacity(0.16), lineWidth: 0.8) }
-          }
-      }
-      .buttonStyle(.plain)
-      .help(L("撤销并丢弃本次录音", "Cancel and discard this recording"))
-      .accessibilityLabel(L("撤销本次录音", "Cancel recording"))
-      .padding(.top, 3)
-      .padding(.trailing, 8)
-    }
     .accessibilityElement(children: .contain)
     .accessibilityLabel(L("正在使用\(modeName)录音", "Recording in \(modeName)"))
   }
 }
 
-private struct SiriRecordingOrb: View {
+/// Machined dial + VU tick ring + incandescent filament core.
+private struct TallyLampOrb: View {
   let meter: AudioLevelMeter
-  @State private var levelSmoother = LevelSmoother(timeConstant: 0.48)
+  @State private var smoother = LevelSmoother(timeConstant: 0.11)
+  @State private var peakTracker = LevelPeak()
 
   var body: some View {
     TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-      let time = timeline.date.timeIntervalSinceReferenceDate
-      let rawLevel = CGFloat(max(0, min(1, meter.current)))
-      let smoothedLevel: CGFloat = {
-        levelSmoother.target = rawLevel
-        return levelSmoother.update(time: time)
-      }()
-      let energy = min(1, pow(max(0, (smoothedLevel - 0.008) / 0.30), 0.52))
-      let breath = CGFloat(sin(time * 1.1) * 0.5 + 0.5)
-      ZStack {
-        Circle()
-          .fill(Color(red: 0.035, green: 0.055, blue: 0.085))
-
-        Circle()
-          .fill(
-            AngularGradient(
-              colors: [
-                Color(red: 0.12, green: 0.86, blue: 1.00),
-                Color(red: 0.27, green: 0.42, blue: 1.00),
-                Color(red: 0.72, green: 0.25, blue: 1.00),
-                Color(red: 1.00, green: 0.24, blue: 0.66),
-                Color(red: 0.12, green: 0.86, blue: 1.00),
-              ],
-              center: .center,
-              startAngle: .degrees(time * 14),
-              endAngle: .degrees(time * 14 + 360)
-            )
-          )
-          .opacity(0.66 + Double(energy) * 0.30)
-
-        Circle()
-          .fill(
-            RadialGradient(
-              colors: [Color.cyan.opacity(0.94), .clear],
-              center: UnitPoint(
-                x: 0.5 + 0.24 * sin(time * 0.55),
-                y: 0.5 + 0.22 * cos(time * 0.48)
-              ),
-              startRadius: 1,
-              endRadius: 34
-            )
-          )
-          .blendMode(.plusLighter)
-
-        Circle()
-          .fill(
-            RadialGradient(
-              colors: [Color.pink.opacity(0.78), .clear],
-              center: UnitPoint(
-                x: 0.5 + 0.25 * cos(time * 0.42 + 1.2),
-                y: 0.5 + 0.24 * sin(time * 0.62 + 0.7)
-              ),
-              startRadius: 0,
-              endRadius: 30
-            )
-          )
-          .blendMode(.screen)
-
-      }
-      .frame(width: 64, height: 64)
-      .clipShape(Circle())
-      .overlay {
-        Circle()
-          .stroke(
-            LinearGradient(
-              colors: [.white.opacity(0.58), .white.opacity(0.12), .cyan.opacity(0.46)],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
-            ),
-            lineWidth: 1
-          )
-      }
-      .overlay {
-        Circle()
-          .stroke(Color.cyan.opacity(0.18 + Double(energy) * 0.42), lineWidth: 1.2)
-          .scaleEffect(1.02 + energy * 0.16 + breath * 0.02)
-      }
-      .scaleEffect(0.91 + energy * 0.17 + breath * 0.02)
+      lampFace(time: timeline.date.timeIntervalSinceReferenceDate)
     }
-    .frame(width: 88, height: 88)
   }
-}
 
-// MARK: - Processing Orb
+  private func lampFace(time: Double) -> some View {
+    smoother.target = CGFloat(max(0, min(1, meter.current)))
+    let level = smoother.update(time: time)
+    let peak = peakTracker.update(time: time, level: level)
+    let breath = CGFloat(sin(time * (.pi * 2 / 3.6)) * 0.5 + 0.5)
+    let energy = CGFloat(pow(max(0, (level - 0.02) / 0.6), 0.6))
+    let glow = min(1.25, 0.30 + 0.22 * breath + 0.75 * energy)
 
-/// Purple/blue gradient sphere with rotation + breathing glow.
-struct ProcessingOrb: View {
+    return ZStack {
+      dialPlate
+      tickRing(peak: peak)
+      bezelRing
+      filamentCore(glow: glow, breath: breath, time: time)
+    }
+  }
 
-  @State private var rotation: Double = 0
-  @State private var breathe = false
+  // MARK: Layers
 
-  var body: some View {
+  /// Dark instrument face so the tick ring reads on any wallpaper.
+  private var dialPlate: some View {
+    Circle()
+      .fill(
+        RadialGradient(
+          colors: [TF.ink3, TF.ink1, TF.ink0],
+          center: .center,
+          startRadius: 2,
+          endRadius: 45
+        )
+      )
+      .overlay {
+        Circle()
+          .fill(
+            RadialGradient(
+              colors: [.white.opacity(0.06), .clear],
+              center: UnitPoint(x: 0.34, y: 0.24),
+              startRadius: 1,
+              endRadius: 40
+            )
+          )
+      }
+      .overlay {
+        Circle().stroke(TF.deckLineStrong, lineWidth: 1)
+      }
+      .padding(3)
+  }
+
+  /// 64 engraved ticks; the lit arc follows the peak-held voice level.
+  private func tickRing(peak: CGFloat) -> some View {
+    Canvas { context, size in
+      let center = CGPoint(x: size.width / 2, y: size.height / 2)
+      let tickCount = 64
+      let lit = peak * CGFloat(tickCount) * 0.78  // never pegs full, like a VU
+      for i in 0..<tickCount {
+        let angle = Double(i) / Double(tickCount) * 2 * .pi - .pi / 2
+        let on = CGFloat(i) < lit
+        let head = on ? min(1, max(0.12, (CGFloat(i) - (lit - 10)) / 10 + 0.25)) : 0
+        let inner: CGFloat = 39.5
+        let outer: CGFloat = on ? 43.0 : 41.8
+        var path = Path()
+        path.move(to: CGPoint(
+          x: center.x + CGFloat(cos(angle)) * inner,
+          y: center.y + CGFloat(sin(angle)) * inner
+        ))
+        path.addLine(to: CGPoint(
+          x: center.x + CGFloat(cos(angle)) * outer,
+          y: center.y + CGFloat(sin(angle)) * outer
+        ))
+        if on {
+          let color = Color(
+            red: 1.0,
+            green: Double(0.73 + 0.16 * head),
+            blue: Double(0.31 + 0.35 * head)
+          )
+          context.stroke(
+            path,
+            with: .color(color.opacity(Double(0.22 * head))),
+            style: StrokeStyle(lineWidth: 4.5, lineCap: .round)
+          )
+          context.stroke(
+            path,
+            with: .color(color.opacity(Double(0.42 + 0.5 * head))),
+            style: StrokeStyle(lineWidth: 1.9, lineCap: .round)
+          )
+        } else {
+          context.stroke(
+            path,
+            with: .color(TF.paper.opacity(0.16)),
+            style: StrokeStyle(lineWidth: 1)
+          )
+        }
+      }
+    }
+  }
+
+  /// Machined conic bezel between the tick ring and the core.
+  private var bezelRing: some View {
     Circle()
       .fill(
         AngularGradient(
-          colors: [
-            Color(red: 0.40, green: 0.30, blue: 0.90),
-            Color(red: 0.30, green: 0.55, blue: 1.00),
-            Color(red: 0.40, green: 0.30, blue: 0.90),
-          ],
+          colors: [TF.ink3, TF.ink1, TF.ink2, TF.ink0, TF.ink3],
           center: .center,
-          startAngle: .degrees(rotation),
-          endAngle: .degrees(rotation + 360)
+          startAngle: .degrees(210),
+          endAngle: .degrees(570)
         )
       )
-      .frame(width: 22, height: 22)
-      .scaleEffect(breathe ? 1.08 : 0.95)
-      .shadow(
-        color: Color(red: 0.35, green: 0.35, blue: 0.90).opacity(breathe ? 0.6 : 0.3),
-        radius: breathe ? 10 : 5
-      )
-      .onAppear {
-        withAnimation(.linear(duration: 2.5).repeatForever(autoreverses: false)) {
-          rotation = 360
-        }
-        withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-          breathe = true
-        }
+      .overlay {
+        // recessed inner edge
+        Circle()
+          .fill(
+            RadialGradient(
+              colors: [.clear, .black.opacity(0.5)],
+              center: .center,
+              startRadius: 22,
+              endRadius: 34
+            )
+          )
       }
+      .overlay {
+        Circle().stroke(TF.deckLineStrong, lineWidth: 1)
+      }
+      .overlay {
+        Circle()
+          .fill(
+            RadialGradient(
+              colors: [.white.opacity(0.09), .clear],
+              center: UnitPoint(x: 0.32, y: 0.26),
+              startRadius: 1,
+              endRadius: 26
+            )
+          )
+      }
+      .padding(14)
+  }
+
+  /// Warm incandescent core; brightness = slow breath + speech energy.
+  private func filamentCore(glow: CGFloat, breath: CGFloat, time: Double) -> some View {
+    let g = Double(glow)
+    return ZStack {
+      Circle()
+        .fill(
+          RadialGradient(
+            colors: [
+              Color(red: 1.0, green: 0.96, blue: 0.86).opacity(0.28 + 0.66 * g),
+              Color(red: 1.0, green: 0.80, blue: 0.47).opacity(0.24 + 0.58 * g),
+              Color(red: 0.91, green: 0.52, blue: 0.18).opacity(0.20 + 0.48 * g),
+              Color(red: 0.47, green: 0.20, blue: 0.07).opacity(0.30 + 0.30 * g),
+              Color(red: 0.16, green: 0.07, blue: 0.03).opacity(0.92),
+            ],
+            center: UnitPoint(x: 0.42, y: 0.38),
+            startRadius: 1,
+            endRadius: 27
+          )
+        )
+      // drifting filament hot-spot
+      Circle()
+        .fill(
+          RadialGradient(
+            colors: [.white.opacity(0.75 * g), .clear],
+            center: UnitPoint(
+              x: 0.58 + 0.05 * sin(time * 0.7),
+              y: 0.30 + 0.04 * cos(time * 0.9)
+            ),
+            startRadius: 0,
+            endRadius: 14
+          )
+        )
+      Circle()
+        .stroke(TF.lampAmberHot.opacity(0.18 + 0.3 * g), lineWidth: 1)
+    }
+    .padding(21)
+    .shadow(color: TF.lampAmber.opacity(0.20 + 0.28 * g), radius: 5 + 9 * glow)
+    .scaleEffect(0.97 + 0.045 * breath + 0.05 * glow)
   }
 }
 
@@ -1563,14 +1864,16 @@ private final class LevelSmoother {
 /// Scrolling level history: newest on right, drifts left over time.
 /// Index 0 = oldest (leftmost), last = newest (rightmost).
 private final class LevelTimeline {
-  private static let bufferSize = 200
+  private let bufferSize: Int
+  private let scrollSpeed: Double  // entries shifted per second
   private var levels: [CGFloat]
   private var lastTime: Double = 0
   private var accumulator: Double = 0
-  private let scrollSpeed: Double = 50  // entries shifted per second
 
-  init() {
-    levels = Array(repeating: 0, count: Self.bufferSize)
+  init(bufferSize: Int = 200, scrollSpeed: Double = 50) {
+    self.bufferSize = bufferSize
+    self.scrollSpeed = scrollSpeed
+    levels = Array(repeating: 0, count: bufferSize)
   }
 
   func update(time: Double, currentLevel: CGFloat) -> [CGFloat] {
@@ -1585,7 +1888,7 @@ private final class LevelTimeline {
     let shift = Int(accumulator)
     if shift > 0 {
       accumulator -= Double(shift)
-      let actual = min(shift, Self.bufferSize)
+      let actual = min(shift, bufferSize)
       levels.removeFirst(actual)
       for _ in 0..<actual {
         levels.append(currentLevel)
@@ -1593,5 +1896,28 @@ private final class LevelTimeline {
     }
     levels[levels.count - 1] = currentLevel
     return levels
+  }
+}
+
+/// Peak-hold tracker: jumps up with the level instantly, decays linearly.
+private final class LevelPeak {
+  private(set) var value: CGFloat = 0
+  private var lastTime: Double = 0
+  private let decayPerSecond: CGFloat
+
+  init(decayPerSecond: CGFloat = 0.9) {
+    self.decayPerSecond = decayPerSecond
+  }
+
+  func update(time: Double, level: CGFloat) -> CGFloat {
+    if lastTime == 0 {
+      lastTime = time
+      value = level
+      return value
+    }
+    let dt = min(CGFloat(time - lastTime), 0.05)
+    lastTime = time
+    value = max(value - dt * decayPerSecond, level)
+    return value
   }
 }

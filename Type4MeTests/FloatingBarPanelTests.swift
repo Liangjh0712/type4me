@@ -100,16 +100,6 @@ final class FloatingBarPanelTests: XCTestCase {
       accuracy: 0.5
     )
     XCTAssertFalse(indicator.ignoresMouseEvents)
-    XCTAssertTrue(
-      indicator.shouldPerformWindowDrag(
-        at: NSPoint(x: indicator.frame.width / 2, y: indicator.frame.height / 2)
-      )
-    )
-    XCTAssertFalse(
-      indicator.shouldPerformWindowDrag(
-        at: NSPoint(x: indicator.frame.width - 18, y: indicator.frame.height - 15)
-      )
-    )
 
     state.stopRecording()
     for _ in 0..<10 {
@@ -186,8 +176,9 @@ final class FloatingBarPanelTests: XCTestCase {
       panel.contentView?.layoutSubtreeIfNeeded()
     }
 
-    XCTAssertLessThanOrEqual(panel.frame.height, 105)
-    XCTAssertGreaterThanOrEqual(panel.frame.height, 85)
+    // Signal Desk deck: header 34 + meter bridge 13 + column header 24 + body.
+    XCTAssertLessThanOrEqual(panel.frame.height, 119)
+    XCTAssertGreaterThanOrEqual(panel.frame.height, 99)
     withExtendedLifetime(controller) {}
   }
 

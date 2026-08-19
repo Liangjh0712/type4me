@@ -151,6 +151,7 @@ extension DemoState: FloatingBarState {
     func selectPanelMode(_: ProcessingMode) {}
     func toggleTranscriptPanelCollapsed() { isTranscriptPanelCollapsed.toggle() }
     func requestPanelStop() {}
+    func requestPanelCancel() {}
     func retryFinalOptimization() {}
     func insertRawAfterOptimizationFailure() {}
 }

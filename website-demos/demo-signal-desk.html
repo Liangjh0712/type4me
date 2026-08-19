@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Type4Me — Signal Desk · 弹窗 + 呼吸球重设计</title>
+<style>
+  :root {
+    color-scheme: dark;
+    /* —— palette: lifted from the app icon —— */
+    --ink-0: #08111a;
+    --ink-1: #0d1a24;
+    --ink-2: #142736;
+    --ink-3: #1b3244;
+    --paper: #f2ecdf;
+    --paper-dim: rgba(242, 236, 223, 0.60);
+    --paper-faint: rgba(242, 236, 223, 0.34);
+    --line: rgba(235, 228, 212, 0.11);
+    --line-strong: rgba(235, 228, 212, 0.20);
+    --amber: #ffb648;
+    --amber-hot: #ffe3b0;
+    --amber-dim: rgba(255, 182, 72, 0.55);
+    --teal: #5fd3c0;
+    --teal-dim: rgba(95, 211, 192, 0.55);
+    --red: #ff6a5c;
+    --green: #86d492;
+    --mono: ui-monospace, "SF Mono", "Menlo", "JetBrains Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body { font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+
+  /* ============ desktop context ============ */
+
+  .desktop {
+    position: relative;
+    width: 100vw; height: 100vh;
+    min-width: 1120px; min-height: 760px;
+    overflow: hidden;
+    background:
+      radial-gradient(1200px 700px at 18% -10%, rgba(214, 226, 232, 0.9), transparent 55%),
+      radial-gradient(1000px 800px at 88% 8%, rgba(190, 205, 214, 0.65), transparent 52%),
+      linear-gradient(150deg, #d6dbde 0%, #b9c2c8 48%, #d2ccc2 100%);
+  }
+  .desktop::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    opacity: .18; mix-blend-mode: overlay; z-index: 40;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.14'/%3E%3C/svg%3E");
+  }
+
+  .menu-bar {
+    position: relative; z-index: 3;
+    height: 28px; padding: 0 18px;
+    display: flex; align-items: center; justify-content: space-between;
+    color: rgba(24, 30, 36, 0.78);
+    background: rgba(243, 245, 246, 0.72);
+    border-bottom: 1px solid rgba(25, 31, 36, 0.08);
+    backdrop-filter: blur(22px) saturate(140%);
+    font-size: 12px; font-weight: 560;
+  }
+  .menu-bar .l, .menu-bar .r { display: flex; gap: 16px; align-items: center; }
+  .menu-bar strong { font-weight: 720; }
+
+  /* fake editor window for context */
+  .doc {
+    position: absolute; z-index: 1;
+    left: 50%; top: 96px; transform: translateX(-50%);
+    width: 760px; height: 560px;
+    background: #fbfaf7;
+    border-radius: 10px;
+    box-shadow: 0 30px 80px rgba(30, 40, 48, 0.28), 0 4px 16px rgba(30, 40, 48, 0.14);
+    overflow: hidden;
+  }
+  .doc-bar {
+    height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 14px;
+    background: linear-gradient(#f4f2ee, #eceae5);
+    border-bottom: 1px solid rgba(40, 46, 52, 0.09);
+  }
+  .doc-bar i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .doc-bar i:nth-child(1) { background: #ff5f57; }
+  .doc-bar i:nth-child(2) { background: #febc2e; }
+  .doc-bar i:nth-child(3) { background: #28c840; }
+  .doc-bar span { margin-left: 8px; font-size: 12px; font-weight: 600; color: rgba(40, 46, 52, 0.55); }
+  .doc-body { padding: 34px 44px; color: #2c333a; }
+  .doc-body h1 { font-size: 21px; font-weight: 700; margin-bottom: 16px; letter-spacing: -0.01em; }
+  .doc-body p { font-size: 13.5px; line-height: 1.85; color: rgba(44, 51, 58, 0.82); margin-bottom: 12px; }
+  .doc-body .ghost { color: rgba(44, 51, 58, 0.30); }
+  .caret {
+    display: inline-block; width: 2px; height: 15px; background: #2c333a;
+    vertical-align: -2px; animation: blink 1.05s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ============================================================
+     弹窗 — THE TRANSCRIPT DECK
+     channel-strip header · meter bridge · engraved columns
+     ============================================================ */
+
+  .deck {
+    position: absolute; z-index: 10;
+    top: 38px; left: 50%;
+    width: 880px;
+    transform: translateX(-50%);
+    border-radius: 13px;
+    background:
+      linear-gradient(175deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 26%),
+      radial-gradient(120% 150% at 12% 0%, var(--ink-3) 0%, var(--ink-1) 46%, var(--ink-0) 100%);
+    background-color: rgba(13, 24, 33, 0.94);
+    border: 1px solid var(--line);
+    box-shadow:
+      0 30px 70px rgba(8, 15, 20, 0.42),
+      0 6px 18px rgba(8, 15, 20, 0.30),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    backdrop-filter: blur(26px) saturate(125%);
+    overflow: hidden;
+    transition: width .34s cubic-bezier(.32,.72,.24,1);
+    animation: deck-in .5s cubic-bezier(.22,.9,.3,1) .1s backwards;
+  }
+  @keyframes deck-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+  .deck::after { /* grain */
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    opacity: .05; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 140 140' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .deck.collapsed { width: 400px; }
+
+  /* —— channel strip —— */
+
+  .strip {
+    position: relative; z-index: 2;
+    height: 36px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 12px;
+    background: linear-gradient(rgba(255,255,255,.035), rgba(0,0,0,.10));
+  }
+  .strip .hair { width: 1px; height: 14px; background: var(--line); flex: none; }
+  .strip .spacer { flex: 1; min-width: 6px; }
+
+  .tally {
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: .10em; color: var(--paper-dim);
+    white-space: nowrap;
+  }
+  .tally .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--red);
+    box-shadow: 0 0 8px rgba(255, 106, 92, 0.9), 0 0 2px rgba(255, 106, 92, 1);
+    animation: tally-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes tally-pulse { 50% { opacity: .45; box-shadow: 0 0 3px rgba(255,106,92,.5); } }
+  .tally b { color: var(--paper); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .tally .ring {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 1.6px solid rgba(95, 211, 192, 0.22);
+    border-top-color: var(--teal);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .tally .ok  { color: var(--green); font-size: 12px; }
+  .tally .bad { color: var(--red);  font-size: 12px; }
+
+  .mode-plate {
+    display: flex; align-items: center; gap: 6px;
+    height: 22px; padding: 0 9px;
+    border-radius: 5px;
+    background: linear-gradient(#1c3140, #101f2b);
+    border: 1px solid var(--line);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 1px 2px rgba(0,0,0,.28);
+    font-family: var(--mono); font-size: 10px; font-weight: 600;
+    letter-spacing: .12em; color: var(--paper);
+    white-space: nowrap;
+    transition: border-color .15s;
+  }
+  .mode-plate:hover { border-color: var(--line-strong); }
+  .mode-plate .chev { font-size: 7px; color: var(--paper-faint); }
+
+  .llm {
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 10px; font-weight: 500;
+    letter-spacing: .06em; color: var(--amber-dim);
+    white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+  .llm .led {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 6px rgba(255, 182, 72, 0.9);
+    animation: tally-pulse 1.1s ease-in-out infinite;
+  }
+  .llm.idle { color: var(--paper-faint); }
+  .llm.idle .led { background: rgba(242,236,223,.28); box-shadow: none; animation: none; }
+  .llm.err { color: rgba(255, 106, 92, 0.85); }
+  .llm.err .led { background: var(--red); box-shadow: 0 0 6px rgba(255,106,92,.8); animation: none; }
+
+  .btn {
+    width: 22px; height: 22px; flex: none;
+    display: grid; place-items: center;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    color: var(--paper-faint);
+    font-size: 9px;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .btn:hover { background: rgba(255,255,255,.06); color: var(--paper); border-color: var(--line); }
+  .btn.stop { color: rgba(255, 106, 92, 0.8); }
+  .btn.stop:hover { color: var(--red); background: rgba(255, 106, 92, 0.10); border-color: rgba(255,106,92,.25); }
+
+  /* —— meter bridge (signature strip) —— */
+
+  .bridge {
+    position: relative; z-index: 2;
+    height: 13px;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: rgba(0, 0, 0, 0.22);
+    transition: height .3s cubic-bezier(.32,.72,.24,1), opacity .25s;
+  }
+  .deck.collapsed .bridge { height: 0; opacity: 0; border-bottom-width: 0; }
+  .bridge canvas { display: block; width: 100%; height: 100%; }
+  .deck:not(.recording) .bridge canvas { opacity: .35; transition: opacity .4s; }
+
+  /* —— columns —— */
+
+  .cols {
+    position: relative; z-index: 2;
+    display: grid; grid-template-columns: 45fr 1px 55fr;
+    transition: max-height .34s cubic-bezier(.32,.72,.24,1), opacity .25s;
+    max-height: 460px;
+  }
+  .deck.collapsed .cols { max-height: 0; opacity: 0; pointer-events: none; }
+  .col-div { background: var(--line); }
+
+  .col-head {
+    height: 24px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 14px;
+    font-family: var(--mono); font-size: 9px; font-weight: 600;
+    letter-spacing: .20em; color: var(--paper-faint);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .col-head .zh { letter-spacing: .28em; }
+  .col-head .meta {
+    margin-left: auto; display: flex; align-items: center; gap: 5px;
+    letter-spacing: .12em; font-weight: 500;
+  }
+  .col-head .meta .led {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--teal);
+    box-shadow: 0 0 5px var(--teal-dim);
+  }
+  .col-head .meta.waiting  { color: var(--paper-faint); }
+  .col-head .meta.waiting .led { background: rgba(242,236,223,.25); box-shadow: none; }
+  .col-head .meta.updating { color: var(--amber-dim); }
+  .col-head .meta.updating .led { background: var(--amber); box-shadow: 0 0 6px rgba(255,182,72,.8); animation: tally-pulse .9s ease-in-out infinite; }
+  .col-head .meta.failed   { color: rgba(255,106,92,.85); }
+  .col-head .meta.failed .led { background: var(--red); box-shadow: 0 0 5px rgba(255,106,92,.7); }
+
+  .col-body {
+    padding: 10px 14px 14px;
+    font-size: 13px; line-height: 1.62;
+    min-height: 74px;
+  }
+  .col-raw .col-body { color: var(--paper-dim); }
+  .col-edit .col-body { color: var(--paper); }
+  .col-edit { background: rgba(255, 255, 255, 0.016); }
+  .col-body .pending { color: var(--amber); }
+  .col-body .placeholder { color: var(--paper-faint); }
+
+  /* —— failure card inside edit column —— */
+
+  .fail {
+    margin-top: 10px; padding: 10px 12px 12px;
+    border: 1px solid rgba(255, 106, 92, 0.22);
+    border-radius: 8px;
+    background: rgba(255, 106, 92, 0.05);
+  }
+  .fail .fail-title {
+    display: flex; gap: 7px; align-items: baseline;
+    font-size: 11px; font-weight: 600; color: var(--paper);
+  }
+  .fail .fail-title i { color: var(--red); font-style: normal; }
+  .fail .fail-msg { margin-top: 3px; font-size: 10px; line-height: 1.5; color: var(--paper-faint); }
+  .fail .attempt {
+    margin-top: 6px; display: flex; justify-content: space-between;
+    font-family: var(--mono); font-size: 9px; letter-spacing: .05em;
+    color: rgba(242, 236, 223, 0.30); font-variant-numeric: tabular-nums;
+  }
+  .fail .actions { margin-top: 10px; display: flex; gap: 8px; }
+  .fail .actions button {
+    height: 26px; padding: 0 12px; border-radius: 6px;
+    font-size: 10.5px; font-weight: 600;
+  }
+  .fail .retry { background: var(--amber); color: rgba(24, 18, 8, 0.9); }
+  .fail .retry:hover { background: var(--amber-hot); }
+  .fail .raw-insert {
+    border: 1px solid var(--line-strong); color: var(--paper-dim);
+  }
+  .fail .raw-insert:hover { color: var(--paper); background: rgba(255,255,255,.05); }
+
+  /* ============================================================
+     呼吸球 — THE TALLY LAMP
+     machined bezel · 64-tick VU ring · filament core
+     ============================================================ */
+
+  .lamp-zone {
+    position: absolute; z-index: 10;
+    bottom: 26px; left: 50%;
+    transform: translateX(-50%);
+    width: 150px; height: 128px;
+    display: flex; flex-direction: column; align-items: center;
+    transition: opacity .3s, transform .3s;
+    animation: lamp-in .55s cubic-bezier(.22,.9,.3,1) .28s backwards;
+  }
+  @keyframes lamp-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(14px) scale(.92); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  }
+  .lamp-zone.gone { opacity: 0; transform: translateX(-50%) translateY(10px); pointer-events: none; }
+
+  .lamp {
+    position: relative;
+    width: 96px; height: 96px;
+    filter: drop-shadow(0 14px 26px rgba(8, 15, 20, 0.40));
+  }
+  .lamp canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  /* dial plate — dark instrument face so the tick ring reads on any wallpaper */
+  .dial {
+    position: absolute; inset: 3px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 34% 24%, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 46%),
+      repeating-radial-gradient(circle at 50% 50%, rgba(255,255,255,.014) 0 1px, rgba(0,0,0,0) 1px 3px),
+      radial-gradient(circle, #16283a 0%, #101e2b 58%, #0a1520 100%);
+    border: 1px solid rgba(235, 228, 212, 0.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      inset 0 -6px 14px rgba(0, 0, 0, 0.45);
+  }
+
+  /* machined bezel */
+  .bezel {
+    position: absolute; inset: 14px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 32% 26%, rgba(255,255,255,.10), rgba(255,255,255,0) 42%),
+      conic-gradient(from 210deg, #233a4c, #101f2b 22%, #1d3243 48%, #0b1722 74%, #233a4c);
+    border: 1px solid rgba(235, 228, 212, 0.16);
+    box-shadow:
+      inset 0 2px 5px rgba(0, 0, 0, 0.55),
+      inset 0 -1px 1px rgba(255, 255, 255, 0.06);
+  }
+  /* filament core — JS drives --glow (0..1.6) and --breath (0..1) */
+  .core {
+    position: absolute; inset: 21px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 42% 38%,
+        rgba(255, 244, 220, calc(.28 + .66 * var(--glow))) 0%,
+        rgba(255, 205, 120, calc(.24 + .58 * var(--glow))) 26%,
+        rgba(232, 132, 46, calc(.20 + .48 * var(--glow))) 52%,
+        rgba(120, 52, 18, calc(.30 + .30 * var(--glow))) 78%,
+        rgba(40, 18, 8, .92) 100%);
+    box-shadow:
+      0 0 calc(8px + 26px * var(--glow)) rgba(255, 170, 70, calc(.30 + .45 * var(--glow))),
+      inset 0 -3px 8px rgba(60, 22, 4, 0.55),
+      inset 0 2px 4px rgba(255, 236, 200, calc(.25 * var(--glow)));
+    transform: scale(calc(.97 + .045 * var(--breath) + .05 * var(--glow)));
+  }
+  /* filament hot-spot drifts like a real glowing element */
+  .core::before {
+    content: ""; position: absolute; inset: 0; border-radius: 50%;
+    background: radial-gradient(circle at 58% 30%, rgba(255,255,246, calc(.75 * var(--glow))), rgba(255,255,246,0) 34%);
+    animation: drift 9s ease-in-out infinite alternate;
+  }
+  @keyframes drift {
+    from { transform: translate(-2px, 1px) scale(1); }
+    to   { transform: translate(2px, -2px) scale(1.12); }
+  }
+  /* inner glass rim */
+  .core::after {
+    content: ""; position: absolute; inset: 0; border-radius: 50%;
+    border: 1px solid rgba(255, 226, 176, calc(.18 + .3 * var(--glow)));
+  }
+
+  .lamp-cancel {
+    position: absolute; top: -2px; right: 18px; z-index: 3;
+    width: 20px; height: 20px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: linear-gradient(#1c3140, #0d1a24);
+    border: 1px solid rgba(235, 228, 212, 0.20);
+    color: rgba(242, 236, 223, 0.65);
+    font-size: 10px; line-height: 1;
+    box-shadow: 0 2px 6px rgba(0,0,0,.35);
+    transition: color .12s, border-color .12s, transform .12s;
+  }
+  .lamp-cancel:hover { color: #fff; border-color: rgba(235,228,212,.4); transform: scale(1.08); }
+
+  /* engraved mode plate */
+  .plate {
+    margin-top: 7px;
+    display: flex; align-items: center; gap: 6px;
+    height: 19px; padding: 0 10px;
+    border-radius: 4px;
+    background: linear-gradient(#1a2e3d, #0c1821);
+    border: 1px solid rgba(235, 228, 212, 0.15);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+      0 3px 8px rgba(8, 15, 20, 0.30);
+    font-family: var(--mono); font-size: 9px; font-weight: 600;
+    letter-spacing: .22em; color: var(--paper-dim);
+  }
+  .plate .led {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 6px rgba(255, 182, 72, 0.9);
+    animation: tally-pulse 2.2s ease-in-out infinite;
+  }
+
+  /* ============================================================
+     demo controls
+     ============================================================ */
+
+  .controls {
+    position: absolute; z-index: 30;
+    left: 50%; bottom: 168px; transform: translateX(-50%);
+    display: flex; gap: 6px; align-items: center;
+    padding: 6px;
+    border-radius: 10px;
+    background: rgba(14, 23, 31, 0.88);
+    border: 1px solid var(--line);
+    box-shadow: 0 10px 30px rgba(8,15,20,.35);
+    backdrop-filter: blur(16px);
+  }
+  .controls .tag {
+    padding: 0 10px;
+    font-family: var(--mono); font-size: 9px; letter-spacing: .18em;
+    color: var(--paper-faint);
+  }
+  .controls button {
+    height: 26px; padding: 0 12px; border-radius: 7px;
+    font-family: var(--mono); font-size: 10px; font-weight: 600;
+    letter-spacing: .10em; color: var(--paper-dim);
+    border: 1px solid transparent;
+    transition: all .14s;
+  }
+  .controls button:hover { color: var(--paper); background: rgba(255,255,255,.05); }
+  .controls button.on {
+    color: var(--amber-hot);
+    background: rgba(255, 182, 72, 0.10);
+    border-color: rgba(255, 182, 72, 0.30);
+  }
+  .controls .sep { width: 1px; height: 16px; background: var(--line); }
+
+  .spec-tag {
+    position: absolute; z-index: 30; right: 16px; bottom: 14px;
+    font-family: var(--mono); font-size: 9px; letter-spacing: .20em;
+    color: rgba(30, 38, 44, 0.42);
+  }
+</style>
+</head>
+<body>
+<div class="desktop">
+
+  <div class="menu-bar">
+    <div class="l"><strong></strong><span>文件</span><span>编辑</span><span>格式</span><span>窗口</span></div>
+    <div class="r"><span>Type4Me · Signal Desk 视觉稿</span><span>周二 14:32</span></div>
+  </div>
+
+  <div class="doc">
+    <div class="doc-bar"><i></i><i></i><i></i><span>发布计划 — 草稿</span></div>
+    <div class="doc-body">
+      <h1>新版本发布计划</h1>
+      <p>本季度的核心目标是把实时转写的延迟压缩到 300ms 以内，同时让优化稿的生成跟上说话节奏。面板需要在录音过程中给出足够的状态反馈，但不能打断用户的思路。</p>
+      <p id="typed-line"><span id="typed"></span><span class="caret"></span></p>
+      <p class="ghost">二、灰度范围：先从内部测试组开始，覆盖中英文混合输入场景。</p>
+      <p class="ghost">三、回滚预案：保留上个稳定版的安装包与配置迁移脚本。</p>
+    </div>
+  </div>
+
+  <!-- ================= 弹窗 ================= -->
+  <section class="deck recording" id="deck">
+    <header class="strip">
+      <div class="tally" id="tally">
+        <span class="dot"></span><span>REC&nbsp;<b id="clock">00:00</b></span>
+      </div>
+      <div class="hair"></div>
+      <button class="mode-plate" id="modePlate">听写<span class="chev">▼</span></button>
+      <div class="hair"></div>
+      <div class="llm idle" id="llm"><span class="led"></span><span id="llmText">等待语音</span></div>
+      <div class="spacer"></div>
+      <button class="btn" id="collapseBtn" title="收缩面板">▲</button>
+      <button class="btn stop" id="stopBtn" title="停止并插入">■</button>
+    </header>
+
+    <div class="bridge"><canvas id="meter"></canvas></div>
+
+    <div class="cols" id="cols">
+      <div class="col col-raw">
+        <div class="col-head"><span class="zh">原文</span><span>RAW</span>
+          <span class="meta waiting" id="rawMeta"><span class="led"></span>LIVE</span>
+        </div>
+        <div class="col-body" id="rawBody"><span class="placeholder">等待语音…</span></div>
+      </div>
+      <div class="col-div"></div>
+      <div class="col col-edit">
+        <div class="col-head"><span class="zh">优化稿</span><span>EDIT</span>
+          <span class="meta waiting" id="editMeta"><span class="led"></span><span id="editMetaText">等待停顿</span></span>
+        </div>
+        <div class="col-body" id="editBody"><span class="placeholder">等待停顿后优化…</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 呼吸球 ================= -->
+  <section class="lamp-zone" id="lampZone">
+    <div class="lamp">
+      <div class="dial"></div>
+      <canvas id="ticks"></canvas>
+      <div class="bezel"></div>
+      <div class="core" id="core"></div>
+      <button class="lamp-cancel" title="撤销并丢弃本次录音">✕</button>
+    </div>
+    <div class="plate"><span class="led"></span>听写</div>
+  </section>
+
+  <!-- ================= demo controls ================= -->
+  <div class="controls">
+    <span class="tag">PHASE</span>
+    <button data-phase="recording" class="on">录音中</button>
+    <button data-phase="processing">处理中</button>
+    <button data-phase="done">已完成</button>
+    <button data-phase="error">优化失败</button>
+    <div class="sep"></div>
+    <button id="voiceToggle" class="on">语音流 ON</button>
+  </div>
+
+  <div class="spec-tag">SIGNAL DESK · V1 · 2026-08</div>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const deck = $('#deck'), lampZone = $('#lampZone'), core = $('#core');
+  const tallyEl = $('#tally'), llmEl = $('#llm'), llmText = $('#llmText');
+  const rawBody = $('#rawBody'), editBody = $('#editBody');
+  const editMeta = $('#editMeta'), editMetaText = $('#editMetaText');
+  const cols = $('#cols'), stopBtn = $('#stopBtn'), collapseBtn = $('#collapseBtn');
+  const typedEl = $('#typed');
+
+  /* ---------- simulated voice level ---------- */
+  let level = 0, target = 0.05, peak = 0, nextShift = 0, voiceOn = true;
+  function driveTarget(now) {
+    if (now < nextShift) return;
+    if (Math.random() < 0.62) {           // speech burst
+      target = 0.25 + Math.random() * 0.6;
+      nextShift = now + 380 + Math.random() * 1500;
+    } else {                              // pause
+      target = 0.02 + Math.random() * 0.07;
+      nextShift = now + 180 + Math.random() * 620;
+    }
+  }
+
+  /* ---------- lamp tick ring ---------- */
+  const ticksC = $('#ticks'), tctx = ticksC.getContext('2d');
+  const meterC = $('#meter'), mctx = meterC.getContext('2d');
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+  const TICKS = 64;
+
+  function sizeCanvases() {
+    ticksC.width = 96 * DPR; ticksC.height = 96 * DPR;
+    const bridge = meterC.parentElement;
+    meterC.width = bridge.clientWidth * DPR;
+    meterC.height = bridge.clientHeight * DPR;
+  }
+  sizeCanvases();
+  new ResizeObserver(sizeCanvases).observe(meterC.parentElement);
+
+  const history = new Array(320).fill(0);
+  let histAcc = 0;
+
+  function drawTicks(now) {
+    const s = 96 * DPR, c = s / 2;
+    tctx.clearRect(0, 0, s, s);
+    const lit = peak * TICKS * 0.78;              // 78% sweep, like a VU never pegging full
+    for (let i = 0; i < TICKS; i++) {
+      const a = (i / TICKS) * Math.PI * 2 - Math.PI / 2;
+      const on = i < lit;
+      // brightness ramps up near the head of the lit arc
+      const head = on ? Math.min(1, Math.max(0.12, (i - (lit - 10)) / 10 + 0.25)) : 0;
+      const r0 = 39.5 * DPR, r1 = (on ? 43.0 : 41.8) * DPR;
+      tctx.beginPath();
+      tctx.moveTo(c + Math.cos(a) * r0, c + Math.sin(a) * r0);
+      tctx.lineTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1);
+      if (on) {
+        const warm = 0.42 + 0.5 * head;
+        tctx.strokeStyle = `rgba(255, ${186 + 40 * head | 0}, ${80 + 90 * head | 0}, ${warm})`;
+        tctx.lineWidth = (on ? 1.9 : 1) * DPR;
+        tctx.shadowColor = 'rgba(255, 176, 60, 0.9)';
+        tctx.shadowBlur = 3.2 * DPR * head;
+      } else {
+        tctx.strokeStyle = 'rgba(235, 228, 212, 0.16)';
+        tctx.lineWidth = 1 * DPR;
+        tctx.shadowBlur = 0;
+      }
+      tctx.stroke();
+    }
+    tctx.shadowBlur = 0;
+  }
+
+  function drawMeter() {
+    const w = meterC.width, h = meterC.height;
+    mctx.clearRect(0, 0, w, h);
+    const step = 3 * DPR, n = Math.floor(w / step);
+    const base = h * 0.5;
+    for (let i = 0; i < n; i++) {
+      const v = history[Math.floor(i / n * history.length)];
+      const amp = Math.pow(Math.max(0, (v - 0.015) / 0.7), 0.8);
+      const th = Math.max(1 * DPR, amp * (h * 0.86));
+      const x = i * step;
+      const g = mctx.createLinearGradient(0, base - th / 2, 0, base + th / 2);
+      const fresh = i / n;                       // newer = brighter (right side)
+      g.addColorStop(0, `rgba(95, 211, 192, ${0.10 + 0.55 * amp * (0.4 + 0.6 * fresh)})`);
+      g.addColorStop(0.5, `rgba(214, 244, 236, ${0.14 + 0.78 * amp * (0.4 + 0.6 * fresh)})`);
+      g.addColorStop(1, `rgba(95, 211, 192, ${0.10 + 0.55 * amp * (0.4 + 0.6 * fresh)})`);
+      mctx.fillStyle = g;
+      mctx.fillRect(x, base - th / 2, 1.8 * DPR, th);
+    }
+  }
+
+  /* ---------- transcript content ---------- */
+  const script = [
+    { raw: '今天下午三点开会讨论新版本发布计划，', edit: '今天下午 3 点开会，讨论新版本的发布计划。' },
+    { raw: '主要是确认灰度发布的节奏还有回滚预案，', edit: '主要确认灰度发布的节奏和回滚预案，' },
+    { raw: '然后那个面板的交互要再改一版，呼吸球也得重新设计。', edit: '另外面板交互需要再改一版，呼吸球也要重新设计。' },
+  ];
+  let segIdx = 0, charIdx = 0, rawText = '', editText = '', pendingText = '';
+
+  function renderRaw() {
+    rawBody.innerHTML = rawText
+      ? escapeHtml(rawText) + (pendingText ? `<span class="pending">${escapeHtml(pendingText)}</span>` : '')
+      : '<span class="placeholder">等待语音…</span>';
+  }
+  function renderEdit() {
+    editBody.innerHTML = editText || '<span class="placeholder">等待停顿后优化…</span>';
+  }
+  function escapeHtml(s) {
+    return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  function setEditMeta(cls, label) {
+    editMeta.className = 'meta ' + cls;
+    editMetaText.textContent = label;
+  }
+
+  let typeAcc = 0, optTimer = null;
+  function stepTranscript(dt) {
+    if (!voiceOn || phase !== 'recording') return;
+    typeAcc += dt;
+    if (typeAcc < 0.085) return;
+    typeAcc = 0;
+    const seg = script[segIdx];
+    if (charIdx < seg.raw.length) {
+      pendingText += seg.raw[charIdx++];
+      renderRaw();
+      if (charIdx === seg.raw.length) {
+        // pause detected → commit raw, run "optimization"
+        clearTimeout(optTimer);
+        optTimer = setTimeout(() => {
+          rawText += pendingText; pendingText = '';
+          renderRaw();
+          setEditMeta('updating', '优化中');
+          llmEl.className = 'llm'; llmText.textContent = 'qwen3-max · 0.00s';
+          llmT0 = performance.now();
+          setTimeout(() => {
+            if (phase !== 'recording') return;
+            if (segIdx === script.length - 1) { rawText = ''; editText = ''; renderRaw(); }
+            editText += seg.edit;
+            renderEdit();
+            setEditMeta('ready', '已同步');
+            llmEl.className = 'llm idle'; llmText.textContent = 'qwen3-max · ' + lastLLM.toFixed(2) + 's';
+            segIdx = (segIdx + 1) % script.length; charIdx = 0;
+          }, 900 + Math.random() * 500);
+        }, 650);
+      }
+    }
+    // mirror into the background document
+    typedEl.textContent = (rawText + pendingText).slice(-46);
+  }
+
+  /* ---------- phase machine ---------- */
+  let phase = 'recording';
+  let recStart = performance.now(), procT0 = 0, llmT0 = 0, lastLLM = 1.86, procElapsed = 0;
+  let collapsed = false;
+
+  function setPhase(p) {
+    phase = p;
+    document.querySelectorAll('.controls [data-phase]').forEach((b) =>
+      b.classList.toggle('on', b.dataset.phase === p));
+    deck.classList.toggle('recording', p === 'recording');
+    lampZone.classList.toggle('gone', p !== 'recording');
+    stopBtn.style.display = p === 'recording' ? '' : 'none';
+
+    if (p === 'recording') {
+      recStart = performance.now();
+      tallyEl.innerHTML = '<span class="dot"></span><span>REC&nbsp;<b id="clock">00:00</b></span>';
+      llmEl.className = 'llm idle'; llmText.textContent = rawText ? 'qwen3-max · ' + lastLLM.toFixed(2) + 's' : '等待语音';
+      setEditMeta(editText ? 'ready' : 'waiting', editText ? '已同步' : '等待停顿');
+      renderRaw(); renderEdit();
+    } else if (p === 'processing') {
+      procT0 = performance.now();
+      tallyEl.innerHTML = '<span class="ring"></span><span>优化中&nbsp;<b id="clock">0.00s</b></span>';
+      llmEl.className = 'llm'; llmText.textContent = 'qwen3-max · 0.00s';
+      setEditMeta('updating', '优化中');
+      rawText += pendingText; pendingText = ''; renderRaw();
+    } else if (p === 'done') {
+      tallyEl.innerHTML = '<span class="ok">✓</span><span>已插入&nbsp;<b id="clock">' + fmtClock() + '</b></span>';
+      llmEl.className = 'llm idle'; llmText.textContent = 'qwen3-max · ' + lastLLM.toFixed(2) + 's';
+      setEditMeta('ready', '已同步');
+      editBody.innerHTML = editText || escapeHtml(script.map(s => s.edit).join(''));
+    } else if (p === 'error') {
+      tallyEl.innerHTML = '<span class="bad">!</span><span>优化失败</span>';
+      llmEl.className = 'llm err'; llmText.textContent = 'qwen3-max · 超时';
+      setEditMeta('failed', '优化失败');
+      editBody.innerHTML = (editText ? escapeHtml(editText) : '') + `
+        <div class="fail">
+          <div class="fail-title"><i>●</i>优化失败，原文仍已保留</div>
+          <div class="fail-msg">API 请求超时（30s）· 已自动切换备用模型重试 2 次</div>
+          <div class="attempt"><span>#1 · 火山引擎 / qwen3-max</span><span>30.00s</span></div>
+          <div class="attempt"><span>#2 · OpenRouter / claude-haiku</span><span>30.00s</span></div>
+          <div class="actions">
+            <button class="retry">重试优化</button>
+            <button class="raw-insert">插入原文</button>
+          </div>
+        </div>`;
+    }
+  }
+
+  function fmtClock() {
+    const s = Math.floor((performance.now() - recStart) / 1000);
+    return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  /* ---------- controls ---------- */
+  document.querySelectorAll('.controls [data-phase]').forEach((b) =>
+    b.addEventListener('click', () => setPhase(b.dataset.phase)));
+  $('#voiceToggle').addEventListener('click', (e) => {
+    voiceOn = !voiceOn;
+    e.target.classList.toggle('on', voiceOn);
+    e.target.textContent = voiceOn ? '语音流 ON' : '语音流 OFF';
+  });
+  collapseBtn.addEventListener('click', () => {
+    collapsed = !collapsed;
+    deck.classList.toggle('collapsed', collapsed);
+    collapseBtn.textContent = collapsed ? '▼' : '▲';
+  });
+  window.addEventListener('keydown', (e) => {
+    const map = { 1: 'recording', 2: 'processing', 3: 'done', 4: 'error' };
+    if (map[e.key]) setPhase(map[e.key]);
+  });
+
+  /* ---------- main loop ---------- */
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+
+    driveTarget(now);
+    const tau = target > level ? 0.09 : 0.24;
+    level += (target - level) * (1 - Math.exp(-dt / tau));
+    peak = Math.max(peak - dt * 0.9, level);
+
+    // lamp breath + glow
+    const breath = 0.5 + 0.5 * Math.sin(now / 1000 * (Math.PI * 2 / 3.6));
+    const energy = Math.pow(Math.max(0, (level - 0.02) / 0.6), 0.6);
+    const glow = phase === 'recording' ? 0.30 + 0.22 * breath + 0.75 * energy : 0.12;
+    core.style.setProperty('--glow', glow.toFixed(3));
+    core.style.setProperty('--breath', breath.toFixed(3));
+
+    if (phase === 'recording') {
+      drawTicks(now);
+      histAcc += dt * 110;
+      while (histAcc >= 1) { history.push(level); history.shift(); histAcc -= 1; }
+      drawMeter();
+      const rc = $('#clock'); rc && (rc.textContent = fmtClock());
+    } else if (phase === 'processing') {
+      procElapsed = (now - procT0) / 1000;
+      const c = $('#clock'); c && (c.textContent = procElapsed.toFixed(2) + 's');
+      llmText.textContent = 'qwen3-max · ' + procElapsed.toFixed(2) + 's';
+      // meter bridge idles with a slow sweep
+      histAcc += dt * 60;
+      while (histAcc >= 1) { history.push(0.03 + 0.02 * Math.sin(now / 500 + history.length / 8)); history.shift(); histAcc -= 1; }
+      drawMeter();
+      if (procElapsed > 2.2) { lastLLM = procElapsed; setPhase('done'); }
+    }
+    if (phase === 'recording' && llmT0) {
+      const t = (now - llmT0) / 1000;
+      if (llmEl.className === 'llm') llmText.textContent = 'qwen3-max · ' + t.toFixed(2) + 's';
+      if (t > 30) llmT0 = 0;
+    }
+
+    stepTranscript(dt);
+    requestAnimationFrame(frame);
+  }
+
+  // when llm finishes during recording we capture duration
+  const origSet = setEditMeta;
+  setEditMeta = function (cls, label) {
+    if (llmT0 && cls === 'ready') { lastLLM = (performance.now() - llmT0) / 1000; llmT0 = 0; }
+    origSet(cls, label);
+  };
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

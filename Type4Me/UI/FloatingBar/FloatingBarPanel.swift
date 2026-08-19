@@ -169,23 +169,8 @@ final class ScreenBottomIndicatorPanel: NSPanel {
   override var canBecomeKey: Bool { false }
   override var canBecomeMain: Bool { false }
 
-  private var cancelButtonHitRect: NSRect {
-    NSRect(
-      x: frame.width - 32,
-      y: frame.height - 29,
-      width: 28,
-      height: 27
-    )
-  }
-
-  func shouldPerformWindowDrag(at point: NSPoint) -> Bool {
-    !cancelButtonHitRect.contains(point)
-  }
-
   override func sendEvent(_ event: NSEvent) {
-    if event.type == .leftMouseDown,
-      shouldPerformWindowDrag(at: event.locationInWindow)
-    {
+    if event.type == .leftMouseDown {
       performDrag(with: event)
       return
     }
@@ -244,8 +229,7 @@ final class FloatingBarController {
     screenBottomIndicatorHosting = NSHostingView(
       rootView: ScreenBottomRecordingIndicator(
         meter: state.audioLevel,
-        modeName: state.currentMode.name,
-        onCancel: { [weak state] in state?.requestPanelCancel() }
+        modeName: state.currentMode.name
       )
     )
     screenBottomIndicatorHosting.sizingOptions = []
@@ -373,7 +357,7 @@ final class FloatingBarController {
     }
     let contentHeight =
       TF.topTranscriptPanelHeaderHeight
-      + 1
+      + TF.topTranscriptPanelMeterBridgeHeight
       + TF.topTranscriptPanelColumnHeaderHeight
       + max(rawHeight, optimizedHeight)
       + TF.topTranscriptPanelBodyTopPadding
@@ -449,8 +433,7 @@ final class FloatingBarController {
   private func showScreenBottomIndicator() {
     screenBottomIndicatorHosting.rootView = ScreenBottomRecordingIndicator(
       meter: state.audioLevel,
-      modeName: state.currentMode.name,
-      onCancel: { [weak state] in state?.requestPanelCancel() }
+      modeName: state.currentMode.name
     )
     screenBottomIndicatorPanel.contentView?.layer?.removeAllAnimations()
     if screenBottomIndicatorPanel.isVisible {

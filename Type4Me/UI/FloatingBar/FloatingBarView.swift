@@ -20,6 +20,11 @@ protocol FloatingBarState: AnyObject, Observable {
   var pinsTranscriptPopup: Bool { get }
   var liveOptimizedText: String { get }
   var liveOptimizationPhase: LiveOptimizationPhase { get }
+  var asrPanelPhase: ASRPanelPhase { get }
+  var asrPanelStatusLabel: String { get }
+  var asrRevision: Int { get }
+  var liveOptimizationRevision: Int? { get }
+  var lockedOptimizationRevision: Int? { get }
   var supportsLiveOptimizationPreview: Bool { get }
   /// True when recording without SenseVoice streaming (Qwen3-only).
   var isQwen3OnlyMode: Bool { get }
@@ -578,8 +583,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
         let elapsed = max(0, context.date.timeIntervalSince(active.startedAt))
         deckStatus(
           led: TF.lampAmber,
-          ledOpacity: 0.55 + 0.45 * (0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 4)),
-          text: state.isTranscriptPanelCollapsed ? active.model : "\(active.provider) / \(active.model)",
+          ledOpacity: 0.55 + 0.45
+            * (0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 4)),
+          text: state.isTranscriptPanelCollapsed
+            ? active.model : "\(active.provider) / \(active.model)",
           trailing: String(format: "%.2fs", elapsed),
           tone: TF.lampAmber.opacity(0.9)
         )
@@ -646,8 +653,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
     return HStack(alignment: .top, spacing: 0) {
       topPanelColumn(
         title: L("原文", "RAW"),
-        metadata: L("实时转写", "LIVE"),
-        tone: .live,
+        metadata: state.asrPanelStatusLabel,
+        tone: rawMetaTone,
         width: leftWidth,
         content: rawPanelText,
         isOptimized: false
@@ -709,25 +716,40 @@ struct FloatingBarView<S: FloatingBarState>: View {
     if state.finalOptimizationFailureMessage != nil {
       return L("优化失败", "FAILED")
     }
-    if !state.pendingOptimizationTail.isEmpty {
-      return L("待更新", "UPDATE PENDING")
+    if state.barPhase == .processing, let locked = state.lockedOptimizationRevision {
+      return L("提交中", "COMMITTING") + " · R\(locked)"
     }
+
+    let base: String
     switch state.liveOptimizationPhase {
     case .waiting:
-      return L("等待停顿", "WAITING")
+      base = L("等待停顿", "WAITING")
     case .stale:
-      return L("待更新", "UPDATE PENDING")
+      base = L("待更新", "UPDATE PENDING")
     case .updating:
-      return L("优化中", "UPDATING")
+      base = L("优化中", "UPDATING")
     case .ready:
-      return L("已同步", "CURRENT")
+      base = L("已优化", "READY")
     case .unavailable:
-      return L("不可用", "UNAVAILABLE")
+      base = L("不可用", "UNAVAILABLE")
     case .failed:
-      return L("优化失败", "FAILED")
+      base = L("优化失败", "FAILED")
     case .inactive:
-      return L("原文", "RAW")
+      base = L("原文", "RAW")
     }
+
+    if state.liveOptimizationPhase == .stale,
+      let optimizedRevision = state.liveOptimizationRevision,
+      state.asrRevision > 0
+    {
+      return base + " · R\(optimizedRevision)→R\(state.asrRevision)"
+    }
+    let revision =
+      state.liveOptimizationPhase == .ready
+      ? state.liveOptimizationRevision
+      : (state.asrRevision > 0 ? state.asrRevision : nil)
+    if let revision { return base + " · R\(revision)" }
+    return base
   }
 
   private enum DeckMetaTone {
@@ -750,6 +772,15 @@ struct FloatingBarView<S: FloatingBarState>: View {
       case .failed: return TF.settingsAccentRed.opacity(0.9)
       default: return TF.paperFaint
       }
+    }
+  }
+
+  private var rawMetaTone: DeckMetaTone {
+    switch state.asrPanelPhase {
+    case .connecting, .temporary: return .idle
+    case .recognizing, .finishing, .recovering: return .working
+    case .stable, .locked: return .ok
+    case .failed: return .failed
     }
   }
 
@@ -884,7 +915,9 @@ struct FloatingBarView<S: FloatingBarState>: View {
         .font(.system(size: 8.5, weight: .semibold))
         .foregroundStyle(tint)
         .frame(width: 22, height: 22)
-        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.white.opacity(0.05)))
+        .background(
+          RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.white.opacity(0.05))
+        )
         .overlay {
           RoundedRectangle(cornerRadius: 5, style: .continuous)
             .stroke(TF.deckLine, lineWidth: 1)
@@ -1161,7 +1194,8 @@ struct MeterBridge: View {
         let bufCount = levels.count
 
         for i in 0..<columns {
-          let histIdx = min(Int(CGFloat(i) / CGFloat(columns) * CGFloat(bufCount - 1)), bufCount - 1)
+          let histIdx = min(
+            Int(CGFloat(i) / CGFloat(columns) * CGFloat(bufCount - 1)), bufCount - 1)
           let amp = pow(max(0, (levels[histIdx] - 0.015) / 0.7), 0.8)
           let tickHeight = max(1, amp * size.height * 0.86)
           let fresh = CGFloat(i) / CGFloat(columns)
@@ -1351,11 +1385,13 @@ private struct TallyLampOrb: View {
         let inner: CGFloat = 39.5
         let outer: CGFloat = on ? 43.0 : 41.8
         var path = Path()
-        path.move(to: CGPoint(
+        path.move(
+          to: CGPoint(
           x: center.x + CGFloat(cos(angle)) * inner,
           y: center.y + CGFloat(sin(angle)) * inner
         ))
-        path.addLine(to: CGPoint(
+        path.addLine(
+          to: CGPoint(
           x: center.x + CGFloat(cos(angle)) * outer,
           y: center.y + CGFloat(sin(angle)) * outer
         ))
@@ -1626,7 +1662,6 @@ struct ProcessingProgress: View {
     return CGFloat(abs(h) % 10000) / 10000.0
   }
 }
-
 
 /// Frame-rate-independent exponential smoothing for audio level.
 private final class LevelSmoother {

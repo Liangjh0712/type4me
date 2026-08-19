@@ -266,19 +266,17 @@ actor RecognitionSession {
   /// Used to select app-specific snippet rules.
   private var targetBundleId: String?
 
-  // MARK: - Speculative LLM (fire during recording pauses)
+  // MARK: - Live optimization (fire during recording pauses)
 
+  private var transcriptRevisionTracker = TranscriptRevisionTracker()
+  private var liveOptimization = LiveOptimizationCoordinator()
   private var speculativeLLMTask: Task<String?, Never>?
-  private var speculativeLLMText: String = ""
-  /// Last successfully completed speculative result; reused at stop when the
-  /// transcript hasn't drifted, so pause-then-stop inserts without re-requesting.
-  private var speculativeLLMResult: String?
-  private var speculativeLLMModeID: UUID?
-  private var speculativeLLMPrompt: String?
   private var speculativeDebounceTask: Task<Void, Never>?
   private var speculativeThrottle = SpeculativeLLMThrottle()
   private var speculativeLLMUnavailable = false
-  /// Stores the latest authoritative LLM failure until the retry/raw decision UI consumes it.
+  /// Persists across recordings while the app is running; entries expire after 30 minutes.
+  private let llmRequestMemoizer = LLMRequestMemoizer()
+  /// Stores the latest final LLM failure until the retry/raw decision UI consumes it.
   private var pendingLLMError: Error?
   private var pendingSelectionAskConversationContext = ""
   /// When true, skip text injection (paste) but still save to clipboard & history.
@@ -415,6 +413,8 @@ actor RecognitionSession {
     pendingLLMError = nil
     lastStreamingError = nil
     llmAttemptCounter = 0
+    transcriptRevisionTracker.reset()
+    liveOptimization.reset()
     state = .starting
 
     // Load credentials for selected provider
@@ -1082,6 +1082,61 @@ actor RecognitionSession {
     modeID: UUID,
     retryInvalidOutput: Bool
   ) async throws -> String {
+    let cacheable =
+      modeID != ProcessingMode.macActionId
+      && modeID != ProcessingMode.selectionAskId
+    guard cacheable else {
+      return try await performUncachedModeLLMRequest(
+        client: client,
+        text: text,
+        prompt: prompt,
+        config: config,
+        modeID: modeID,
+        retryInvalidOutput: retryInvalidOutput
+      )
+    }
+
+    let key = OptimizationRequestKey(
+      text: text,
+      prompt: prompt,
+      modeID: modeID,
+      provider: CredentialStore.selectedLLMProvider.rawValue,
+      model: config.model,
+      baseURL: config.baseURL
+    )
+    let lookup = try await llmRequestMemoizer.value(for: key) {
+      try await self.performUncachedModeLLMRequest(
+        client: client,
+        text: text,
+        prompt: prompt,
+        config: config,
+        modeID: modeID,
+        retryInvalidOutput: retryInvalidOutput
+      )
+    }
+    switch lookup.source {
+    case .network:
+      DebugFileLogger.log(
+        "llm cache: stored key=\(key.shortID) chars=\(lookup.result.count)"
+      )
+    case .inFlight:
+      DebugFileLogger.log("llm cache: joined in-flight key=\(key.shortID)")
+    case .cache:
+      DebugFileLogger.log(
+        "llm cache: hit key=\(key.shortID) chars=\(lookup.result.count)"
+      )
+    }
+    return lookup.result
+  }
+
+  private func performUncachedModeLLMRequest(
+    client: any LLMClient,
+    text: String,
+    prompt: String,
+    config: LLMConfig,
+    modeID: UUID,
+    retryInvalidOutput: Bool
+  ) async throws -> String {
     let rejectsMeta = modeID == ProcessingMode.formalWritingId
     do {
       return try await performTimedLLMRequest(
@@ -1204,6 +1259,28 @@ actor RecognitionSession {
       logger.warning("stopRecording called but state is \(String(describing: self.state))")
       return
     }
+    let stopRevision = currentTranscript.revision
+    let canCommitPreview = currentMode.id != ProcessingMode.macActionId
+    let lockedArtifact =
+      canCommitPreview
+      ? liveOptimization.committableArtifact(revision: stopRevision, modeID: currentMode.id)
+      : nil
+    let lockedRequest =
+      lockedArtifact == nil && canCommitPreview
+      ? liveOptimization.matchingActiveRequest(revision: stopRevision, modeID: currentMode.id)
+      : nil
+    let lockedInFlightTask = lockedRequest == nil ? nil : speculativeLLMTask
+    if let lockedArtifact {
+      DebugFileLogger.log(
+        "stop: locked ready revision=\(stopRevision) key=\(lockedArtifact.request.key.shortID)"
+      )
+    } else if let lockedRequest {
+      DebugFileLogger.log(
+        "stop: locked in-flight revision=\(stopRevision) key=\(lockedRequest.key.shortID)"
+      )
+    } else {
+      DebugFileLogger.log("stop: no lockable optimization revision=\(stopRevision)")
+    }
 
     // Set state BEFORE any await to prevent a second stop from
     // slipping through the guard during the suspension point.
@@ -1311,7 +1388,7 @@ actor RecognitionSession {
 
     // ASR teardown: end audio, then drain the event stream through server EOS.
     // Utterance-level isFinal flags are not session-final on every provider, so
-    // they are never sufficient to start the authoritative LLM request.
+    // they are never sufficient to start the final fallback request.
     var asrTeardownClean = true
     if let client = asrClient {
       let endAudioTimeout: Duration = providerIsStreaming ? .seconds(3) : .seconds(60)
@@ -1373,11 +1450,13 @@ actor RecognitionSession {
           config: config,
           provider: activeProvider
         ) {
-          currentTranscript = RecognitionTranscript(
+          currentTranscript = versionedTranscript(
+            RecognitionTranscript(
             confirmedSegments: [batchText],
             partialText: "",
             authoritativeText: batchText,
             isFinal: true
+          )
           )
           hasSessionFinalTranscript = true
           DebugFileLogger.log(
@@ -1438,52 +1517,49 @@ actor RecognitionSession {
       // Apply snippet replacements before LLM (e.g. "我的邮箱" → actual email)
       finalText = SnippetStorage.applyEffective(to: finalText, bundleId: targetBundleId)
 
-      // Pause-then-stop with no further speech: a completed speculative preview
-      // whose source still matches the session-final transcript is already the
-      // answer — insert it instead of firing a redundant final request.
-      //
-      // If the preview request is still in flight (pause shorter than the
-      // debounce + round trip), await it rather than cancelling and re-asking
-      // the identical question.
-      if speculativeLLMResult == nil,
-        let inFlight = speculativeLLMTask,
-        Self.speculativePreviewMatchesFinal(
-          sourceText: speculativeLLMText,
-          finalText: finalText,
-          speculativeModeID: speculativeLLMModeID,
-          currentModeID: currentMode.id
-        )
+      // The hotkey press is the commit boundary. A ready artifact (or the
+      // matching request already in flight) was locked before endAudio, so
+      // later EOS rewrites cannot trigger a second LLM request.
+      var commitArtifact = lockedArtifact
+      if commitArtifact == nil,
+        let lockedRequest,
+        let lockedInFlightTask
       {
-        DebugFileLogger.log("stop: awaiting in-flight speculative preview")
-        if let awaited = await awaitWithTimeout(inFlight, after: .seconds(15)) {
+        DebugFileLogger.log(
+          "stop: awaiting locked in-flight revision=\(lockedRequest.sourceRevision) key=\(lockedRequest.key.shortID)"
+        )
+        if let awaited = await awaitWithTimeout(lockedInFlightTask, after: .seconds(15)) {
           let cleaned = awaited.collapsingExtraSpaces
           if !cleaned.isEmpty {
-            speculativeLLMResult = cleaned
+            commitArtifact =
+              liveOptimization.committableArtifact(
+                revision: lockedRequest.sourceRevision,
+                modeID: lockedRequest.modeID
+              ) ?? LiveOptimizationArtifact(request: lockedRequest, result: cleaned)
           }
         }
       }
 
-      let reusablePreview = Self.reusableSpeculativeResult(
-        result: speculativeLLMResult,
-        sourceText: speculativeLLMText,
-        finalText: finalText,
-        speculativeModeID: speculativeLLMModeID,
-        currentModeID: currentMode.id
-      )
-
-      if let reusablePreview,
-        Self.requiresAuthoritativeFinalLLM(needsLLM: needsLLM, finalText: finalText)
+      if let commitArtifact,
+        Self.requiresFinalLLM(needsLLM: needsLLM, finalText: finalText)
       {
+        let committed = commitArtifact.result
         DebugFileLogger.log(
-          "stop: reusing completed speculative preview (\(reusablePreview.count) chars)")
-        processedText = reusablePreview
-        finalText = reusablePreview
-        onASREvent?(.processingResult(text: reusablePreview))
-      } else if Self.requiresAuthoritativeFinalLLM(needsLLM: needsLLM, finalText: finalText) {
+          "stop: committing locked revision=\(commitArtifact.request.sourceRevision) eosRevision=\(currentTranscript.revision) key=\(commitArtifact.request.key.shortID) chars=\(committed.count)"
+        )
+        processedText = committed
+        finalText = committed
+        onASREvent?(
+          .liveOptimizationLocked(
+            sourceText: commitArtifact.request.displaySourceText,
+            sourceRevision: commitArtifact.request.sourceRevision
+          ))
+        onASREvent?(.processingResult(text: committed))
+      } else if Self.requiresFinalLLM(needsLLM: needsLLM, finalText: finalText) {
         state = .postProcessing
         if let llmConfig = loadEffectiveLLMConfig() {
           DebugFileLogger.log(
-            "stop: authoritative final LLM firing mode=\(currentMode.name) model=\(llmConfig.model) with \(finalText.count) chars"
+            "stop: final LLM firing revision=\(currentTranscript.revision) mode=\(currentMode.name) model=\(llmConfig.model) with \(finalText.count) chars"
           )
           let client = currentLLMClient()
           let prompt = promptContext.expandContextVariables(currentMode.prompt)
@@ -1502,7 +1578,7 @@ actor RecognitionSession {
                   retryInvalidOutput: true
                 )
               } catch {
-                DebugFileLogger.log("stop: authoritative final LLM FAILED: \(error)")
+                DebugFileLogger.log("stop: final LLM FAILED: \(error)")
                 self.setPendingLLMError(error)
                 return nil as String?
               }
@@ -1789,11 +1865,13 @@ actor RecognitionSession {
 
     if let recovered, !recovered.isEmpty {
       injectionEngine.copyToClipboard(recovered)
-      currentTranscript = RecognitionTranscript(
+      currentTranscript = versionedTranscript(
+        RecognitionTranscript(
         confirmedSegments: [recovered],
         partialText: "",
         authoritativeText: recovered,
         isFinal: true
+      )
       )
       await persistCurrentHistory(
         rawText: recoveryPartialText,
@@ -1856,6 +1934,11 @@ actor RecognitionSession {
   }
 
   // MARK: - ASR Events
+  private func versionedTranscript(_ transcript: RecognitionTranscript) -> RecognitionTranscript {
+    var versioned = transcript
+    versioned.revision = transcriptRevisionTracker.update(transcript.canonicalText)
+    return versioned
+  }
 
   private func handleASREvent(_ event: RecognitionEvent, expectedGeneration: Int) {
     guard expectedGeneration == sessionGeneration else {
@@ -1874,6 +1957,31 @@ actor RecognitionSession {
     default:
       break
     }
+    if case .transcript(let rawTranscript) = event {
+      let transcript = versionedTranscript(rawTranscript)
+      currentTranscript = transcript
+      onASREvent?(.transcript(transcript))
+      audioEngine.updateAudioJournalPartialTranscript(transcript.canonicalText)
+      if !transcript.canonicalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        speechDetected = true
+        if let cont = firstStreamingTextCont {
+          firstStreamingTextCont = nil
+          firstStreamingTextTimeoutTask?.cancel()
+          firstStreamingTextTimeoutTask = nil
+          cont.resume(returning: true)
+        }
+      }
+      DebugFileLogger.log(
+        "asr revision=\(transcript.revision) source=\(transcript.textSource.rawValue) chars=\(transcript.canonicalText.count)"
+      )
+      logger.info("Transcript updated: \(transcript.canonicalText)")
+      if state == .recording && !currentMode.prompt.isEmpty
+        && currentMode.executionKind == .recording
+      {
+        scheduleSpeculativeLLM()
+      }
+      return
+    }
 
     // Notify UI layer for all non-ready events. Streaming errors during
     // recording become recoverable interruptions, not red error toasts.
@@ -1887,25 +1995,8 @@ actor RecognitionSession {
     case .ready:
       break  // handled above
 
-    case .transcript(let transcript):
-      currentTranscript = transcript
-      audioEngine.updateAudioJournalPartialTranscript(transcript.displayText)
-      if !transcript.displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        speechDetected = true
-        if let cont = firstStreamingTextCont {
-          firstStreamingTextCont = nil
-          firstStreamingTextTimeoutTask?.cancel()
-          firstStreamingTextTimeoutTask = nil
-          cont.resume(returning: true)
-        }
-      }
-      logger.info("Transcript updated: \(transcript.displayText)")
-      if state == .recording && !currentMode.prompt.isEmpty
-        && currentMode.executionKind == .recording
-      {
-        scheduleSpeculativeLLM()
-      }
-
+    case .transcript:
+      break  // handled and versioned before generic dispatch
     case .error(let error):
       lastStreamingError = error
       logger.error("ASR error: \(error)")
@@ -1928,7 +2019,7 @@ actor RecognitionSession {
       }
 
     case .processingResult, .processingLabelOverride,
-      .liveOptimizationStarted, .liveOptimizationResult,
+      .liveOptimizationStarted, .liveOptimizationResult, .liveOptimizationLocked,
       .liveOptimizationUnavailable, .liveOptimizationFailed,
       .llmRequestStarted, .llmRequestFinished, .finalOptimizationFailed,
       .recoveryStarted, .recoveryPrompt, .recoverySucceeded, .recoveryFailed,
@@ -2080,13 +2171,21 @@ actor RecognitionSession {
     guard canRunSpeculativeLLMForCurrentSession,
       !speculativeLLMUnavailable
     else { return }
-    var text = currentTranscript.composedText
+    let displaySourceText = currentTranscript.canonicalText
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    text = SnippetStorage.applyEffective(to: text, bundleId: targetBundleId)
-    scheduleSpeculativeLLM(text: text)
+    let text = SnippetStorage.applyEffective(to: displaySourceText, bundleId: targetBundleId)
+    scheduleSpeculativeLLM(
+      text: text,
+      displaySourceText: displaySourceText,
+      sourceRevision: currentTranscript.revision
+    )
   }
 
-  private func scheduleSpeculativeLLM(text: String) {
+  private func scheduleSpeculativeLLM(
+    text: String,
+    displaySourceText: String,
+    sourceRevision: Int
+  ) {
     guard state == .recording else { return }
     switch speculativeThrottle.submit(text) {
     case .tooShort:
@@ -2112,10 +2211,18 @@ actor RecognitionSession {
     case .cooldown(let remaining):
       DebugFileLogger.log("speculative LLM: cooling down remaining=\(remaining)")
       speculativeDebounceTask?.cancel()
-      speculativeDebounceTask = Task { [text] in
+      speculativeDebounceTask = Task { [text, displaySourceText, sourceRevision] in
         try? await Task.sleep(for: remaining)
         guard !Task.isCancelled, state == .recording else { return }
-        scheduleSpeculativeLLM(text: text)
+        guard currentTranscript.revision == sourceRevision else {
+          scheduleSpeculativeLLM()
+          return
+        }
+        scheduleSpeculativeLLM(
+          text: text,
+          displaySourceText: displaySourceText,
+          sourceRevision: sourceRevision
+        )
       }
       return
     case .limitReached:
@@ -2135,15 +2242,29 @@ actor RecognitionSession {
     }
 
     speculativeDebounceTask?.cancel()
-    speculativeDebounceTask = Task { [text] in
+    speculativeDebounceTask = Task { [text, displaySourceText, sourceRevision] in
       try? await Task.sleep(for: SpeculativeLLMThrottle.debounceDuration)
       guard !Task.isCancelled, state == .recording else { return }
-      await fireSpeculativeLLM(text: text)
+      guard currentTranscript.revision == sourceRevision else {
+        scheduleSpeculativeLLM()
+        return
+      }
+      await fireSpeculativeLLM(
+        text: text,
+        displaySourceText: displaySourceText,
+        sourceRevision: sourceRevision
+      )
     }
   }
 
-  private func fireSpeculativeLLM(text: String) async {
-    guard speculativeThrottle.beginDebouncedRequest(for: text) else { return }
+  private func fireSpeculativeLLM(
+    text: String,
+    displaySourceText: String,
+    sourceRevision: Int
+  ) async {
+    guard currentTranscript.revision == sourceRevision,
+      speculativeThrottle.beginDebouncedRequest(for: text)
+    else { return }
     guard let llmConfig = loadEffectiveLLMConfig() else {
       speculativeLLMUnavailable = true
       _ = speculativeThrottle.requestCompleted(input: text)
@@ -2154,18 +2275,33 @@ actor RecognitionSession {
       return
     }
 
-    speculativeLLMText = text
     let requestModeID = currentMode.id
     let prompt = promptContext.expandContextVariables(currentMode.prompt)
-    speculativeLLMModeID = currentMode.id
-    speculativeLLMPrompt = prompt
+    let key = OptimizationRequestKey(
+      text: text,
+      prompt: prompt,
+      modeID: requestModeID,
+      provider: CredentialStore.selectedLLMProvider.rawValue,
+      model: llmConfig.model,
+      baseURL: llmConfig.baseURL
+    )
+    let request = LiveOptimizationRequest(
+      key: key,
+      displaySourceText: displaySourceText,
+      sourceRevision: sourceRevision,
+      modeID: requestModeID
+    )
+    liveOptimization.begin(request)
     let client = currentLLMClient()
-    let rawSourceText = currentTranscript.composedText
-      .trimmingCharacters(in: .whitespacesAndNewlines)
     let requestGeneration = sessionGeneration
-    onASREvent?(.liveOptimizationStarted(sourceText: rawSourceText, modeID: requestModeID))
+    onASREvent?(
+      .liveOptimizationStarted(
+        sourceText: displaySourceText,
+        sourceRevision: sourceRevision,
+        modeID: requestModeID
+      ))
     DebugFileLogger.log(
-      "speculative LLM: firing mode=\(currentMode.name) model=\(llmConfig.model) with \(text.count) chars"
+      "speculative LLM: firing revision=\(sourceRevision) key=\(key.shortID) mode=\(currentMode.name) model=\(llmConfig.model) with \(text.count) chars"
     )
 
     speculativeLLMTask = Task {
@@ -2180,35 +2316,41 @@ actor RecognitionSession {
         )
         guard !Task.isCancelled, requestGeneration == self.sessionGeneration else {
           _ = self.speculativeThrottle.requestCompleted(input: text)
+          self.liveOptimization.fail(request)
           return nil
         }
 
         let cleaned = result.collapsingExtraSpaces
-        DebugFileLogger.log("speculative LLM: done \(cleaned.count) chars")
+        DebugFileLogger.log(
+          "speculative LLM: done revision=\(sourceRevision) key=\(key.shortID) chars=\(cleaned.count)"
+        )
         let pending = self.speculativeThrottle.requestCompleted(input: text)
+        let artifact = self.liveOptimization.complete(request, result: cleaned)
         if self.state == .recording {
-          if cleaned.isEmpty {
+          if let artifact {
+            self.onASREvent?(
+              .liveOptimizationResult(
+                text: artifact.result,
+                sourceText: request.displaySourceText,
+                sourceRevision: request.sourceRevision,
+                modeID: request.modeID
+              ))
+          } else {
             self.onASREvent?(
               .liveOptimizationFailed(
                 message: L("实时优化失败", "Live optimization failed"),
-                sourceText: rawSourceText
-              ))
-          } else {
-            self.speculativeLLMResult = cleaned
-            self.onASREvent?(
-              .liveOptimizationResult(
-                text: cleaned,
-                sourceText: rawSourceText,
-                modeID: requestModeID
+                sourceText: request.displaySourceText,
+                sourceRevision: request.sourceRevision
               ))
           }
-          if let pending {
-            self.scheduleSpeculativeLLM(text: pending)
+          if pending != nil {
+            self.scheduleSpeculativeLLM()
           }
         }
         return result
       } catch {
         let pending = self.speculativeThrottle.requestCompleted(input: text)
+        self.liveOptimization.fail(request)
         guard !Task.isCancelled, requestGeneration == self.sessionGeneration else {
           return nil
         }
@@ -2232,10 +2374,11 @@ actor RecognitionSession {
             self.onASREvent?(
               .liveOptimizationFailed(
                 message: L("实时优化失败", "Live optimization failed"),
-                sourceText: rawSourceText
+                sourceText: request.displaySourceText,
+                sourceRevision: request.sourceRevision
               ))
-            if let pending {
-              self.scheduleSpeculativeLLM(text: pending)
+            if pending != nil {
+              self.scheduleSpeculativeLLM()
             }
           }
         }
@@ -2254,45 +2397,8 @@ actor RecognitionSession {
       || description.contains("请求过于频繁")
   }
 
-  static func requiresAuthoritativeFinalLLM(needsLLM: Bool, finalText: String) -> Bool {
+  static func requiresFinalLLM(needsLLM: Bool, finalText: String) -> Bool {
     needsLLM && !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-  }
-
-  /// True when the speculative request's source still matches the session-final
-  /// transcript (exact / punctuation / whitespace drift only) for the same mode.
-  /// Mac Action modes never match: their "result" is a command reply that must
-  /// go through dispatch, not insertion.
-  static func speculativePreviewMatchesFinal(
-    sourceText: String,
-    finalText: String,
-    speculativeModeID: UUID?,
-    currentModeID: UUID
-  ) -> Bool {
-    guard speculativeModeID == currentModeID,
-      currentModeID != ProcessingMode.macActionId,
-      !sourceText.isEmpty
-    else { return false }
-    return TranscriptDiff.classify(source: sourceText, final: finalText).canReuseLLMResult
-  }
-
-  /// A completed in-recording preview is insertion-eligible at stop when its
-  /// source still matches the session-final transcript.
-  static func reusableSpeculativeResult(
-    result: String?,
-    sourceText: String,
-    finalText: String,
-    speculativeModeID: UUID?,
-    currentModeID: UUID
-  ) -> String? {
-    guard let result, !result.isEmpty,
-      speculativePreviewMatchesFinal(
-        sourceText: sourceText,
-        finalText: finalText,
-        speculativeModeID: speculativeModeID,
-        currentModeID: currentModeID
-      )
-    else { return nil }
-    return result
   }
 
   private func cancelSpeculativeLLM() {
@@ -2300,6 +2406,7 @@ actor RecognitionSession {
     speculativeDebounceTask = nil
     speculativeLLMTask?.cancel()
     speculativeLLMTask = nil
+    liveOptimization.reset()
   }
 
   private func setPendingLLMError(_ error: Error) {
@@ -2311,10 +2418,7 @@ actor RecognitionSession {
     speculativeDebounceTask = nil
     speculativeLLMTask?.cancel()
     speculativeLLMTask = nil
-    speculativeLLMText = ""
-    speculativeLLMResult = nil
-    speculativeLLMModeID = nil
-    speculativeLLMPrompt = nil
+    liveOptimization.reset()
     speculativeThrottle.reset()
     speculativeLLMUnavailable = false
   }

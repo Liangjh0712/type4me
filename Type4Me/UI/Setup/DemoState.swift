@@ -145,6 +145,11 @@ extension DemoState: FloatingBarState {
     var isQwen3OnlyMode: Bool { false }
     var liveOptimizedText: String { "" }
     var liveOptimizationPhase: LiveOptimizationPhase { .inactive }
+  var asrPanelPhase: ASRPanelPhase { .connecting }
+  var asrPanelStatusLabel: String { L("演示", "DEMO") }
+  var asrRevision: Int { 0 }
+  var liveOptimizationRevision: Int? { nil }
+  var lockedOptimizationRevision: Int? { nil }
     var supportsLiveOptimizationPreview: Bool { false }
     var optimizedPanelText: String { processingResultText }
     var pendingOptimizationTail: String { "" }

@@ -163,13 +163,11 @@ final class FloatingBarPanelTests: XCTestCase {
         confirmedSegments: ["一行原文"],
         partialText: "",
         authoritativeText: "一行原文",
-        isFinal: false
+        isFinal: false,
+        revision: 1
       ))
     state.showLiveOptimizationResult(
-      "一行优化稿",
-      sourceText: "一行原文",
-      modeID: state.currentMode.id
-    )
+      "一行优化稿", sourceText: "一行原文", sourceRevision: state.asrRevision, modeID: state.currentMode.id)
 
     for _ in 0..<12 {
       RunLoop.current.run(until: Date().addingTimeInterval(0.02))
@@ -277,10 +275,13 @@ final class FloatingBarPanelTests: XCTestCase {
         confirmedSegments: [raw],
         partialText: "",
         authoritativeText: raw,
-        isFinal: false
+        isFinal: false,
+        revision: 1
       ))
-    state.beginLiveOptimization(sourceText: raw, modeID: state.currentMode.id)
-    state.showLiveOptimizationResult(optimized, sourceText: raw, modeID: state.currentMode.id)
+    state.beginLiveOptimization(
+      sourceText: raw, sourceRevision: state.asrRevision, modeID: state.currentMode.id)
+    state.showLiveOptimizationResult(
+      optimized, sourceText: raw, sourceRevision: state.asrRevision, modeID: state.currentMode.id)
 
     for _ in 0..<15 {
       RunLoop.current.run(until: Date().addingTimeInterval(0.02))

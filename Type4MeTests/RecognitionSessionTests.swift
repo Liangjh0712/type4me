@@ -2,6 +2,14 @@ import XCTest
 
 @testable import Type4Me
 
+private actor LLMInvocationCounter {
+  private(set) var value = 0
+
+  func increment() {
+    value += 1
+  }
+}
+
 final class RecognitionSessionTests: XCTestCase {
   override func tearDown() {
     CredentialStore.selectedASRProvider = .volcano
@@ -84,7 +92,7 @@ final class RecognitionSessionTests: XCTestCase {
     await session.setState(.idle)
   }
 
-  func testFinalPolishAlwaysRequiresAuthoritativeRequestForNonEmptyText() {
+  func testFinalPolishRequiresRequestForNonEmptyText() {
     let previous = UserDefaults.standard.object(forKey: "tf_shortTextExemption")
     UserDefaults.standard.set("50", forKey: "tf_shortTextExemption")
     defer {
@@ -96,17 +104,17 @@ final class RecognitionSessionTests: XCTestCase {
     }
 
     XCTAssertTrue(
-      RecognitionSession.requiresAuthoritativeFinalLLM(
+      RecognitionSession.requiresFinalLLM(
         needsLLM: true,
         finalText: "短句"
       ))
     XCTAssertFalse(
-      RecognitionSession.requiresAuthoritativeFinalLLM(
+      RecognitionSession.requiresFinalLLM(
         needsLLM: false,
         finalText: "最终 ASR 文本"
       ))
     XCTAssertFalse(
-      RecognitionSession.requiresAuthoritativeFinalLLM(
+      RecognitionSession.requiresFinalLLM(
         needsLLM: true,
         finalText: "   "
       ))
@@ -190,61 +198,133 @@ final class RecognitionSessionTests: XCTestCase {
     XCTAssertEqual("第 3 个".removingCJKLatinSpaces, "第3个")
   }
 
-  // MARK: - Speculative preview reuse at stop
+  // MARK: - Canonical live optimization state
 
-  private func reuse(
-    result: String? = "优化后的稿子。",
-    source: String = "优化后的稿子",
-    final: String = "优化后的稿子",
-    speculativeMode: UUID? = UUID(),
-    currentMode: UUID = UUID()
-  ) -> String? {
-    RecognitionSession.reusableSpeculativeResult(
-      result: result,
-      sourceText: source,
-      finalText: final,
-      speculativeModeID: speculativeMode,
-      currentModeID: currentMode
+  private func optimizationKey(
+    text: String = "今天下午三点开会",
+    prompt: String = "整理原文",
+    modeID: UUID,
+    model: String = "deepseek-v4-flash"
+  ) -> OptimizationRequestKey {
+    OptimizationRequestKey(
+      text: text,
+      prompt: prompt,
+      modeID: modeID,
+      provider: "deepseek",
+      model: model,
+      baseURL: "https://example.com"
     )
   }
 
-  func testSpeculativePreviewReusedWhenTranscriptUnchanged() {
+  func testTranscriptRevisionKeepsFormattingOnlyRewriteOnSameRevision() {
+    var tracker = TranscriptRevisionTracker()
+
+    XCTAssertEqual(tracker.update("今天下午三点开会"), 1)
+    XCTAssertEqual(tracker.update("今天下午三点，开会。"), 1)
+    XCTAssertEqual(tracker.update("今天下午四点开会"), 2)
+  }
+
+  func testArtifactCannotBeRelabeledByNewerInFlightRequest() {
     let mode = UUID()
+    let first = LiveOptimizationRequest(
+      key: optimizationKey(modeID: mode),
+      displaySourceText: "今天下午三点开会",
+      sourceRevision: 1,
+      modeID: mode
+    )
+    let second = LiveOptimizationRequest(
+      key: optimizationKey(text: "今天下午四点开会", modeID: mode),
+      displaySourceText: "今天下午四点开会",
+      sourceRevision: 2,
+      modeID: mode
+    )
+    var coordinator = LiveOptimizationCoordinator()
+
+    coordinator.begin(first)
+    XCTAssertNotNil(coordinator.complete(first, result: "三点开会。"))
+    coordinator.begin(second)
+
+    XCTAssertEqual(coordinator.committableArtifact(revision: 1, modeID: mode)?.result, "三点开会。")
+    XCTAssertNil(coordinator.committableArtifact(revision: 2, modeID: mode))
+    XCTAssertEqual(coordinator.matchingActiveRequest(revision: 2, modeID: mode), second)
+  }
+
+  func testReadyArtifactLocksOnlyMatchingRevisionAndMode() {
+    let mode = UUID()
+    let request = LiveOptimizationRequest(
+      key: optimizationKey(modeID: mode),
+      displaySourceText: "今天下午三点开会",
+      sourceRevision: 7,
+      modeID: mode
+    )
+    var coordinator = LiveOptimizationCoordinator()
+    coordinator.begin(request)
+    _ = coordinator.complete(request, result: "优化后的稿子。")
+
     XCTAssertEqual(
-      reuse(source: "今天下午三点开会", final: "今天下午三点开会", speculativeMode: mode, currentMode: mode),
+      coordinator.committableArtifact(revision: 7, modeID: mode)?.result,
       "优化后的稿子。"
     )
+    XCTAssertNil(coordinator.committableArtifact(revision: 8, modeID: mode))
+    XCTAssertNil(coordinator.committableArtifact(revision: 7, modeID: UUID()))
   }
 
-  func testSpeculativePreviewReusedWhenOnlyPunctuationDrifted() {
+  func testLLMResultCacheHitsWithinTTLAndExpires() {
     let mode = UUID()
-    XCTAssertEqual(
-      reuse(source: "今天下午三点开会", final: "今天下午三点开会。", speculativeMode: mode, currentMode: mode),
-      "优化后的稿子。"
-    )
+    let key = optimizationKey(modeID: mode)
+    let start = ContinuousClock.now
+    var cache = LLMResultCache(ttl: .seconds(30), maximumEntryCount: 2)
+
+    cache.insert("优化后的稿子。", for: key, now: start)
+
+    XCTAssertEqual(cache.value(for: key, now: start + .seconds(29)), "优化后的稿子。")
+    XCTAssertNil(cache.value(for: key, now: start + .seconds(30)))
   }
 
-  func testSpeculativePreviewNotReusedWhenTranscriptSemanticallyChanged() {
+  func testLLMResultCacheKeyIncludesPromptAndModel() {
     let mode = UUID()
-    XCTAssertNil(
-      reuse(source: "今天下午三点开会", final: "今天下午四点开会", speculativeMode: mode, currentMode: mode)
-    )
+    let original = optimizationKey(modeID: mode)
+    let changedPrompt = optimizationKey(prompt: "翻译原文", modeID: mode)
+    let changedModel = optimizationKey(modeID: mode, model: "another-model")
+    var cache = LLMResultCache()
+
+    cache.insert("优化后的稿子。", for: original)
+
+    XCTAssertNil(cache.value(for: changedPrompt))
+    XCTAssertNil(cache.value(for: changedModel))
   }
 
-  func testSpeculativePreviewNotReusedAfterModeSwitch() {
-    XCTAssertNil(reuse(speculativeMode: UUID(), currentMode: UUID()))
-  }
-
-  func testSpeculativePreviewNotReusedWhenMissing() {
+  func testLLMRequestMemoizerCoalescesInFlightAndCachesCompletion() async throws {
     let mode = UUID()
-    XCTAssertNil(reuse(result: nil, speculativeMode: mode, currentMode: mode))
-    XCTAssertNil(reuse(result: "", speculativeMode: mode, currentMode: mode))
-    XCTAssertNil(reuse(source: "", speculativeMode: mode, currentMode: mode))
+    let key = optimizationKey(modeID: mode)
+    let memoizer = LLMRequestMemoizer()
+    let counter = LLMInvocationCounter()
+
+    async let first = memoizer.value(for: key) {
+      await counter.increment()
+      try await Task.sleep(for: .milliseconds(50))
+      return "唯一网络结果"
+    }
+    try await Task.sleep(for: .milliseconds(10))
+    async let second = memoizer.value(for: key) {
+      await counter.increment()
+      return "不应执行"
   }
 
-  func testSpeculativePreviewNeverReusedForMacAction() {
-    XCTAssertNil(
-      reuse(speculativeMode: ProcessingMode.macActionId, currentMode: ProcessingMode.macActionId)
-    )
+    let (firstLookup, secondLookup) = try await (first, second)
+    XCTAssertEqual(firstLookup.result, "唯一网络结果")
+    XCTAssertEqual(secondLookup.result, "唯一网络结果")
+    XCTAssertEqual(Set([firstLookup.source, secondLookup.source]), Set([.network, .inFlight]))
+    let countAfterJoin = await counter.value
+    XCTAssertEqual(countAfterJoin, 1)
+
+    let cached = try await memoizer.value(for: key) {
+      await counter.increment()
+      return "不应执行"
+    }
+    XCTAssertEqual(cached.source, .cache)
+    XCTAssertEqual(cached.result, "唯一网络结果")
+    let countAfterCache = await counter.value
+    XCTAssertEqual(countAfterCache, 1)
   }
 }

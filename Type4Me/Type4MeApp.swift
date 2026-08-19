@@ -240,14 +240,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           self.safeResetHotkeyState()
         case .processingLabelOverride(let label):
           appState.processingLabelOverride = label
-        case .liveOptimizationStarted(let sourceText, let modeID):
-          appState.beginLiveOptimization(sourceText: sourceText, modeID: modeID)
-        case .liveOptimizationResult(let text, let sourceText, let modeID):
-          appState.showLiveOptimizationResult(text, sourceText: sourceText, modeID: modeID)
+        case .liveOptimizationStarted(let sourceText, let sourceRevision, let modeID):
+          appState.beginLiveOptimization(
+            sourceText: sourceText,
+            sourceRevision: sourceRevision,
+            modeID: modeID
+          )
+        case .liveOptimizationResult(let text, let sourceText, let sourceRevision, let modeID):
+          appState.showLiveOptimizationResult(
+            text,
+            sourceText: sourceText,
+            sourceRevision: sourceRevision,
+            modeID: modeID
+          )
         case .liveOptimizationUnavailable(let message):
           appState.showLiveOptimizationUnavailable(message)
-        case .liveOptimizationFailed(let message, let sourceText):
-          appState.showLiveOptimizationFailure(message, sourceText: sourceText)
+        case .liveOptimizationFailed(let message, let sourceText, let sourceRevision):
+          appState.showLiveOptimizationFailure(
+            message,
+            sourceText: sourceText,
+            sourceRevision: sourceRevision
+          )
+        case .liveOptimizationLocked(let sourceText, let sourceRevision):
+          appState.lockLiveOptimization(
+            sourceText: sourceText,
+            sourceRevision: sourceRevision
+          )
         case .processingResult(let text):
           appState.showProcessingResult(text)
           self.hotkeyManager.isProcessing = true

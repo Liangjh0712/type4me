@@ -73,6 +73,16 @@ enum LiveOptimizationPhase: Equatable {
     }
   }
 }
+enum ASRPanelPhase: Equatable {
+  case connecting
+  case temporary
+  case recognizing
+  case stable
+  case finishing
+  case locked
+  case recovering
+  case failed
+}
 
 struct ActiveLLMCall: Equatable {
   let provider: String
@@ -992,6 +1002,12 @@ final class AppState {
   var liveOptimizationPhase: LiveOptimizationPhase = .inactive {
     didSet { onPanelLayoutChanged?() }
   }
+  var asrPanelPhase: ASRPanelPhase = .connecting { didSet { onPanelLayoutChanged?() } }
+  var asrTextSource: TranscriptTextSource = .temporary { didSet { onPanelLayoutChanged?() } }
+  var asrRevision = 0 { didSet { onPanelLayoutChanged?() } }
+  var liveOptimizationRevision: Int? { didSet { onPanelLayoutChanged?() } }
+  var lockedOptimizationRevision: Int? { didSet { onPanelLayoutChanged?() } }
+  @ObservationIgnored private var asrStabilityTask: Task<Void, Never>?
   var processingResultText = "" { didSet { onPanelLayoutChanged?() } }
   var isTranscriptPanelCollapsed = false { didSet { onPanelLayoutChanged?() } }
   var activeLLMCall: ActiveLLMCall? { didSet { onPanelLayoutChanged?() } }
@@ -1009,6 +1025,32 @@ final class AppState {
   }
   var effectiveProcessingLabel: String {
     processingLabelOverride ?? currentMode.processingLabel
+  }
+  var asrPanelStatusLabel: String {
+    let currentRevision = asrRevision > 0 ? " · R\(asrRevision)" : ""
+    switch asrPanelPhase {
+    case .connecting:
+      return L("连接中", "CONNECTING")
+    case .temporary:
+      return L("临时稿", "TEMPORARY") + currentRevision
+    case .recognizing:
+      let label =
+        asrTextSource == .cumulative
+        ? L("累计稿 · 识别中", "CUMULATIVE · LIVE")
+        : L("临时稿", "TEMPORARY")
+      return label + currentRevision
+    case .stable:
+      return L("累计稿 · 暂稳", "CUMULATIVE · STABLE") + currentRevision
+    case .finishing:
+      return L("收尾中", "FINALIZING") + currentRevision
+    case .locked:
+      let revision = lockedOptimizationRevision ?? asrRevision
+      return L("已锁定", "LOCKED") + (revision > 0 ? " · R\(revision)" : "")
+    case .recovering:
+      return L("恢复中", "RECOVERING") + currentRevision
+    case .failed:
+      return L("识别失败", "FAILED") + currentRevision
+    }
   }
 
   // MARK: Panel Control (not observed by SwiftUI)
@@ -1065,6 +1107,7 @@ final class AppState {
     activeLLMCall = nil
     llmCallAttempts = []
     finalOptimizationFailureMessage = nil
+    resetASRPanelState()
     resetLiveOptimization()
     barPhase = .preparing
     if RecordingPanelPreference.showsRecordingPanel() {
@@ -1088,12 +1131,25 @@ final class AppState {
     case .recording:
       recordingStopDate = Date()
       processingFinishTime = nil
+      asrStabilityTask?.cancel()
+      asrStabilityTask = nil
       if currentMode.id == ProcessingMode.directId {
         processingLabelOverride = L("校准中", "Calibrating")
       }
-      liveOptimizedText = ""
-      liveOptimizationSourceText = ""
+
+      let locksReadyArtifact =
+        supportsLiveOptimizationPreview
+        && liveOptimizationPhase == .ready
+        && liveOptimizationRevision == asrRevision
+        && !liveOptimizedText.isEmpty
+      if locksReadyArtifact {
+        lockedOptimizationRevision = liveOptimizationRevision
+        asrPanelPhase = .locked
+      } else {
+        lockedOptimizationRevision = nil
+        asrPanelPhase = .finishing
       liveOptimizationPhase = supportsLiveOptimizationPreview ? .updating : .inactive
+      }
       barPhase = .processing
       onShowPanel?()
     default:
@@ -1113,65 +1169,104 @@ final class AppState {
     if latencyMs > 50 {
       DebugFileLogger.log("⚠️ pipeline latency \(latencyMs)ms (ASR emit → UI setLiveTranscript)")
     }
+    if transcript.revision > 0, transcript.revision < asrRevision {
+      DebugFileLogger.log(
+        "dropping stale ASR revision R\(transcript.revision), current=R\(asrRevision)"
+      )
+      return
+    }
+    if barPhase == .processing, lockedOptimizationRevision != nil {
+      DebugFileLogger.log(
+        "panel: preserving locked revision R\(lockedOptimizationRevision ?? 0), ignoring EOS UI revision R\(transcript.revision)"
+      )
+      return
+    }
     if latencyMs > Self.stalePartialTranscriptThresholdMs,
-      !transcript.isFinal,
+      transcript.textSource == .temporary,
       !segments.isEmpty
     {
-      DebugFileLogger.log("dropping stale partial transcript latency=\(latencyMs)ms")
+      DebugFileLogger.log("dropping stale temporary transcript latency=\(latencyMs)ms")
       return
     }
 
-    if transcript.isFinal,
-      !transcript.authoritativeText.isEmpty,
-      transcript.authoritativeText != transcript.composedText
-    {
-      segments = [TranscriptionSegment(text: transcript.authoritativeText, isConfirmed: true)]
-    } else {
-      segments = transcript.confirmedSegments.map {
-        TranscriptionSegment(text: $0, isConfirmed: true)
+    let previousRevision = asrRevision
+    let previousSource = asrTextSource
+    let canonicalText = transcript.canonicalText
+    segments =
+      canonicalText.isEmpty
+      ? []
+      : [
+        TranscriptionSegment(
+          text: canonicalText,
+          isConfirmed: transcript.textSource == .cumulative
+        )
+      ]
+    asrRevision = transcript.revision
+    asrTextSource = transcript.textSource
+
+    if barPhase == .recording {
+      if transcript.textSource == .temporary {
+        asrPanelPhase = .temporary
+        asrStabilityTask?.cancel()
+        asrStabilityTask = nil
+      } else if transcript.revision != previousRevision || previousSource != .cumulative {
+        asrPanelPhase = .recognizing
+        scheduleASRStability(for: transcript.revision)
       }
-      if !transcript.partialText.isEmpty {
-        segments.append(TranscriptionSegment(text: transcript.partialText, isConfirmed: false))
-      }
+    } else if barPhase == .processing {
+      asrPanelPhase = .finishing
     }
     markLiveOptimizationSourceChanged()
   }
 
-  func beginLiveOptimization(sourceText: String, modeID: UUID) {
+  func beginLiveOptimization(sourceText: String, sourceRevision: Int, modeID: UUID) {
     guard barPhase == .recording,
       supportsLiveOptimizationPreview,
       currentMode.id == modeID
     else { return }
     guard !sourceText.isEmpty else { return }
     liveOptimizationPhase = .updating
+    if sourceRevision == asrRevision, asrTextSource == .cumulative {
+      asrPanelPhase = .stable
+    }
   }
 
-  func showLiveOptimizationResult(_ result: String, sourceText: String, modeID: UUID) {
+  func showLiveOptimizationResult(
+    _ result: String,
+    sourceText: String,
+    sourceRevision: Int,
+    modeID: UUID
+  ) {
     guard barPhase == .recording,
       supportsLiveOptimizationPreview,
       currentMode.id == modeID,
       !result.isEmpty
     else { return }
 
-    let diff = TranscriptDiff.classify(source: sourceText, final: transcriptionText)
-    switch diff.type {
-    case .exactMatch, .punctuationOnly, .whitespaceOnly, .trailingPunctuationOnly:
       liveOptimizedText = result
       liveOptimizationSourceText = sourceText
+    liveOptimizationRevision = sourceRevision
+    if sourceRevision == asrRevision {
       liveOptimizationPhase = .ready
-    case .suffixAdded:
-      liveOptimizedText = result
-      liveOptimizationSourceText = sourceText
-      liveOptimizationPhase = .stale
-    case .prefixAdded, .semanticChange:
-      // ASR rewrote earlier text while the request was in flight. The result
-      // still reflects what the user said moments ago — show it as stale
-      // instead of dropping back to an empty "waiting" column.
-      DebugFileLogger.log("keeping stale live optimization result diff=\(diff.type.rawValue)")
-      liveOptimizedText = result
-      liveOptimizationSourceText = sourceText
+      if asrTextSource == .cumulative {
+        asrPanelPhase = .stable
+      }
+    } else {
+      DebugFileLogger.log(
+        "keeping stale live optimization result revision=R\(sourceRevision) current=R\(asrRevision)"
+      )
       liveOptimizationPhase = .stale
     }
+  }
+  func lockLiveOptimization(sourceText: String, sourceRevision: Int) {
+    guard barPhase == .processing, !sourceText.isEmpty else { return }
+    segments = [TranscriptionSegment(text: sourceText, isConfirmed: true)]
+    asrRevision = sourceRevision
+    asrTextSource = .cumulative
+    asrPanelPhase = .locked
+    lockedOptimizationRevision = sourceRevision
+    liveOptimizationSourceText = sourceText
+    liveOptimizationRevision = sourceRevision
   }
 
   func showLiveOptimizationUnavailable(_ message: String) {
@@ -1181,7 +1276,11 @@ final class AppState {
     liveOptimizationPhase = .unavailable(message)
   }
 
-  func showLiveOptimizationFailure(_ message: String, sourceText _: String) {
+  func showLiveOptimizationFailure(
+    _ message: String,
+    sourceText _: String,
+    sourceRevision _: Int
+  ) {
     guard barPhase == .recording, supportsLiveOptimizationPreview else { return }
     liveOptimizationPhase = .failed(message)
   }
@@ -1283,6 +1382,7 @@ final class AppState {
     pinsTranscriptPopup = true
     audioLevel.current = 0
     recordingStartDate = nil
+    asrPanelPhase = .recovering
     barPhase = .recovering
     onShowPanel?()
   }
@@ -1319,6 +1419,7 @@ final class AppState {
     audioLevel.current = 0
     recordingStartDate = nil
     pinsTranscriptPopup = false
+    asrPanelPhase = .failed
     barPhase = .error
     onShowPanel?()
     scheduleAutoHide(for: .error, delay: .seconds(1.8))
@@ -1332,6 +1433,7 @@ final class AppState {
     finalOptimizationFailureMessage = nil
     audioLevel.current = 0
     pinsTranscriptPopup = false
+    resetASRPanelState()
     resetLiveOptimization()
     onHidePanel?()
   }
@@ -1383,7 +1485,9 @@ final class AppState {
   }
 
   var pendingOptimizationTail: String {
-    guard !liveOptimizationSourceText.isEmpty,
+    guard let liveOptimizationRevision,
+      liveOptimizationRevision != asrRevision,
+      !liveOptimizationSourceText.isEmpty,
       transcriptionText.hasPrefix(liveOptimizationSourceText)
     else { return "" }
     return String(transcriptionText.dropFirst(liveOptimizationSourceText.count))
@@ -1399,9 +1503,33 @@ final class AppState {
 
   private var hideGeneration = 0
 
+  private func resetASRPanelState() {
+    asrStabilityTask?.cancel()
+    asrStabilityTask = nil
+    asrPanelPhase = .connecting
+    asrTextSource = .temporary
+    asrRevision = 0
+    lockedOptimizationRevision = nil
+  }
+
+  private func scheduleASRStability(for revision: Int) {
+    asrStabilityTask?.cancel()
+    asrStabilityTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: SpeculativeLLMThrottle.debounceDuration)
+      guard let self,
+        !Task.isCancelled,
+        self.barPhase == .recording,
+        self.asrRevision == revision,
+        self.asrTextSource == .cumulative
+      else { return }
+      self.asrPanelPhase = .stable
+    }
+  }
+
   private func resetLiveOptimization() {
     liveOptimizedText = ""
     liveOptimizationSourceText = ""
+    liveOptimizationRevision = nil
     liveOptimizationPhase = supportsLiveOptimizationPreview ? .waiting : .inactive
   }
 
@@ -1411,33 +1539,21 @@ final class AppState {
       return
     }
     guard liveOptimizationPhase.failureMessage == nil else { return }
-    guard !liveOptimizedText.isEmpty else {
+    guard !liveOptimizedText.isEmpty, let liveOptimizationRevision else {
       if liveOptimizationPhase != .updating {
         liveOptimizationPhase = .waiting
       }
       return
     }
 
-    let diff = TranscriptDiff.classify(
-      source: liveOptimizationSourceText,
-      final: transcriptionText
-    )
-    switch diff.type {
-    case .exactMatch, .punctuationOnly, .whitespaceOnly, .trailingPunctuationOnly:
-      liveOptimizationPhase = .ready
-    case .suffixAdded:
+    if liveOptimizationRevision == asrRevision {
       if liveOptimizationPhase != .updating {
-        liveOptimizationPhase = .stale
+        liveOptimizationPhase = .ready
       }
-    case .prefixAdded, .semanticChange:
-      // Keep the last good preview visible as stale; the next speculative
-      // request refreshes it. Clearing it made the column flicker back to
-      // "waiting for a pause" on every ASR self-correction.
-      if liveOptimizationPhase != .updating {
+    } else if liveOptimizationPhase != .updating {
         liveOptimizationPhase = .stale
       }
     }
-  }
 
   private func showDone(message: String = L("已完成", "Done"), delay: Duration = .seconds(0.5)) {
     DebugFileLogger.log("showDone: barPhase → .done, message=\(message)")

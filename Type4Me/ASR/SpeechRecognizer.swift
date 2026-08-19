@@ -1,5 +1,5 @@
-import Foundation
 @preconcurrency import AVFoundation
+import Foundation
 
 struct ASRRequestOptions: Sendable, Equatable {
     var enablePunc: Bool = true
@@ -38,11 +38,17 @@ enum ProxyBypassMode: String {
     case off, all, asr, llm
 
     static var current: ProxyBypassMode {
-        ProxyBypassMode(rawValue: UserDefaults.standard.string(forKey: "tf_bypassProxy") ?? "off") ?? .off
+    ProxyBypassMode(rawValue: UserDefaults.standard.string(forKey: "tf_bypassProxy") ?? "off")
+      ?? .off
     }
 
     var bypassASR: Bool { self == .all || self == .asr }
     var bypassLLM: Bool { self == .all || self == .llm }
+}
+
+enum TranscriptTextSource: String, Sendable, Equatable {
+  case temporary
+  case cumulative
 }
 
 struct RecognitionTranscript: Sendable, Equatable {
@@ -50,6 +56,8 @@ struct RecognitionTranscript: Sendable, Equatable {
     let partialText: String
     let authoritativeText: String
     let isFinal: Bool
+  /// Session-local semantic revision assigned by RecognitionSession.
+  var revision: Int = 0
     /// Monotonic timestamp when the ASR client emitted this transcript.
     /// Used for pipeline latency diagnostics; excluded from Equatable.
     var emitTime: ContinuousClock.Instant = .now
@@ -59,6 +67,7 @@ struct RecognitionTranscript: Sendable, Equatable {
             && lhs.partialText == rhs.partialText
             && lhs.authoritativeText == rhs.authoritativeText
             && lhs.isFinal == rhs.isFinal
+      && lhs.revision == rhs.revision
     }
 
     static let empty = RecognitionTranscript(
@@ -73,9 +82,18 @@ struct RecognitionTranscript: Sendable, Equatable {
         return pieces.joined()
     }
 
-    var displayText: String {
+  /// The single text projection used by the panel, live optimization, and
+  /// final insertion. Prefer the server's cumulative result and only fall
+  /// back to locally composed utterances before it becomes available.
+  var canonicalText: String {
         authoritativeText.isEmpty ? composedText : authoritativeText
     }
+
+  var textSource: TranscriptTextSource {
+    authoritativeText.isEmpty ? .temporary : .cumulative
+  }
+
+  var displayText: String { canonicalText }
 }
 
 enum InjectionOutcome: Sendable, Equatable {
@@ -100,12 +118,19 @@ enum RecognitionEvent: Sendable {
     case finalizedEmpty
     case processingResult(text: String)
     case processingLabelOverride(String)
-    case liveOptimizationStarted(sourceText: String, modeID: UUID)
-    case liveOptimizationResult(text: String, sourceText: String, modeID: UUID)
+  case liveOptimizationStarted(sourceText: String, sourceRevision: Int, modeID: UUID)
+  case liveOptimizationResult(
+    text: String,
+    sourceText: String,
+    sourceRevision: Int,
+    modeID: UUID
+  )
     case liveOptimizationUnavailable(message: String)
-    case liveOptimizationFailed(message: String, sourceText: String)
+  case liveOptimizationFailed(message: String, sourceText: String, sourceRevision: Int)
+  case liveOptimizationLocked(sourceText: String, sourceRevision: Int)
     case llmRequestStarted(provider: String, model: String, attempt: Int)
-    case llmRequestFinished(provider: String, model: String, attempt: Int, durationSeconds: Double, succeeded: Bool)
+  case llmRequestFinished(
+    provider: String, model: String, attempt: Int, durationSeconds: Double, succeeded: Bool)
     case finalOptimizationFailed(message: String, sourceText: String)
     case recoveryStarted(text: String, message: String)
     case recoveryPrompt(text: String, message: String)

@@ -123,14 +123,15 @@ final class AppStateTests: XCTestCase {
     XCTAssertEqual(showCount, 1)
   }
 
-  func testSetLiveTranscriptReplacesExistingConfirmedSegments() {
+  func testSetLiveTranscriptUsesCumulativeCanonicalText() {
     let appState = AppState()
     appState.setLiveTranscript(
       RecognitionTranscript(
         confirmedSegments: ["我想", "买咖"],
         partialText: "",
         authoritativeText: "我想买咖",
-        isFinal: false
+        isFinal: false,
+        revision: 1
       )
     )
     appState.setLiveTranscript(
@@ -138,12 +139,15 @@ final class AppStateTests: XCTestCase {
         confirmedSegments: ["我想", "买咖啡"],
         partialText: "",
         authoritativeText: "我想买咖啡",
-        isFinal: false
+        isFinal: false,
+        revision: 2
       )
     )
 
-    XCTAssertEqual(appState.segments.map(\.text), ["我想", "买咖啡"])
+    XCTAssertEqual(appState.segments.map(\.text), ["我想买咖啡"])
     XCTAssertEqual(appState.transcriptionText, "我想买咖啡")
+    XCTAssertEqual(appState.asrTextSource, .cumulative)
+    XCTAssertEqual(appState.asrRevision, 2)
   }
 
   func testSetLiveTranscriptUsesAuthoritativeFinalTextWhenDifferent() {
@@ -162,14 +166,15 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.segments.first?.isConfirmed == true)
   }
 
-  func testSetLiveTranscriptDropsStalePartialUpdates() {
+  func testSetLiveTranscriptDropsOlderRevision() {
     let appState = AppState()
     appState.setLiveTranscript(
       RecognitionTranscript(
         confirmedSegments: ["new"],
         partialText: "",
         authoritativeText: "new",
-        isFinal: false
+        isFinal: false,
+        revision: 2
       )
     )
 
@@ -179,11 +184,13 @@ final class AppStateTests: XCTestCase {
         partialText: "",
         authoritativeText: "old",
         isFinal: false,
+        revision: 1,
         emitTime: ContinuousClock.now - .seconds(1)
       )
     )
 
     XCTAssertEqual(appState.transcriptionText, "new")
+    XCTAssertEqual(appState.asrRevision, 2)
   }
 
   func testFinalizeShowsClipboardFallbackMessage() {
@@ -229,14 +236,16 @@ final class AppStateTests: XCTestCase {
     appState.markRecordingReady()
     appState.setLiveTranscript(makeTranscript("预算 30 万"))
 
-    appState.beginLiveOptimization(sourceText: "预算 30 万", modeID: appState.currentMode.id)
+    appState.beginLiveOptimization(
+      sourceText: "预算 30 万", sourceRevision: appState.asrRevision, modeID: appState.currentMode.id)
     appState.showLiveOptimizationResult(
-      "预算为 30 万。", sourceText: "预算 30 万", modeID: appState.currentMode.id)
+      "预算为 30 万。", sourceText: "预算 30 万", sourceRevision: appState.asrRevision,
+      modeID: appState.currentMode.id)
 
     XCTAssertEqual(appState.liveOptimizationPhase, .ready)
     XCTAssertEqual(appState.liveOptimizedText, "预算为 30 万。")
 
-    appState.setLiveTranscript(makeTranscript("预算 30 万，改成 50 万"))
+    appState.setLiveTranscript(makeTranscript("预算 30 万，改成 50 万", revision: 2))
 
     XCTAssertEqual(appState.liveOptimizationPhase, .stale)
     XCTAssertEqual(appState.liveOptimizedText, "预算为 30 万。")
@@ -250,10 +259,8 @@ final class AppStateTests: XCTestCase {
     let partial = "感觉现在的效果会稍微好一点但是可能还是有一些 bug 我感觉"
     appState.setLiveTranscript(makeTranscript(partial))
     appState.showLiveOptimizationResult(
-      "感觉现在的效果稍微好了一点，但可能仍有一些 bug。",
-      sourceText: partial,
-      modeID: appState.currentMode.id
-    )
+      "感觉现在的效果稍微好了一点，但可能仍有一些 bug。", sourceText: partial, sourceRevision: appState.asrRevision,
+      modeID: appState.currentMode.id)
 
     appState.setLiveTranscript(
       makeTranscript("感觉现在的效果会稍微好一点，但是可能还是有一些 bug，我感觉。"))
@@ -272,7 +279,8 @@ final class AppStateTests: XCTestCase {
     appState.markRecordingReady()
     appState.setLiveTranscript(makeTranscript("最新原文"))
 
-    appState.showLiveOptimizationFailure("实时优化失败", sourceText: "旧原文")
+    appState.showLiveOptimizationFailure(
+      "实时优化失败", sourceText: "旧原文", sourceRevision: appState.asrRevision)
 
     XCTAssertEqual(appState.liveOptimizationPhase, .failed("实时优化失败"))
   }
@@ -298,10 +306,7 @@ final class AppStateTests: XCTestCase {
     appState.setLiveTranscript(makeTranscript("第一版原文"))
 
     appState.showLiveOptimizationResult(
-      "第二版优化稿",
-      sourceText: "第二版原文",
-      modeID: appState.currentMode.id
-    )
+      "第二版优化稿", sourceText: "第二版原文", sourceRevision: 2, modeID: appState.currentMode.id)
 
     XCTAssertEqual(appState.liveOptimizationPhase, .stale)
     XCTAssertEqual(appState.liveOptimizedText, "第二版优化稿")
@@ -314,12 +319,10 @@ final class AppStateTests: XCTestCase {
     appState.markRecordingReady()
     appState.setLiveTranscript(makeTranscript("重新帮我设置一下 UI"))
     appState.showLiveOptimizationResult(
-      "重新帮我设置一下 UI。",
-      sourceText: appState.transcriptionText,
-      modeID: appState.currentMode.id
-    )
+      "重新帮我设置一下 UI。", sourceText: appState.transcriptionText, sourceRevision: appState.asrRevision,
+      modeID: appState.currentMode.id)
 
-    appState.setLiveTranscript(makeTranscript("重新帮我测试一下，因为"))
+    appState.setLiveTranscript(makeTranscript("重新帮我测试一下，因为", revision: 2))
 
     XCTAssertEqual(appState.liveOptimizationPhase, .stale)
     XCTAssertFalse(appState.liveOptimizedText.isEmpty)
@@ -358,24 +361,26 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.isTranscriptPanelCollapsed)
   }
 
-  func testStopClearsRecordingPreviewBeforeAuthoritativeResult() {
+  func testStopLocksReadyPreviewAndIgnoresEOSPanelRewrite() {
     let appState = AppState()
     appState.currentMode = .formalWriting
     appState.startRecording()
     appState.markRecordingReady()
     appState.setLiveTranscript(makeTranscript("最终原文"))
     appState.showLiveOptimizationResult(
-      "录音期间预览",
-      sourceText: "最终原文",
-      modeID: appState.currentMode.id
-    )
+      "录音期间预览", sourceText: "最终原文", sourceRevision: appState.asrRevision,
+      modeID: appState.currentMode.id)
 
     appState.stopRecording()
+    appState.setLiveTranscript(makeTranscript("EOS 修订原文", revision: 2))
 
-    XCTAssertTrue(appState.liveOptimizedText.isEmpty)
-    XCTAssertTrue(appState.liveOptimizationSourceText.isEmpty)
-    XCTAssertTrue(appState.optimizedPanelText.isEmpty)
-    XCTAssertEqual(appState.liveOptimizationPhase, .updating)
+    XCTAssertEqual(appState.liveOptimizedText, "录音期间预览")
+    XCTAssertEqual(appState.liveOptimizationSourceText, "最终原文")
+    XCTAssertEqual(appState.optimizedPanelText, "录音期间预览")
+    XCTAssertEqual(appState.liveOptimizationPhase, .ready)
+    XCTAssertEqual(appState.asrPanelPhase, .locked)
+    XCTAssertEqual(appState.lockedOptimizationRevision, 1)
+    XCTAssertEqual(appState.transcriptionText, "最终原文")
   }
 
   func testFinalOptimizationFailureExposesRetryAndRawActions() {
@@ -385,10 +390,8 @@ final class AppStateTests: XCTestCase {
     appState.markRecordingReady()
     appState.setLiveTranscript(makeTranscript("完整原文"))
     appState.showLiveOptimizationResult(
-      "不能继续显示的旧预览",
-      sourceText: "完整原文",
-      modeID: appState.currentMode.id
-    )
+      "不能继续显示的旧预览", sourceText: "完整原文", sourceRevision: appState.asrRevision,
+      modeID: appState.currentMode.id)
     var retried = false
     var insertedRaw = false
     appState.onRetryFinalOptimization = { retried = true }
@@ -468,10 +471,8 @@ final class AppStateTests: XCTestCase {
     appState.markRecordingReady()
     appState.setLiveTranscript(makeTranscript("需要切换模式的原文"))
     appState.showLiveOptimizationResult(
-      "旧模式生成的优化稿",
-      sourceText: appState.transcriptionText,
-      modeID: appState.currentMode.id
-    )
+      "旧模式生成的优化稿", sourceText: appState.transcriptionText, sourceRevision: appState.asrRevision,
+      modeID: appState.currentMode.id)
     var selectedMode: ProcessingMode?
     appState.onPanelModeSelected = { selectedMode = $0 }
 
@@ -506,12 +507,13 @@ final class AppStateTests: XCTestCase {
       appState.selectablePanelModes.contains { $0.id == ProcessingMode.selectionAskId })
   }
 
-  private func makeTranscript(_ text: String) -> RecognitionTranscript {
+  private func makeTranscript(_ text: String, revision: Int = 1) -> RecognitionTranscript {
     RecognitionTranscript(
       confirmedSegments: [text],
       partialText: "",
       authoritativeText: text,
-      isFinal: false
+      isFinal: false,
+      revision: revision
     )
   }
 

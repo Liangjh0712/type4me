@@ -193,7 +193,7 @@ final class HotkeyManager: NSObject {
     var isSuppressed = false {
         didSet {
             guard oldValue != isSuppressed else { return }
-            updateHeadsetMediaKeyRemapper()
+            updateHeadsetMediaKeyMonitor()
         }
     }
 
@@ -234,8 +234,8 @@ final class HotkeyManager: NSObject {
     /// Tokens for MPRemoteCommandCenter handlers (prevents Apple Music from auto-launching).
     private var mediaCommandTokens: [(command: MPRemoteCommand, token: Any)] = []
     private var isMediaSessionActive = false
-    /// Remaps the analog headset center button before macOS can interpret it as Siri.
-    private var headsetMediaKeyRemapper: HeadsetMediaKeyRemapper?
+    /// Exclusively captures the analog headset remote as raw HID media-key events.
+    private var headsetMediaKeyMonitor: HeadsetMediaKeyMonitor?
 
     // MARK: - Registration
 
@@ -260,7 +260,7 @@ final class HotkeyManager: NSObject {
             reinstallTap()
         } else {
             updateMediaKeySession()
-            updateHeadsetMediaKeyRemapper()
+            updateHeadsetMediaKeyMonitor()
         }
     }
 
@@ -335,12 +335,12 @@ final class HotkeyManager: NSObject {
 
         startHealthCheck()
         updateMediaKeySession()
-        updateHeadsetMediaKeyRemapper()
+        updateHeadsetMediaKeyMonitor()
         return true
     }
 
     func stop() {
-        stopHeadsetMediaKeyRemapper()
+        stopHeadsetMediaKeyMonitor()
         deactivateMediaKeySession()
         healthCheckTimer?.invalidate()
         healthCheckTimer = nil
@@ -370,7 +370,6 @@ final class HotkeyManager: NSObject {
         healthCheckTimer?.invalidate()
         healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             guard let self, let tap = self.eventTap else { return }
-            self.headsetMediaKeyRemapper?.refresh()
 
             // Check 1: Is the tap port still valid? Only recreate the tap for real invalidation,
             // not for normal idle periods with no keyboard/mouse input.
@@ -475,27 +474,6 @@ final class HotkeyManager: NSObject {
             cancelPendingModifierTriggers()
         }
 
-        // The analog headset Play/Pause usage is remapped to F20 before macOS can
-        // turn it into an AppleMikey Siri action. Route that private surrogate back
-        // to the persisted Play/Pause binding and swallow key repeats.
-        if headsetMediaKeyRemapper != nil,
-           keyCode == HeadsetMediaKeyRemapper.remappedVirtualKeyCode
-        {
-            if type == .keyDown,
-               event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-                DebugFileLogger.log(
-                    "hotkey media source=headset-remap keyType=16 edge=repeat action=ignored")
-                return nil
-            }
-            if handleMediaKeyEvent(
-                keyType: 16,
-                isKeyDown: type == .keyDown,
-                isKeyUp: type == .keyUp,
-                source: "headset-remap"
-            ) {
-                return nil
-            }
-        }
 
         for binding in bindings {
             // Skip mouse button and media key bindings in the keyboard path
@@ -901,35 +879,43 @@ final class HotkeyManager: NSObject {
         return true
     }
 
-    private func updateHeadsetMediaKeyRemapper() {
-        let needsRemapping = eventTap != nil && !isSuppressed && bindings.contains { binding in
+    private func updateHeadsetMediaKeyMonitor() {
+        let needsMonitoring = eventTap != nil && !isSuppressed && bindings.contains { binding in
             binding.isMediaKey && ModeBinding.mediaKeyType(from: Int(binding.keyCode)) == 16
         }
 
-        guard needsRemapping else {
-            stopHeadsetMediaKeyRemapper()
+        guard needsMonitoring else {
+            stopHeadsetMediaKeyMonitor()
             return
         }
-        guard headsetMediaKeyRemapper == nil else { return }
+        guard headsetMediaKeyMonitor == nil else { return }
 
-        let remapper = HeadsetMediaKeyRemapper()
-        guard remapper.start() else {
-            NSLog("[HotkeyManager] Failed to remap analog headset Play/Pause; using CGEvent fallback")
-            DebugFileLogger.log("headset remap start failed; using system-media fallback")
+        let monitor = HeadsetMediaKeyMonitor { [weak self] keyType, pressed in
+            guard let self else { return false }
+            return self.handleMediaKeyEvent(
+                keyType: keyType,
+                isKeyDown: pressed,
+                isKeyUp: !pressed,
+                source: "headset-hid"
+            )
+        }
+        guard monitor.start() else {
+            NSLog("[HotkeyManager] Failed to open analog headset HID; using CGEvent fallback")
+            DebugFileLogger.log("headset HID start failed; using system-media fallback")
             return
         }
 
-        headsetMediaKeyRemapper = remapper
-        NSLog("[HotkeyManager] Analog headset Play/Pause remapped to F20")
-        DebugFileLogger.log("headset remap started")
+        headsetMediaKeyMonitor = monitor
+        NSLog("[HotkeyManager] Analog headset HID opened exclusively")
+        DebugFileLogger.log("headset HID monitor started")
     }
 
-    private func stopHeadsetMediaKeyRemapper() {
-        guard let remapper = headsetMediaKeyRemapper else { return }
-        remapper.stop()
-        headsetMediaKeyRemapper = nil
-        NSLog("[HotkeyManager] Analog headset Play/Pause mapping restored")
-        DebugFileLogger.log("headset remap stopped and original mapping restored")
+    private func stopHeadsetMediaKeyMonitor() {
+        guard let monitor = headsetMediaKeyMonitor else { return }
+        monitor.stop()
+        headsetMediaKeyMonitor = nil
+        NSLog("[HotkeyManager] Analog headset HID released")
+        DebugFileLogger.log("headset HID monitor stopped")
     }
 
     internal func simulateMediaKeyEvent(keyType: Int, pressed: Bool) -> Bool {

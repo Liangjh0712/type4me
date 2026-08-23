@@ -189,7 +189,12 @@ final class HotkeyManager: NSObject {
     // MARK: - State
 
     /// When true, all hotkey events pass through unhandled (used during hotkey recording).
-    var isSuppressed = false
+    var isSuppressed = false {
+        didSet {
+            guard oldValue != isSuppressed else { return }
+            updateHeadsetMediaKeyRemapper()
+        }
+    }
 
     /// When true, ESC key aborts active recording.
     var isESCAbortEnabled = true
@@ -227,6 +232,8 @@ final class HotkeyManager: NSObject {
     /// Tokens for MPRemoteCommandCenter handlers (prevents Apple Music from auto-launching).
     private var mediaCommandTokens: [(command: MPRemoteCommand, token: Any)] = []
     private var isMediaSessionActive = false
+    /// Remaps the analog headset center button before macOS can interpret it as Siri.
+    private var headsetMediaKeyRemapper: HeadsetMediaKeyRemapper?
 
     // MARK: - Registration
 
@@ -250,6 +257,7 @@ final class HotkeyManager: NSObject {
             reinstallTap()
         } else {
             updateMediaKeySession()
+            updateHeadsetMediaKeyRemapper()
         }
     }
 
@@ -324,10 +332,12 @@ final class HotkeyManager: NSObject {
 
         startHealthCheck()
         updateMediaKeySession()
+        updateHeadsetMediaKeyRemapper()
         return true
     }
 
     func stop() {
+        stopHeadsetMediaKeyRemapper()
         deactivateMediaKeySession()
         healthCheckTimer?.invalidate()
         healthCheckTimer = nil
@@ -443,37 +453,35 @@ final class HotkeyManager: NSObject {
             let isKeyDown = keyState == 0x0A
             let isKeyUp = keyState == 0x0B
 
-            guard Self.isKnownMediaKeyType(keyType) else {
+            guard handleMediaKeyEvent(keyType: keyType, isKeyDown: isKeyDown, isKeyUp: isKeyUp) else {
                 return Unmanaged.passUnretained(event)
             }
-
-            let encodedKeyCode = ModeBinding.mediaKeyCode(for: keyType)
-
-            for binding in bindings {
-                guard binding.isMediaKey, Int(binding.keyCode) == encodedKeyCode else { continue }
-
-                switch binding.style {
-                case .hold:
-                    if isKeyDown {
-                        handleBindingEvent(binding: binding, pressed: true)
-                    } else if isKeyUp {
-                        handleBindingEvent(binding: binding, pressed: false)
-                    }
-                case .toggle:
-                    if isKeyDown {
-                        handleTogglePress(binding: binding)
-                    }
-                }
-                return nil  // Swallow matched media key events
-            }
-
-            return Unmanaged.passUnretained(event)
+            return nil  // Swallow matched media key events
         }
 
         // MARK: Keyboard events
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         if type == .keyDown {
             cancelPendingModifierTriggers()
+        }
+
+        // The analog headset Play/Pause usage is remapped to F20 before macOS can
+        // turn it into an AppleMikey Siri action. Route that private surrogate back
+        // to the persisted Play/Pause binding and swallow key repeats.
+        if headsetMediaKeyRemapper != nil,
+           keyCode == HeadsetMediaKeyRemapper.remappedVirtualKeyCode
+        {
+            if type == .keyDown,
+               event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return nil
+            }
+            if handleMediaKeyEvent(
+                keyType: 16,
+                isKeyDown: type == .keyDown,
+                isKeyUp: type == .keyUp
+            ) {
+                return nil
+            }
         }
 
         for binding in bindings {
@@ -833,6 +841,64 @@ final class HotkeyManager: NSObject {
         case 63: return flags.contains(.maskSecondaryFn)
         default: return false
         }
+    }
+
+    @discardableResult
+    private func handleMediaKeyEvent(keyType: Int, isKeyDown: Bool, isKeyUp: Bool) -> Bool {
+        guard Self.isKnownMediaKeyType(keyType) else { return false }
+        let encodedKeyCode = ModeBinding.mediaKeyCode(for: keyType)
+
+        for binding in bindings {
+            guard binding.isMediaKey, Int(binding.keyCode) == encodedKeyCode else { continue }
+
+            switch binding.style {
+            case .hold:
+                if isKeyDown {
+                    handleBindingEvent(binding: binding, pressed: true)
+                } else if isKeyUp {
+                    handleBindingEvent(binding: binding, pressed: false)
+                }
+            case .toggle:
+                if isKeyDown {
+                    handleTogglePress(binding: binding)
+                }
+            }
+            return true
+        }
+
+        return false
+    }
+
+    private func updateHeadsetMediaKeyRemapper() {
+        let needsRemapping = eventTap != nil && !isSuppressed && bindings.contains { binding in
+            binding.isMediaKey && ModeBinding.mediaKeyType(from: Int(binding.keyCode)) == 16
+        }
+
+        guard needsRemapping else {
+            stopHeadsetMediaKeyRemapper()
+            return
+        }
+        guard headsetMediaKeyRemapper == nil else { return }
+
+        let remapper = HeadsetMediaKeyRemapper()
+        guard remapper.start() else {
+            NSLog("[HotkeyManager] Failed to remap analog headset Play/Pause; using CGEvent fallback")
+            return
+        }
+
+        headsetMediaKeyRemapper = remapper
+        NSLog("[HotkeyManager] Analog headset Play/Pause remapped to F20")
+    }
+
+    private func stopHeadsetMediaKeyRemapper() {
+        guard let remapper = headsetMediaKeyRemapper else { return }
+        remapper.stop()
+        headsetMediaKeyRemapper = nil
+        NSLog("[HotkeyManager] Analog headset Play/Pause mapping restored")
+    }
+
+    internal func simulateMediaKeyEvent(keyType: Int, pressed: Bool) -> Bool {
+        handleMediaKeyEvent(keyType: keyType, isKeyDown: pressed, isKeyUp: !pressed)
     }
 
     // MARK: - Media Session (prevent Apple Music auto-launch)

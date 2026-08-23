@@ -838,6 +838,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    hotkeyManager.stop()
     SystemVolumeManager.restore()
     // Synchronous kill: don't rely on async Task, app exits immediately after this returns
     SenseVoiceServerManager.killAllServerProcesses()

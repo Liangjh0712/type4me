@@ -160,6 +160,47 @@ final class HotkeyStateMachineTests: XCTestCase {
         )
     }
 
+    func testDirectHeadsetMediaKeyTogglesRecording() {
+        let manager = HotkeyManager()
+        let counters = HotkeyBindingCounters()
+        let playPause = makeBinding(
+            modeId: UUID(),
+            keyCode: ModeBinding.mediaKeyCode(for: 16),
+            style: .toggle,
+            counters: counters
+        )
+        manager.registerBindings([playPause])
+
+        XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: true))
+        XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: false))
+        XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: true))
+
+        XCTAssertEqual(counters.startCount, 1)
+        XCTAssertEqual(counters.stopCount, 1)
+        XCTAssertFalse(manager.isActiveRecordingBinding(playPause.bindingId))
+    }
+
+    func testHeadsetRemapReplacesOnlyItsOwnMapping() {
+        let unrelated: [String: NSNumber] = [
+            "HIDKeyboardModifierMappingSrc": NSNumber(value: UInt64(0x0700000004)),
+            "HIDKeyboardModifierMappingDst": NSNumber(value: UInt64(0x0700000005)),
+        ]
+        let existing = [
+            unrelated,
+            HeadsetMediaKeyRemapper.playPauseMapping,
+        ]
+
+        let remapped = HeadsetMediaKeyRemapper.mappingsByAddingPlayPauseRemap(to: existing)
+        XCTAssertEqual(remapped.count, 2)
+        XCTAssertEqual(remapped.first?["HIDKeyboardModifierMappingSrc"], unrelated["HIDKeyboardModifierMappingSrc"])
+        XCTAssertEqual(remapped.last, HeadsetMediaKeyRemapper.playPauseMapping)
+
+        XCTAssertEqual(
+            HeadsetMediaKeyRemapper.mappingsByRemovingPlayPauseRemap(from: remapped),
+            [unrelated]
+        )
+    }
+
     private func makeBinding(
         modeId: UUID,
         keyCode: Int,

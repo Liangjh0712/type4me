@@ -36,6 +36,7 @@ var targets: [Target] = [
             .linkedFramework("Foundation"),
         ] : []) + [
             .linkedFramework("MediaPlayer"),
+            .linkedFramework("IOKit"),
         ]
     ),
     .testTarget(

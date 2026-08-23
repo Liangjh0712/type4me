@@ -184,6 +184,72 @@ final class HotkeyStateMachineTests: XCTestCase {
         XCTAssertFalse(manager.isActiveRecordingBinding(playPause.bindingId))
     }
 
+    func testHeadsetLogicalPressTogglesRecording() {
+        let manager = HotkeyManager()
+        let counters = HotkeyBindingCounters()
+        let playPause = makeBinding(
+            modeId: UUID(),
+            keyCode: ModeBinding.mediaKeyCode(for: 16),
+            style: .toggle,
+            counters: counters
+        )
+        manager.registerBindings([playPause])
+
+        XCTAssertTrue(manager.simulateHeadsetMediaKeyPulse())
+        XCTAssertEqual(counters.startCount, 1)
+        XCTAssertEqual(counters.stopCount, 0)
+
+        XCTAssertTrue(manager.simulateHeadsetMediaKeyPulse())
+        XCTAssertEqual(counters.startCount, 1)
+        XCTAssertEqual(counters.stopCount, 1)
+        XCTAssertFalse(manager.isActiveRecordingBinding(playPause.bindingId))
+    }
+
+    func testThreeHeadsetButtonsCanShareOneMode() {
+        let manager = HotkeyManager()
+        let counters = HotkeyBindingCounters()
+        let modeID = UUID()
+        let bindings = [0, 16, 1].map { keyType in
+            makeBinding(
+                modeId: modeID,
+                keyCode: ModeBinding.mediaKeyCode(for: keyType),
+                style: .toggle,
+                counters: counters
+            )
+        }
+        manager.registerBindings(bindings)
+
+        XCTAssertTrue(manager.simulateHeadsetMediaKeyPulse(keyType: 0))
+        XCTAssertTrue(manager.simulateHeadsetMediaKeyPulse(keyType: 16))
+        XCTAssertTrue(manager.simulateHeadsetMediaKeyPulse(keyType: 1))
+
+        XCTAssertEqual(counters.startCount, 2)
+        XCTAssertEqual(counters.stopCount, 1)
+    }
+
+    func testHeadsetButtonShortPressDispatchesOnce() {
+        var state = HeadsetMediaKeyMonitor.ButtonPressState()
+
+        XCTAssertTrue(state.beginPress())
+        XCTAssertFalse(state.beginPress())
+        XCTAssertTrue(state.endPress())
+    }
+
+    func testHeadsetButtonLongPressDispatchesOnce() {
+        var state = HeadsetMediaKeyMonitor.ButtonPressState()
+
+        XCTAssertTrue(state.beginPress())
+        XCTAssertTrue(state.handleLongPressTimeout())
+        XCTAssertFalse(state.handleLongPressTimeout())
+        XCTAssertFalse(state.endPress())
+    }
+
+    func testHeadsetButtonOrphanReleaseRecoversAsOnePress() {
+        var state = HeadsetMediaKeyMonitor.ButtonPressState()
+
+        XCTAssertTrue(state.endPress())
+    }
+
     func testHeadsetConsumerUsagesMapToMediaKeys() {
         XCTAssertEqual(HeadsetMediaKeyMonitor.mediaKeyType(forConsumerUsage: 0xCD), 16)
         XCTAssertEqual(HeadsetMediaKeyMonitor.mediaKeyType(forConsumerUsage: 0xE9), 0)

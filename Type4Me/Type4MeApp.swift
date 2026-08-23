@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let permissionGuideModel = PermissionGuideModel()
   /// Computed dynamically per recording based on audio device topology.
   private var floatingBarController: FloatingBarController?
+  private let headsetButtonToastController = HeadsetButtonToastController()
   private lazy var selectionAskController = SelectionAskController {
     [weak self] conversationContext in
     self?.toggleSelectionAskFollowUp(conversationContext: conversationContext) ?? false
@@ -328,6 +329,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           self.hotkeyManager.isProcessing = false
           self.safeResetHotkeyState()
         }
+      }
+    }
+
+    hotkeyManager.onHeadsetButtonRecognized = { [weak self] keyType in
+      MainActor.assumeIsolated {
+        self?.headsetButtonToastController.show(keyType: keyType)
       }
     }
 

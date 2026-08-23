@@ -18,6 +18,15 @@ private struct RecordingTarget: Identifiable {
   }
 }
 
+private struct HeadsetButtonDefinition: Identifiable {
+  let keyType: Int
+  let title: String
+  let icon: String
+  let systemAction: String
+
+  var id: Int { keyType }
+}
+
 // MARK: - Main View
 
 struct ModesSettingsTab: View {
@@ -29,6 +38,7 @@ struct ModesSettingsTab: View {
   @State private var deletingModeId: UUID?
   @State private var draggingModeId: UUID?
   @State private var selectedASRProvider: ASRProvider = CredentialStore.selectedASRProvider
+  @AppStorage(HeadsetButtonFeedbackPreference.storageKey) private var headsetButtonFeedback = true
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -40,6 +50,10 @@ struct ModesSettingsTab: View {
           "Configure speech-to-text and post-processing pipelines. Quick Mode outputs live text, and custom modes can use LLM processing."
         )
       )
+
+      headsetRemoteSettings
+        .padding(.top, 12)
+        .padding(.bottom, 16)
 
       HStack(alignment: .top, spacing: 0) {
         // Left: mode list (all modes)
@@ -578,6 +592,154 @@ struct ModesSettingsTab: View {
         persistModes()
       }
     }
+  }
+
+  private var headsetRemoteSettings: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(spacing: 8) {
+        Image(systemName: "headphones")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(TF.settingsAccentAmber)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(L("耳机线控", "Headset Remote"))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(TF.settingsText)
+          Text(L("每次完整按下与松开只触发一次；可把三个按键分配给任意模式。", "Each press/release cycle triggers once. Assign each button to any mode."))
+            .font(.system(size: 10))
+            .foregroundStyle(TF.settingsTextTertiary)
+        }
+        Spacer()
+        Toggle(L("按键提示", "Key feedback"), isOn: $headsetButtonFeedback)
+          .toggleStyle(.switch)
+          .controlSize(.small)
+      }
+
+      HStack(spacing: 10) {
+        ForEach(headsetButtonDefinitions) { button in
+          VStack(alignment: .leading, spacing: 5) {
+            Label(button.title, systemImage: button.icon)
+              .font(.system(size: 10, weight: .medium))
+              .foregroundStyle(TF.settingsTextSecondary)
+            Picker("", selection: headsetModeBinding(for: button)) {
+              Text(button.systemAction).tag("")
+              ForEach(modes) { mode in
+                Text(mode.name).tag(mode.id.uuidString)
+              }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+        }
+      }
+
+      HStack(spacing: 8) {
+        Text(headsetConfigurationSummary)
+          .font(.system(size: 10))
+          .foregroundStyle(TF.settingsTextTertiary)
+        Spacer()
+        Button(L("仅中键", "Center only")) {
+          applyHeadsetPreset(includeVolumeButtons: false)
+        }
+        .buttonStyle(.borderless)
+        .font(.system(size: 10, weight: .medium))
+        Button(L("三键合一到当前模式", "Map all to current mode")) {
+          applyHeadsetPreset(includeVolumeButtons: true)
+        }
+        .buttonStyle(.borderless)
+        .font(.system(size: 10, weight: .medium))
+        .disabled(selectedMode == nil)
+      }
+    }
+    .padding(12)
+    .background(RoundedRectangle(cornerRadius: 9).fill(TF.settingsBg))
+    .overlay(
+      RoundedRectangle(cornerRadius: 9)
+        .stroke(TF.settingsTextTertiary.opacity(0.14), lineWidth: 1)
+    )
+  }
+
+  private var headsetButtonDefinitions: [HeadsetButtonDefinition] {
+    [
+      HeadsetButtonDefinition(
+        keyType: 0,
+        title: L("上键", "Top"),
+        icon: "speaker.plus.fill",
+        systemAction: L("系统音量 +", "System Volume +")
+      ),
+      HeadsetButtonDefinition(
+        keyType: 16,
+        title: L("中键", "Center"),
+        icon: "playpause.fill",
+        systemAction: L("系统播放/暂停", "System Play/Pause")
+      ),
+      HeadsetButtonDefinition(
+        keyType: 1,
+        title: L("下键", "Bottom"),
+        icon: "speaker.minus.fill",
+        systemAction: L("系统音量 −", "System Volume −")
+      ),
+    ]
+  }
+
+  private var headsetConfigurationSummary: String {
+    let assignments = headsetButtonDefinitions.compactMap { headsetMode(for: $0.keyType)?.id }
+    if assignments.count == 3, Set(assignments).count == 1,
+      let mode = modes.first(where: { $0.id == assignments[0] })
+    {
+      return L("当前：三键合一到「\(mode.name)」", "Current: all three → \(mode.name)")
+    }
+    return L("当前：分别配置", "Current: custom")
+  }
+
+  private func headsetModeBinding(for button: HeadsetButtonDefinition) -> Binding<String> {
+    Binding(
+      get: { headsetMode(for: button.keyType)?.id.uuidString ?? "" },
+      set: { value in
+        assignHeadsetButton(
+          keyType: button.keyType,
+          to: value.isEmpty ? nil : UUID(uuidString: value)
+        )
+      }
+    )
+  }
+
+  private func headsetMode(for keyType: Int) -> ProcessingMode? {
+    let keyCode = ModeBinding.mediaKeyCode(for: keyType)
+    return modes.first { mode in
+      mode.hotkeyBindings.contains { $0.keyCode == keyCode }
+    }
+  }
+
+  private func assignHeadsetButton(keyType: Int, to modeID: UUID?, persist: Bool = true) {
+    let keyCode = ModeBinding.mediaKeyCode(for: keyType)
+    let existingID = modes.lazy.compactMap { mode in
+      mode.hotkeyBindings.first(where: { $0.keyCode == keyCode })?.id
+    }.first
+
+    for index in modes.indices {
+      modes[index].hotkeyBindings.removeAll { $0.keyCode == keyCode }
+    }
+    if let modeID, let modeIndex = modes.firstIndex(where: { $0.id == modeID }) {
+      modes[modeIndex].hotkeyBindings.append(
+        HotkeyBinding(
+          id: existingID ?? UUID(),
+          keyCode: keyCode,
+          modifiers: 0,
+          style: .toggle
+        )
+      )
+    }
+    if persist { persistModes() }
+  }
+
+  private func applyHeadsetPreset(includeVolumeButtons: Bool) {
+    guard let target = selectedMode ?? modes.first else { return }
+    assignHeadsetButton(keyType: 0, to: includeVolumeButtons ? target.id : nil, persist: false)
+    assignHeadsetButton(keyType: 16, to: target.id, persist: false)
+    assignHeadsetButton(keyType: 1, to: includeVolumeButtons ? target.id : nil, persist: false)
+    persistModes()
   }
 
   // MARK: - Helpers

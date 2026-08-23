@@ -3,15 +3,52 @@ import Foundation
 import IOKit
 import IOKit.hid
 
-/// Exclusively captures the built-in analog headset remote before macOS can
-/// reinterpret its center button as a Siri command. Events stay as media-key
-/// events inside Type4Me; no synthetic keyboard key or key-up state is involved.
+/// Captures the built-in analog headset remote before macOS can reinterpret it.
+/// Each physical press/release cycle is normalized into exactly one logical
+/// media-key press inside Type4Me.
 final class HeadsetMediaKeyMonitor {
     typealias EventHandler = (_ keyType: Int, _ pressed: Bool) -> Bool
+    typealias DetectionHandler = (_ keyType: Int) -> Void
+
+    struct ButtonPressState {
+        private(set) var isDown = false
+        private(set) var didDispatchForCurrentPress = false
+
+        mutating func beginPress() -> Bool {
+            guard !isDown else { return false }
+            isDown = true
+            didDispatchForCurrentPress = false
+            return true
+        }
+
+        mutating func endPress() -> Bool {
+            guard isDown else { return true }
+            isDown = false
+            let shouldDispatch = !didDispatchForCurrentPress
+            didDispatchForCurrentPress = false
+            return shouldDispatch
+        }
+
+        mutating func handleLongPressTimeout() -> Bool {
+            guard isDown, !didDispatchForCurrentPress else { return false }
+            didDispatchForCurrentPress = true
+            return true
+        }
+
+        mutating func reset() {
+            isDown = false
+            didDispatchForCurrentPress = false
+        }
+    }
 
     private static let playPauseUsage = UInt32(kHIDUsage_Csmr_PlayOrPause)
     private static let volumeUpUsage = UInt32(kHIDUsage_Csmr_VolumeIncrement)
     private static let volumeDownUsage = UInt32(kHIDUsage_Csmr_VolumeDecrement)
+    private static let reportButtons: [(usage: UInt32, keyType: Int, mask: UInt8)] = [
+        (playPauseUsage, 16, 1 << 0),
+        (volumeDownUsage, 1, 1 << 1),
+        (volumeUpUsage, 0, 1 << 2),
+    ]
 
     // Removed on startup to recover machines left with the previous F20 mapping
     // after an app crash or forced termination.
@@ -22,14 +59,17 @@ final class HeadsetMediaKeyMonitor {
     private static let destinationKey = "HIDKeyboardModifierMappingDst"
 
     private let manager: IOHIDManager
+    private let onButtonDetected: DetectionHandler
     private let onEvent: EventHandler
     private var isRunning = false
-    private var pressedUsages: Set<UInt32> = []
-    private var forwardedMediaKeysDown: Set<Int> = []
-    private var volumeRepeatTimers: [Int: Timer] = [:]
+    private var buttonStates: [UInt32: ButtonPressState] = [:]
+    private var buttonTimers: [UInt32: Timer] = [:]
+    private let longPressDelay: TimeInterval = 0.25
+    private var lastReportByte: UInt8 = 0
 
-    init(onEvent: @escaping EventHandler) {
+    init(onButtonDetected: @escaping DetectionHandler, onEvent: @escaping EventHandler) {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        self.onButtonDetected = onButtonDetected
         self.onEvent = onEvent
     }
 
@@ -49,14 +89,20 @@ final class HeadsetMediaKeyMonitor {
         IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
 
         let context = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterInputValueCallback(
+        IOHIDManagerRegisterInputReportCallback(
             manager,
-            { context, result, _, value in
+            { context, result, _, reportType, reportID, report, reportLength in
                 guard let context else { return }
                 Unmanaged<HeadsetMediaKeyMonitor>
                     .fromOpaque(context)
                     .takeUnretainedValue()
-                    .handleInputValue(result: result, value: value)
+                    .handleInputReport(
+                        result: result,
+                        reportType: reportType,
+                        reportID: reportID,
+                        report: report,
+                        reportLength: reportLength
+                    )
             },
             context
         )
@@ -109,9 +155,10 @@ final class HeadsetMediaKeyMonitor {
 
     func stop() {
         guard isRunning else { return }
-        releasePressedButtons()
-        volumeRepeatTimers.values.forEach { $0.invalidate() }
-        volumeRepeatTimers = [:]
+        buttonTimers.values.forEach { $0.invalidate() }
+        buttonTimers = [:]
+        buttonStates = [:]
+        lastReportByte = 0
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         IOHIDManagerUnscheduleFromRunLoop(
             manager,
@@ -140,30 +187,79 @@ final class HeadsetMediaKeyMonitor {
         }
     }
 
-    private func handleInputValue(result: IOReturn, value: IOHIDValue) {
-        guard result == kIOReturnSuccess else {
-            DebugFileLogger.log(
-                "headset HID value failed result=\(String(format: "0x%08x", result))")
+    private func handleInputReport(
+        result: IOReturn,
+        reportType: IOHIDReportType,
+        reportID: UInt32,
+        report: UnsafeMutablePointer<UInt8>,
+        reportLength: CFIndex
+    ) {
+        guard result == kIOReturnSuccess, reportType == kIOHIDReportTypeInput,
+              reportID == 0, reportLength > 0
+        else {
+            if result != kIOReturnSuccess {
+                DebugFileLogger.log(
+                    "headset HID report failed result=\(String(format: "0x%08x", result))")
+            }
             return
         }
 
-        let element = IOHIDValueGetElement(value)
-        guard IOHIDElementGetUsagePage(element) == UInt32(kHIDPage_Consumer) else { return }
-        let usage = IOHIDElementGetUsage(element)
-        guard let keyType = Self.mediaKeyType(forConsumerUsage: usage) else { return }
-        let pressed = IOHIDValueGetIntegerValue(value) != 0
+        let reportByte = report.pointee
+        let changedBits = reportByte ^ lastReportByte
+        lastReportByte = reportByte
+        guard changedBits != 0 else { return }
 
+        for button in Self.reportButtons where changedBits & button.mask != 0 {
+            handleButtonValue(
+                usage: button.usage,
+                keyType: button.keyType,
+                pressed: reportByte & button.mask != 0
+            )
+        }
+    }
+
+    private func handleButtonValue(usage: UInt32, keyType: Int, pressed: Bool) {
+        var state = buttonStates[usage] ?? ButtonPressState()
         if pressed {
-            guard pressedUsages.insert(usage).inserted else { return }
-        } else {
-            guard pressedUsages.remove(usage) != nil else { return }
+            guard state.beginPress() else { return }
+            onButtonDetected(keyType)
+            buttonStates[usage] = state
+            buttonTimers.removeValue(forKey: usage)?.invalidate()
+            let timer = Timer(timeInterval: longPressDelay, repeats: false) { [weak self] _ in
+                guard let self, var state = self.buttonStates[usage],
+                      state.handleLongPressTimeout()
+                else { return }
+                self.buttonStates[usage] = state
+                self.dispatchButtonPress(sourceKeyType: keyType, reason: "long_press")
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            buttonTimers[usage] = timer
+            DebugFileLogger.log(
+                "headset HID sourceKeyType=\(keyType) rawEdge=down action=pending_release")
+            return
         }
 
-        let handled = onEvent(keyType, pressed)
+        buttonTimers.removeValue(forKey: usage)?.invalidate()
+        if !state.isDown {
+            onButtonDetected(keyType)
+        }
+        let shouldDispatch = state.endPress()
+        buttonStates[usage] = state
+        if shouldDispatch {
+            dispatchButtonPress(sourceKeyType: keyType, reason: "release")
+        } else {
+            DebugFileLogger.log(
+                "headset HID sourceKeyType=\(keyType) rawEdge=up action=long_press_release_ignored")
+        }
+    }
+
+    private func dispatchButtonPress(sourceKeyType: Int, reason: String) {
+        let handled = onEvent(sourceKeyType, true)
         DebugFileLogger.log(
-            "headset HID keyType=\(keyType) edge=\(pressed ? "down" : "up") action=\(handled ? "dispatch" : "forward")")
+            "headset HID sourceKeyType=\(sourceKeyType) edge=press reason=\(reason) action=\(handled ? "dispatch" : "forward")")
         if !handled {
-            forwardToSystem(keyType: keyType, pressed: pressed)
+            Self.postSystemMediaKey(keyType: sourceKeyType, pressed: true)
+            Self.postSystemMediaKey(keyType: sourceKeyType, pressed: false)
         }
     }
 
@@ -175,59 +271,18 @@ final class HeadsetMediaKeyMonitor {
 
     private func handleDeviceRemoved(result: IOReturn, device: IOHIDDevice) {
         guard result == kIOReturnSuccess else { return }
-        releasePressedButtons()
+        buttonTimers.values.forEach { $0.invalidate() }
+        buttonTimers = [:]
+        buttonStates = [:]
+        lastReportByte = 0
         DebugFileLogger.log("headset HID device removed product=\(Self.productName(of: device))")
     }
 
-    private func releasePressedButtons() {
-        let usages = pressedUsages
-        pressedUsages.removeAll()
-        for usage in usages {
-            guard let keyType = Self.mediaKeyType(forConsumerUsage: usage) else { continue }
-            if forwardedMediaKeysDown.contains(keyType) {
-                forwardToSystem(keyType: keyType, pressed: false)
-            } else {
-                _ = onEvent(keyType, false)
-            }
-        }
-    }
 
-    private func forwardToSystem(keyType: Int, pressed: Bool) {
-        if pressed {
-            forwardedMediaKeysDown.insert(keyType)
-            Self.postSystemMediaKey(keyType: keyType, pressed: true)
-            if keyType == 0 || keyType == 1 {
-                startVolumeRepeat(for: keyType)
-            }
-        } else {
-            guard forwardedMediaKeysDown.remove(keyType) != nil else { return }
-            stopVolumeRepeat(for: keyType)
-            Self.postSystemMediaKey(keyType: keyType, pressed: false)
-        }
-    }
 
-    private func startVolumeRepeat(for keyType: Int) {
-        stopVolumeRepeat(for: keyType)
-        let timer = Timer(timeInterval: 0.08, repeats: true) { _ in
-            Self.postSystemMediaKey(keyType: keyType, pressed: true, isRepeat: true)
-        }
-        timer.fireDate = Date(timeIntervalSinceNow: 0.35)
-        RunLoop.main.add(timer, forMode: .common)
-        volumeRepeatTimers[keyType] = timer
-    }
-
-    private func stopVolumeRepeat(for keyType: Int) {
-        volumeRepeatTimers.removeValue(forKey: keyType)?.invalidate()
-    }
-
-    private static func postSystemMediaKey(
-        keyType: Int,
-        pressed: Bool,
-        isRepeat: Bool = false
-    ) {
+    private static func postSystemMediaKey(keyType: Int, pressed: Bool) {
         let state = pressed ? 0x0A : 0x0B
-        let repeatFlag = isRepeat ? 1 : 0
-        let data1 = (keyType << 16) | (state << 8) | repeatFlag
+        let data1 = (keyType << 16) | (state << 8)
         let event = NSEvent.otherEvent(
             with: .systemDefined,
             location: .zero,

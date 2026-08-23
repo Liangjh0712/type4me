@@ -225,6 +225,9 @@ final class HotkeyManager: NSObject {
     /// false if the app is not actually in an active session (ESC should pass through).
     var onESCAbort: (() -> Bool)?
 
+    /// Called once after a physical headset-button gesture is recognized.
+    var onHeadsetButtonRecognized: ((Int) -> Void)?
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var healthCheckTimer: Timer?
@@ -236,6 +239,7 @@ final class HotkeyManager: NSObject {
     private var isMediaSessionActive = false
     /// Exclusively captures the analog headset remote as raw HID media-key events.
     private var headsetMediaKeyMonitor: HeadsetMediaKeyMonitor?
+    private var recentHeadsetMediaKeyPresses: [Int: Date] = [:]
 
     // MARK: - Registration
 
@@ -250,6 +254,7 @@ final class HotkeyManager: NSObject {
         holdState = [:]
         wasModifierDown = [:]
         mediaKeysDown.removeAll()
+        recentHeadsetMediaKeyPresses = [:]
         clearActiveRecordingState()
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
@@ -456,6 +461,14 @@ final class HotkeyManager: NSObject {
             let keyState = Int((nsEvent.data1 >> 8) & 0xFF)
             let isKeyDown = keyState == 0x0A
             let isKeyUp = keyState == 0x0B
+
+            if let rawPressTime = recentHeadsetMediaKeyPresses[keyType],
+               Date().timeIntervalSince(rawPressTime) < 0.2
+            {
+                DebugFileLogger.log(
+                    "hotkey media source=system-media keyType=\(keyType) action=headset_duplicate_swallowed")
+                return nil
+            }
 
             guard handleMediaKeyEvent(
                 keyType: keyType,
@@ -879,9 +892,28 @@ final class HotkeyManager: NSObject {
         return true
     }
 
+    @discardableResult
+    private func handleHeadsetMediaKeyPulse(keyType: Int) -> Bool {
+        guard [0, 1, 16].contains(keyType) else { return false }
+
+        let encodedKeyCode = ModeBinding.mediaKeyCode(for: keyType)
+        guard let binding = bindings.first(where: {
+            $0.isMediaKey && Int($0.keyCode) == encodedKeyCode
+        }) else { return false }
+
+        recentHeadsetMediaKeyPresses[keyType] = Date()
+        DebugFileLogger.log(
+            "hotkey media source=headset-hid keyType=\(keyType) edge=press action=dispatch style=\(binding.style.rawValue) mode=\(binding.modeId.uuidString)")
+        // The HID monitor normalizes each physical gesture into one pulse.
+        // Headset buttons therefore use click-to-toggle semantics for both styles.
+        handleTogglePress(binding: binding)
+        return true
+    }
+
     private func updateHeadsetMediaKeyMonitor() {
         let needsMonitoring = eventTap != nil && !isSuppressed && bindings.contains { binding in
-            binding.isMediaKey && ModeBinding.mediaKeyType(from: Int(binding.keyCode)) == 16
+            binding.isMediaKey && [0, 1, 16].contains(
+                ModeBinding.mediaKeyType(from: Int(binding.keyCode)))
         }
 
         guard needsMonitoring else {
@@ -890,15 +922,15 @@ final class HotkeyManager: NSObject {
         }
         guard headsetMediaKeyMonitor == nil else { return }
 
-        let monitor = HeadsetMediaKeyMonitor { [weak self] keyType, pressed in
-            guard let self else { return false }
-            return self.handleMediaKeyEvent(
-                keyType: keyType,
-                isKeyDown: pressed,
-                isKeyUp: !pressed,
-                source: "headset-hid"
-            )
-        }
+        let monitor = HeadsetMediaKeyMonitor(
+            onButtonDetected: { [weak self] keyType in
+                self?.onHeadsetButtonRecognized?(keyType)
+            },
+            onEvent: { [weak self] keyType, _ in
+                guard let self else { return false }
+                return self.handleHeadsetMediaKeyPulse(keyType: keyType)
+            }
+        )
         guard monitor.start() else {
             NSLog("[HotkeyManager] Failed to open analog headset HID; using CGEvent fallback")
             DebugFileLogger.log("headset HID start failed; using system-media fallback")
@@ -925,6 +957,10 @@ final class HotkeyManager: NSObject {
             isKeyUp: !pressed,
             source: "simulated"
         )
+    }
+
+    internal func simulateHeadsetMediaKeyPulse(keyType: Int = 16) -> Bool {
+        handleHeadsetMediaKeyPulse(keyType: keyType)
     }
 
     // MARK: - Media Session (prevent Apple Music auto-launch)

@@ -173,6 +173,7 @@ final class HotkeyManager: NSObject {
     private var bindings: [ModeBinding] = []
     private var holdState: [UUID: Bool] = [:]
     private var wasModifierDown: [UUID: Bool] = [:]
+    private var mediaKeysDown: Set<Int> = []
     private var holdSafetyTimers: [UUID: Timer] = [:]
     private var activeRecordingBindingId: UUID?
     private var activeRecordingModeId: UUID?
@@ -208,6 +209,7 @@ final class HotkeyManager: NSObject {
         clearActiveRecordingState()
         for key in wasModifierDown.keys { wasModifierDown[key] = false }
         for key in holdState.keys { holdState[key] = false }
+        mediaKeysDown.removeAll()
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
         cancelPendingModifierTriggers()
@@ -247,6 +249,7 @@ final class HotkeyManager: NSObject {
         bindings = newBindings
         holdState = [:]
         wasModifierDown = [:]
+        mediaKeysDown.removeAll()
         clearActiveRecordingState()
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
@@ -352,6 +355,7 @@ final class HotkeyManager: NSObject {
         lastEventTime = nil
         holdState = [:]
         wasModifierDown = [:]
+        mediaKeysDown.removeAll()
         clearActiveRecordingState()
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
@@ -366,6 +370,7 @@ final class HotkeyManager: NSObject {
         healthCheckTimer?.invalidate()
         healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             guard let self, let tap = self.eventTap else { return }
+            self.headsetMediaKeyRemapper?.refresh()
 
             // Check 1: Is the tap port still valid? Only recreate the tap for real invalidation,
             // not for normal idle periods with no keyboard/mouse input.
@@ -847,26 +852,27 @@ final class HotkeyManager: NSObject {
     private func handleMediaKeyEvent(keyType: Int, isKeyDown: Bool, isKeyUp: Bool) -> Bool {
         guard Self.isKnownMediaKeyType(keyType) else { return false }
         let encodedKeyCode = ModeBinding.mediaKeyCode(for: keyType)
+        guard let binding = bindings.first(where: {
+            $0.isMediaKey && Int($0.keyCode) == encodedKeyCode
+        }) else { return false }
 
-        for binding in bindings {
-            guard binding.isMediaKey, Int(binding.keyCode) == encodedKeyCode else { continue }
-
-            switch binding.style {
-            case .hold:
-                if isKeyDown {
-                    handleBindingEvent(binding: binding, pressed: true)
-                } else if isKeyUp {
-                    handleBindingEvent(binding: binding, pressed: false)
-                }
-            case .toggle:
-                if isKeyDown {
-                    handleTogglePress(binding: binding)
-                }
-            }
+        if isKeyDown {
+            guard mediaKeysDown.insert(keyType).inserted else { return true }
+        } else if isKeyUp {
+            guard mediaKeysDown.remove(keyType) != nil else { return true }
+        } else {
             return true
         }
 
-        return false
+        switch binding.style {
+        case .hold:
+            handleBindingEvent(binding: binding, pressed: isKeyDown)
+        case .toggle:
+            if isKeyDown {
+                handleTogglePress(binding: binding)
+            }
+        }
+        return true
     }
 
     private func updateHeadsetMediaKeyRemapper() {

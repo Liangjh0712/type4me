@@ -172,6 +172,10 @@ final class HotkeyStateMachineTests: XCTestCase {
         manager.registerBindings([playPause])
 
         XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: true))
+        XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: true))
+        XCTAssertEqual(counters.startCount, 1)
+
+        XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: false))
         XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: false))
         XCTAssertTrue(manager.simulateMediaKeyEvent(keyType: 16, pressed: true))
 

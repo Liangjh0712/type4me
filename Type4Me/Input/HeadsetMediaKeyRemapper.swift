@@ -46,9 +46,9 @@ final class HeadsetMediaKeyRemapper {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.refreshMappings()
+            self?.refresh()
         }
-        return refreshMappings()
+        return refresh()
     }
 
     func stop() {
@@ -81,7 +81,7 @@ final class HeadsetMediaKeyRemapper {
     }
 
     @discardableResult
-    private func refreshMappings() -> Bool {
+    func refresh() -> Bool {
         guard isRunning else { return false }
         let matchingServices = Self.headsetServices(in: client)
         let currentIDs = Set(matchingServices.compactMap(Self.registryID))
@@ -89,19 +89,21 @@ final class HeadsetMediaKeyRemapper {
 
         var allMappingsSucceeded = true
         for service in matchingServices {
-            guard let id = Self.registryID(service), services[id] == nil else { continue }
+            guard let id = Self.registryID(service) else { continue }
             let existing = Self.mappingArray(
                 from: IOHIDServiceClientCopyProperty(service, Self.mappingKey as CFString)
             )
             let original = Self.mappingsByRemovingPlayPauseRemap(from: existing)
-            let remapped = Self.mappingsByAddingPlayPauseRemap(to: original)
-            guard IOHIDServiceClientSetProperty(
-                service,
-                Self.mappingKey as CFString,
-                remapped as CFArray
-            ) else {
-                allMappingsSucceeded = false
-                continue
+            if !existing.contains(where: Self.isPlayPauseRemap) {
+                let remapped = Self.mappingsByAddingPlayPauseRemap(to: original)
+                guard IOHIDServiceClientSetProperty(
+                    service,
+                    Self.mappingKey as CFString,
+                    remapped as CFArray
+                ) else {
+                    allMappingsSucceeded = false
+                    continue
+                }
             }
             services[id] = ServiceState(service: service, originalMappings: original)
         }

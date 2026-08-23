@@ -48,7 +48,10 @@ final class HeadsetMediaKeyRemapper {
         ) { [weak self] _ in
             self?.refresh()
         }
-        return refresh()
+        let succeeded = refresh()
+        DebugFileLogger.log(
+            "headset remap start success=\(succeeded) services=\(services.count)")
+        return succeeded
     }
 
     func stop() {
@@ -57,6 +60,7 @@ final class HeadsetMediaKeyRemapper {
             NotificationCenter.default.removeObserver(deviceChangeObserver)
             self.deviceChangeObserver = nil
         }
+        let restoredCount = services.count
         for state in services.values {
             IOHIDServiceClientSetProperty(
                 state.service,
@@ -66,6 +70,7 @@ final class HeadsetMediaKeyRemapper {
         }
         services = [:]
         isRunning = false
+        DebugFileLogger.log("headset remap restored services=\(restoredCount)")
     }
 
     static func mappingsByAddingPlayPauseRemap(
@@ -95,6 +100,7 @@ final class HeadsetMediaKeyRemapper {
             )
             let original = Self.mappingsByRemovingPlayPauseRemap(from: existing)
             if !existing.contains(where: Self.isPlayPauseRemap) {
+                let action = services[id] == nil ? "applied" : "reapplied"
                 let remapped = Self.mappingsByAddingPlayPauseRemap(to: original)
                 guard IOHIDServiceClientSetProperty(
                     service,
@@ -102,8 +108,10 @@ final class HeadsetMediaKeyRemapper {
                     remapped as CFArray
                 ) else {
                     allMappingsSucceeded = false
+                    DebugFileLogger.log("headset remap failed registry=\(id)")
                     continue
                 }
+                DebugFileLogger.log("headset remap \(action) registry=\(id)")
             }
             services[id] = ServiceState(service: service, originalMappings: original)
         }

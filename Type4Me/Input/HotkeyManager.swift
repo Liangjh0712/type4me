@@ -458,7 +458,12 @@ final class HotkeyManager: NSObject {
             let isKeyDown = keyState == 0x0A
             let isKeyUp = keyState == 0x0B
 
-            guard handleMediaKeyEvent(keyType: keyType, isKeyDown: isKeyDown, isKeyUp: isKeyUp) else {
+            guard handleMediaKeyEvent(
+                keyType: keyType,
+                isKeyDown: isKeyDown,
+                isKeyUp: isKeyUp,
+                source: "system-media"
+            ) else {
                 return Unmanaged.passUnretained(event)
             }
             return nil  // Swallow matched media key events
@@ -478,12 +483,15 @@ final class HotkeyManager: NSObject {
         {
             if type == .keyDown,
                event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                DebugFileLogger.log(
+                    "hotkey media source=headset-remap keyType=16 edge=repeat action=ignored")
                 return nil
             }
             if handleMediaKeyEvent(
                 keyType: 16,
                 isKeyDown: type == .keyDown,
-                isKeyUp: type == .keyUp
+                isKeyUp: type == .keyUp,
+                source: "headset-remap"
             ) {
                 return nil
             }
@@ -849,21 +857,39 @@ final class HotkeyManager: NSObject {
     }
 
     @discardableResult
-    private func handleMediaKeyEvent(keyType: Int, isKeyDown: Bool, isKeyUp: Bool) -> Bool {
+    private func handleMediaKeyEvent(
+        keyType: Int,
+        isKeyDown: Bool,
+        isKeyUp: Bool,
+        source: String
+    ) -> Bool {
         guard Self.isKnownMediaKeyType(keyType) else { return false }
         let encodedKeyCode = ModeBinding.mediaKeyCode(for: keyType)
         guard let binding = bindings.first(where: {
             $0.isMediaKey && Int($0.keyCode) == encodedKeyCode
         }) else { return false }
 
+        let edge = isKeyDown ? "down" : isKeyUp ? "up" : "unknown"
         if isKeyDown {
-            guard mediaKeysDown.insert(keyType).inserted else { return true }
+            guard mediaKeysDown.insert(keyType).inserted else {
+                DebugFileLogger.log(
+                    "hotkey media source=\(source) keyType=\(keyType) edge=\(edge) action=duplicate_ignored")
+                return true
+            }
         } else if isKeyUp {
-            guard mediaKeysDown.remove(keyType) != nil else { return true }
+            guard mediaKeysDown.remove(keyType) != nil else {
+                DebugFileLogger.log(
+                    "hotkey media source=\(source) keyType=\(keyType) edge=\(edge) action=orphan_release_ignored")
+                return true
+            }
         } else {
+            DebugFileLogger.log(
+                "hotkey media source=\(source) keyType=\(keyType) edge=\(edge) action=ignored")
             return true
         }
 
+        DebugFileLogger.log(
+            "hotkey media source=\(source) keyType=\(keyType) edge=\(edge) action=dispatch style=\(binding.style.rawValue) mode=\(binding.modeId.uuidString)")
         switch binding.style {
         case .hold:
             handleBindingEvent(binding: binding, pressed: isKeyDown)
@@ -889,11 +915,13 @@ final class HotkeyManager: NSObject {
         let remapper = HeadsetMediaKeyRemapper()
         guard remapper.start() else {
             NSLog("[HotkeyManager] Failed to remap analog headset Play/Pause; using CGEvent fallback")
+            DebugFileLogger.log("headset remap start failed; using system-media fallback")
             return
         }
 
         headsetMediaKeyRemapper = remapper
         NSLog("[HotkeyManager] Analog headset Play/Pause remapped to F20")
+        DebugFileLogger.log("headset remap started")
     }
 
     private func stopHeadsetMediaKeyRemapper() {
@@ -901,10 +929,16 @@ final class HotkeyManager: NSObject {
         remapper.stop()
         headsetMediaKeyRemapper = nil
         NSLog("[HotkeyManager] Analog headset Play/Pause mapping restored")
+        DebugFileLogger.log("headset remap stopped and original mapping restored")
     }
 
     internal func simulateMediaKeyEvent(keyType: Int, pressed: Bool) -> Bool {
-        handleMediaKeyEvent(keyType: keyType, isKeyDown: pressed, isKeyUp: !pressed)
+        handleMediaKeyEvent(
+            keyType: keyType,
+            isKeyDown: pressed,
+            isKeyUp: !pressed,
+            source: "simulated"
+        )
     }
 
     // MARK: - Media Session (prevent Apple Music auto-launch)

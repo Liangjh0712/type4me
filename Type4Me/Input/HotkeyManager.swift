@@ -231,6 +231,12 @@ final class HotkeyManager: NSObject {
     // MARK: - Registration
 
     func registerBindings(_ newBindings: [ModeBinding]) {
+        let shouldReinstallEventTap = Self.requiresEventTapReinstall(
+            eventTapIsInstalled: eventTap != nil,
+            currentBindings: bindings,
+            newBindings: newBindings
+        )
+
         bindings = newBindings
         holdState = [:]
         wasModifierDown = [:]
@@ -238,7 +244,24 @@ final class HotkeyManager: NSObject {
         holdSafetyTimers.values.forEach { $0.invalidate() }
         holdSafetyTimers = [:]
         cancelPendingModifierTriggers()
-        updateMediaKeySession()
+
+        if shouldReinstallEventTap {
+            NSLog("[HotkeyManager] Media binding presence changed, reinstalling event tap")
+            reinstallTap()
+        } else {
+            updateMediaKeySession()
+        }
+    }
+
+    internal static func requiresEventTapReinstall(
+        eventTapIsInstalled: Bool,
+        currentBindings: [ModeBinding],
+        newBindings: [ModeBinding]
+    ) -> Bool {
+        guard eventTapIsInstalled else { return false }
+        let currentlyListensForMediaKeys = currentBindings.contains { $0.isMediaKey }
+        let needsToListenForMediaKeys = newBindings.contains { $0.isMediaKey }
+        return currentlyListensForMediaKeys != needsToListenForMediaKeys
     }
 
     // MARK: - Start / Stop

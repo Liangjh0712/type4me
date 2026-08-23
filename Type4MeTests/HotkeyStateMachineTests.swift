@@ -112,6 +112,54 @@ final class HotkeyStateMachineTests: XCTestCase {
         XCTAssertFalse(manager.hasPendingSafetyTimer(for: hold.bindingId))
     }
 
+    func testEventTapReinstallDecisionTracksMediaBindingPresence() {
+        let counters = HotkeyBindingCounters()
+        let modeId = UUID()
+        let keyboard = makeBinding(modeId: modeId, keyCode: 49, style: .toggle, counters: counters)
+        let anotherKeyboard = makeBinding(modeId: modeId, keyCode: 50, style: .toggle, counters: counters)
+        let playPause = makeBinding(
+            modeId: modeId,
+            keyCode: ModeBinding.mediaKeyCode(for: 16),
+            style: .toggle,
+            counters: counters
+        )
+        let volumeUp = makeBinding(
+            modeId: modeId,
+            keyCode: ModeBinding.mediaKeyCode(for: 0),
+            style: .toggle,
+            counters: counters
+        )
+
+        XCTAssertTrue(
+            HotkeyManager.requiresEventTapReinstall(
+                eventTapIsInstalled: true,
+                currentBindings: [keyboard],
+                newBindings: [keyboard, playPause]
+            )
+        )
+        XCTAssertTrue(
+            HotkeyManager.requiresEventTapReinstall(
+                eventTapIsInstalled: true,
+                currentBindings: [keyboard, playPause],
+                newBindings: [keyboard]
+            )
+        )
+        XCTAssertFalse(
+            HotkeyManager.requiresEventTapReinstall(
+                eventTapIsInstalled: true,
+                currentBindings: [keyboard, playPause],
+                newBindings: [anotherKeyboard, volumeUp]
+            )
+        )
+        XCTAssertFalse(
+            HotkeyManager.requiresEventTapReinstall(
+                eventTapIsInstalled: false,
+                currentBindings: [keyboard],
+                newBindings: [keyboard, playPause]
+            )
+        )
+    }
+
     private func makeBinding(
         modeId: UUID,
         keyCode: Int,

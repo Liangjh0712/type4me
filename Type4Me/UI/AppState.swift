@@ -12,23 +12,63 @@ enum FloatingBarPhase: Equatable {
   case error
 }
 
-/// Whether the transcript deck appears while recording. When off, only the
-/// screen-bottom tally lamp is shown (minimal mode).
+/// How the transcript deck is presented while recording.
 ///
-/// Replaces the retired 录音动效 dropdown (lines/particles/levels): after the
-/// Signal Desk redesign the deck + meter bridge + tally lamp are the single
-/// recording visualization, so the only live choice is panel or no panel.
+/// - top: dual-column deck pinned to the top of the screen (raw + optimized)
+/// - bottom: optimized text only, attached to the screen-bottom tally lamp
+/// - hidden: minimal mode — tally lamp only while recording; a compact top
+///   capsule still appears once processing starts
+///
+/// Replaces the retired boolean `tf_showsRecordingPanel` (and before it the
+/// 录音动效 dropdown `tf_visualStyle`) with a single three-way style choice.
+enum TranscriptPanelStyle: String, CaseIterable {
+  case top
+  case bottom
+  case hidden
+
+  static let storageKey = "tf_transcriptPanelStyle"
+
+  var displayName: String {
+    switch self {
+    case .top:
+      return L("样式一 · 顶部双栏", "Style 1 · Top Panel")
+    case .bottom:
+      return L("样式二 · 底部优化稿", "Style 2 · Bottom Optimized")
+    case .hidden:
+      return L("关闭", "Off")
+    }
+  }
+
+  static func current(userDefaults: UserDefaults = .standard) -> TranscriptPanelStyle {
+    migrateLegacyValueIfNeeded(userDefaults: userDefaults)
+    guard let raw = userDefaults.string(forKey: storageKey),
+      let style = TranscriptPanelStyle(rawValue: raw)
+    else { return .top }
+    return style
+  }
+
+  /// One-time migration of the retired boolean into the style key:
+  /// panel shown → .top, panel off → .hidden.
+  static func migrateLegacyValueIfNeeded(userDefaults: UserDefaults = .standard) {
+    RecordingPanelPreference.migrateLegacyValueIfNeeded(userDefaults: userDefaults)
+    guard userDefaults.object(forKey: storageKey) == nil,
+      let showsPanel = userDefaults.object(forKey: RecordingPanelPreference.storageKey) as? Bool
+    else { return }
+    userDefaults.set(
+      showsPanel ? TranscriptPanelStyle.top.rawValue : TranscriptPanelStyle.hidden.rawValue,
+      forKey: storageKey
+    )
+    userDefaults.removeObject(forKey: RecordingPanelPreference.storageKey)
+  }
+}
+
+/// Legacy storage for the retired panel boolean. Kept only so
+/// `TranscriptPanelStyle.migrateLegacyValueIfNeeded` can chain the oldest
+/// migration (`tf_visualStyle` dropdown → `tf_showsRecordingPanel` bool)
+/// before folding the bool into the style key.
 enum RecordingPanelPreference {
   static let storageKey = "tf_showsRecordingPanel"
   private static let legacyKey = "tf_visualStyle"
-
-  static func showsRecordingPanel(userDefaults: UserDefaults = .standard) -> Bool {
-    if let value = userDefaults.object(forKey: storageKey) as? Bool {
-      return value
-    }
-    // Pre-migration installs: only "hidden" meant no panel.
-    return userDefaults.string(forKey: legacyKey) != "hidden"
-  }
 
   /// One-time migration of the retired dropdown value into the boolean key.
   static func migrateLegacyValueIfNeeded(userDefaults: UserDefaults = .standard) {
@@ -985,6 +1025,11 @@ final class AppState {
   @ObservationIgnored let audioLevel = AudioLevelMeter()
   var recordingStartDate: Date? { didSet { onPanelLayoutChanged?() } }
   var recordingStopDate: Date? { didSet { onPanelLayoutChanged?() } }
+  /// Name of the input device the current recording captures from. Written
+  /// once in startRecording and frozen for the session — an AVCaptureSession
+  /// never hot-swaps its input, so following device-changed notifications
+  /// mid-recording would show a device that is not actually in use.
+  var inputDeviceName: String = "" { didSet { onPanelLayoutChanged?() } }
   var availableModes: [ProcessingMode]
   var selectablePanelModes: [ProcessingMode] {
     ASRProviderRegistry.supportedModes(
@@ -1083,7 +1128,7 @@ final class AppState {
   #endif
 
   init() {
-    RecordingPanelPreference.migrateLegacyValueIfNeeded()
+    TranscriptPanelStyle.migrateLegacyValueIfNeeded()
     let modes = ModeStorage().load()
     availableModes = modes
     currentMode =
@@ -1099,6 +1144,7 @@ final class AppState {
     audioLevel.current = 0
     recordingStartDate = nil
     recordingStopDate = nil
+    inputDeviceName = AudioInputDevicePreferenceStore.resolvedCaptureDeviceName() ?? ""
     feedbackMessage = L("已完成", "Done")
     feedbackKind = .standard
     processingLabelOverride = nil
@@ -1110,10 +1156,10 @@ final class AppState {
     resetASRPanelState()
     resetLiveOptimization()
     barPhase = .preparing
-    if RecordingPanelPreference.showsRecordingPanel() {
-      onShowPanel?()
-    } else {
+    if TranscriptPanelStyle.current() == .hidden {
       onHidePanel?()
+    } else {
+      onShowPanel?()
     }
   }
 

@@ -17,6 +17,7 @@ protocol FloatingBarState: AnyObject, Observable {
   var processingFinishTime: Date? { get }
   var transcriptionText: String { get }
   var recordingStartDate: Date? { get }
+  var inputDeviceName: String { get }
   var pinsTranscriptPopup: Bool { get }
   var liveOptimizedText: String { get }
   var liveOptimizationPhase: LiveOptimizationPhase { get }
@@ -45,6 +46,160 @@ protocol FloatingBarState: AnyObject, Observable {
   func insertRawAfterOptimizationFailure()
 }
 
+/// LED tone for a deck status cluster (column headers, bottom card status).
+enum DeckMetaTone {
+  case live, working, ok, failed, idle
+
+  var ledColor: Color {
+    switch self {
+    case .live, .ok: return TF.signalTeal
+    case .working: return TF.lampAmber
+    case .failed: return TF.settingsAccentRed
+    case .idle: return TF.paper.opacity(0.25)
+    }
+  }
+
+  var pulsing: Bool { self == .working }
+
+  var textColor: Color {
+    switch self {
+    case .working: return TF.lampAmber.opacity(0.85)
+    case .failed: return TF.settingsAccentRed.opacity(0.9)
+    default: return TF.paperFaint
+    }
+  }
+}
+
+/// Shared copy for the "optimized" transcript surface, used by both the top
+/// deck's EDIT column and the style-2 bottom card so the two never diverge.
+/// View-layer only (returns SwiftUI.Text) — kept out of AppState and named
+/// distinctly from the `optimizedPanelText: String` state property.
+@MainActor
+enum OptimizedPanelCopy {
+  static func string<S: FloatingBarState>(for state: S) -> String {
+    if state.supportsLiveOptimizationPreview {
+      let text = state.optimizedPanelText
+      if !text.isEmpty { return text }
+      switch state.liveOptimizationPhase {
+      case .waiting, .stale:
+        return state.transcriptionText.isEmpty
+          ? L("等待语音…", "Waiting for speech…")
+          : L("等待停顿后优化…", "Waiting for a pause to optimize…")
+      case .updating:
+        return L("正在生成优化稿…", "Generating optimized text…")
+      case .unavailable(let message), .failed(let message):
+        return message
+      case .ready:
+        return L("等待优化结果…", "Waiting for optimization result…")
+      case .inactive:
+        return L("此模式不支持实时优化", "Live optimization is unavailable for this mode")
+      }
+    }
+    let direct =
+      state.processingResultText.isEmpty ? state.transcriptionText : state.processingResultText
+    return direct.isEmpty ? L("此模式将直接插入原文", "This mode inserts the raw transcript") : direct
+  }
+
+  static func text<S: FloatingBarState>(for state: S) -> Text {
+    Text(string(for: state))
+  }
+
+  /// Style-2 bottom card copy. Errors and transcript-less status feedback
+  /// (e.g. Mac Action results, "Cancelled") have no optimized text — the card
+  /// shows the feedback message itself instead of a placeholder.
+  static func bottomCardString<S: FloatingBarState>(for state: S) -> String {
+    if state.barPhase == .error {
+      return state.feedbackMessage
+    }
+    if state.barPhase == .done,
+      state.transcriptionText.isEmpty,
+      state.optimizedPanelText.isEmpty
+    {
+      return state.feedbackMessage
+    }
+    return string(for: state)
+  }
+
+  static func bottomCardText<S: FloatingBarState>(for state: S) -> Text {
+    Text(bottomCardString(for: state))
+  }
+
+  /// Terse optimization status for deck headers / the style-2 status row
+  /// ("等待停顿", "优化中 · R2", "已优化 · R3", "提交中 · R3", "优化失败", "原文"…).
+  static func status<S: FloatingBarState>(for state: S) -> String {
+    if state.finalOptimizationFailureMessage != nil {
+      return L("优化失败", "FAILED")
+    }
+    if state.barPhase == .processing, let locked = state.lockedOptimizationRevision {
+      return L("提交中", "COMMITTING") + " · R\(locked)"
+    }
+
+    let base: String
+    switch state.liveOptimizationPhase {
+    case .waiting:
+      base = L("等待停顿", "WAITING")
+    case .stale:
+      base = L("待更新", "UPDATE PENDING")
+    case .updating:
+      base = L("优化中", "UPDATING")
+    case .ready:
+      base = L("已优化", "READY")
+    case .unavailable:
+      base = L("不可用", "UNAVAILABLE")
+    case .failed:
+      base = L("优化失败", "FAILED")
+    case .inactive:
+      base = L("原文", "RAW")
+    }
+
+    if state.liveOptimizationPhase == .stale,
+      let optimizedRevision = state.liveOptimizationRevision,
+      state.asrRevision > 0
+    {
+      return base + " · R\(optimizedRevision)→R\(state.asrRevision)"
+    }
+    let revision =
+      state.liveOptimizationPhase == .ready
+      ? state.liveOptimizationRevision
+      : (state.asrRevision > 0 ? state.asrRevision : nil)
+    if let revision { return base + " · R\(revision)" }
+    return base
+  }
+
+  /// LED tone matching `status(for:)`.
+  static func tone<S: FloatingBarState>(for state: S) -> DeckMetaTone {
+    if state.finalOptimizationFailureMessage != nil { return .failed }
+    switch state.liveOptimizationPhase {
+    case .updating: return .working
+    case .ready: return .ok
+    case .failed, .unavailable: return .failed
+    case .waiting, .stale, .inactive: return .idle
+    }
+  }
+
+  /// True when the bottom card copy is a status hint ("等待停顿后优化…",
+  /// "此模式将直接插入原文", …) rather than actual transcript content, so the
+  /// view can dim it — same-color placeholders read as if text had already
+  /// been recognized before the user spoke.
+  static func bottomCardIsPlaceholder<S: FloatingBarState>(for state: S) -> Bool {
+    if state.barPhase == .error { return false }
+    if state.barPhase == .done,
+      state.transcriptionText.isEmpty,
+      state.optimizedPanelText.isEmpty
+    {
+      return false
+    }
+    if state.supportsLiveOptimizationPreview {
+      // Any produced optimized text is content; everything else is a
+      // phase hint (waiting / updating / unavailable / …).
+      return state.optimizedPanelText.isEmpty
+    }
+    let direct =
+      state.processingResultText.isEmpty ? state.transcriptionText : state.processingResultText
+    return direct.isEmpty
+  }
+}
+
 /// Dark-themed floating transcription bar with smooth morphing between states.
 ///
 /// Design: single capsule container that animates width + content transitions.
@@ -70,13 +225,21 @@ struct FloatingBarView<S: FloatingBarState>: View {
   @State private var recordingPeakWidth: CGFloat = TF.barHeight
   @State private var processingStartDate: Date?
   @State private var doneStartDate: Date?
-  @AppStorage(RecordingPanelPreference.storageKey) private var showsRecordingPanel = true
+  @AppStorage(TranscriptPanelStyle.storageKey) private var panelStyle =
+    TranscriptPanelStyle.top.rawValue
+
+  private var panelStyleValue: TranscriptPanelStyle {
+    TranscriptPanelStyle(rawValue: panelStyle) ?? .top
+  }
 
   // MARK: - Transcript Popup
 
   private var showExpandedRecording: Bool {
+    // Optimization failure is an exceptional state with no auto-hide: every
+    // style falls back to the top deck, whose retry/insert-raw actions are
+    // the only way out.
     if state.finalOptimizationFailureMessage != nil { return true }
-    guard showsRecordingPanel else { return false }
+    guard panelStyleValue == .top else { return false }
     switch state.barPhase {
     case .preparing, .recording, .processing:
       return true
@@ -90,7 +253,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
   private var shouldRenderCapsule: Bool {
     guard state.barPhase != .hidden else { return false }
     if showExpandedRecording { return false }
-    if !showsRecordingPanel,
+    if panelStyleValue != .top,
       state.barPhase == .preparing || state.barPhase == .recording
     {
       return false
@@ -393,6 +556,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
       panelModeMenu
 
+      if !state.inputDeviceName.isEmpty {
+        headerHairline
+
+        inputDeviceIndicator
+      }
+
       headerHairline
 
       llmTimingStatus
@@ -500,6 +669,22 @@ struct FloatingBarView<S: FloatingBarState>: View {
     Rectangle()
       .fill(TF.deckLine)
       .frame(width: 1, height: 14)
+  }
+
+  /// Capture-device chip in the channel strip, styled like the LLM deck status.
+  private var inputDeviceIndicator: some View {
+    HStack(spacing: 5) {
+      Image(systemName: "mic.fill")
+        .font(.system(size: 8.5))
+      Text(state.inputDeviceName)
+        .lineLimit(1)
+        .truncationMode(.tail)
+    }
+    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+    .tracking(0.5)
+    .foregroundStyle(TF.paperFaint)
+    .frame(maxWidth: 150)
+    .help(state.inputDeviceName)
   }
 
   private var panelModeMenu: some View {
@@ -667,10 +852,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
       topPanelColumn(
         title: L("优化稿", "EDIT"),
-        metadata: optimizedColumnStatus,
-        tone: optimizedMetaTone,
+        metadata: OptimizedPanelCopy.status(for: state),
+        tone: OptimizedPanelCopy.tone(for: state),
         width: rightWidth,
-        content: optimizedPanelText,
+        content: OptimizedPanelCopy.text(for: state),
         isOptimized: true
       )
     }
@@ -686,111 +871,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
     return Text(stable) + Text(pending).foregroundColor(TF.amber)
   }
 
-  private var optimizedPanelText: Text {
-    if state.supportsLiveOptimizationPreview {
-      let text = state.optimizedPanelText
-      if !text.isEmpty { return Text(text) }
-      switch state.liveOptimizationPhase {
-      case .waiting, .stale:
-        return Text(
-          state.transcriptionText.isEmpty
-            ? L("等待语音…", "Waiting for speech…")
-            : L("等待停顿后优化…", "Waiting for a pause to optimize…")
-        )
-      case .updating:
-        return Text(L("正在生成优化稿…", "Generating optimized text…"))
-      case .unavailable(let message), .failed(let message):
-        return Text(message)
-      case .ready:
-        return Text(L("等待优化结果…", "Waiting for optimization result…"))
-      case .inactive:
-        return Text(L("此模式不支持实时优化", "Live optimization is unavailable for this mode"))
-      }
-    }
-    let direct =
-      state.processingResultText.isEmpty ? state.transcriptionText : state.processingResultText
-    return Text(direct.isEmpty ? L("此模式将直接插入原文", "This mode inserts the raw transcript") : direct)
-  }
-
-  private var optimizedColumnStatus: String {
-    if state.finalOptimizationFailureMessage != nil {
-      return L("优化失败", "FAILED")
-    }
-    if state.barPhase == .processing, let locked = state.lockedOptimizationRevision {
-      return L("提交中", "COMMITTING") + " · R\(locked)"
-    }
-
-    let base: String
-    switch state.liveOptimizationPhase {
-    case .waiting:
-      base = L("等待停顿", "WAITING")
-    case .stale:
-      base = L("待更新", "UPDATE PENDING")
-    case .updating:
-      base = L("优化中", "UPDATING")
-    case .ready:
-      base = L("已优化", "READY")
-    case .unavailable:
-      base = L("不可用", "UNAVAILABLE")
-    case .failed:
-      base = L("优化失败", "FAILED")
-    case .inactive:
-      base = L("原文", "RAW")
-    }
-
-    if state.liveOptimizationPhase == .stale,
-      let optimizedRevision = state.liveOptimizationRevision,
-      state.asrRevision > 0
-    {
-      return base + " · R\(optimizedRevision)→R\(state.asrRevision)"
-    }
-    let revision =
-      state.liveOptimizationPhase == .ready
-      ? state.liveOptimizationRevision
-      : (state.asrRevision > 0 ? state.asrRevision : nil)
-    if let revision { return base + " · R\(revision)" }
-    return base
-  }
-
-  private enum DeckMetaTone {
-    case live, working, ok, failed, idle
-
-    var ledColor: Color {
-      switch self {
-      case .live, .ok: return TF.signalTeal
-      case .working: return TF.lampAmber
-      case .failed: return TF.settingsAccentRed
-      case .idle: return TF.paper.opacity(0.25)
-      }
-    }
-
-    var pulsing: Bool { self == .working }
-
-    var textColor: Color {
-      switch self {
-      case .working: return TF.lampAmber.opacity(0.85)
-      case .failed: return TF.settingsAccentRed.opacity(0.9)
-      default: return TF.paperFaint
-      }
-    }
-  }
-
   private var rawMetaTone: DeckMetaTone {
     switch state.asrPanelPhase {
     case .connecting, .temporary: return .idle
     case .recognizing, .finishing, .recovering: return .working
     case .stable, .locked: return .ok
     case .failed: return .failed
-    }
-  }
-
-  private var optimizedMetaTone: DeckMetaTone {
-    if state.finalOptimizationFailureMessage != nil { return .failed }
-    switch state.liveOptimizationPhase {
-    case .updating: return .working
-    case .ready: return .ok
-    case .failed, .unavailable: return .failed
-    case .waiting, .stale, .inactive: return .idle
     }
   }
 
@@ -929,23 +1015,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
   /// Signal Desk glass: teal-ink gradient over frosted material with a top sheen.
   private var deckGlassBackground: some View {
-    ZStack {
-      Rectangle().fill(.ultraThinMaterial)
-      LinearGradient(
-        colors: [
-          TF.ink3.opacity(0.82),
-          TF.ink1.opacity(0.92),
-          TF.ink0.opacity(0.96),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      )
-      LinearGradient(
-        colors: [.white.opacity(0.05), .clear],
-        startPoint: .top,
-        endPoint: UnitPoint(x: 0.5, y: 0.4)
-      )
-    }
+    DeckGlassBackground()
   }
 
   // MARK: - Background & Border
@@ -1272,45 +1342,159 @@ struct RecordingDot: View {
 
 /// Signal Desk tally lamp shown independently at screen bottom.
 /// A machined dial with a VU tick ring around a breathing filament core.
-struct ScreenBottomRecordingIndicator: View {
-  let meter: AudioLevelMeter
-  let modeName: String
+/// Signal Desk glass: teal-ink gradient over frosted material with a top sheen.
+/// Shared by the top deck card and the style-2 bottom transcript card.
+private struct DeckGlassBackground: View {
+  var body: some View {
+    ZStack {
+      Rectangle().fill(.ultraThinMaterial)
+      LinearGradient(
+        colors: [
+          TF.ink3.opacity(0.82),
+          TF.ink1.opacity(0.92),
+          TF.ink0.opacity(0.96),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+      LinearGradient(
+        colors: [.white.opacity(0.05), .clear],
+        startPoint: .top,
+        endPoint: UnitPoint(x: 0.5, y: 0.4)
+      )
+    }
+  }
+}
+
+/// Screen-bottom recording surface. In every style it renders the tally lamp
+/// orb + mode capsule; in style 2 (.bottom) it additionally floats an
+/// optimized-transcript card above the orb. Reads state directly so the
+/// controller never has to rebuild the root view.
+///
+/// Content is anchored to the bottom of the panel frame: when the controller
+/// grows the frame upward for the card, the orb stays exactly where the user
+/// dragged it.
+struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
+  let state: S
+
+  @AppStorage(TranscriptPanelStyle.storageKey) private var panelStyle =
+    TranscriptPanelStyle.top.rawValue
+
+  private var style: TranscriptPanelStyle {
+    TranscriptPanelStyle(rawValue: panelStyle) ?? .top
+  }
+
+  private var showsOptimizedCard: Bool {
+    style == .bottom && state.barPhase != .hidden
+  }
 
   var body: some View {
-    VStack(spacing: 7) {
-      TallyLampOrb(meter: meter)
+    VStack(spacing: 10) {
+      if showsOptimizedCard {
+        optimizedCard
+      }
+      TallyLampOrb(meter: state.audioLevel)
         .frame(width: 96, height: 96)
+      // Style 2 folds the capsule's info into the card's status row, so the
+      // lamp-only styles are the only ones still rendering it.
+      if style != .bottom {
+        modeCapsule
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(
+      L("正在使用\(state.currentMode.name)录音", "Recording in \(state.currentMode.name)")
+    )
+  }
 
+  // MARK: - Optimized Transcript Card (style 2)
+
+  private var optimizedCard: some View {
+    VStack(alignment: .leading, spacing: 5) {
       HStack(spacing: 6) {
-        StatusLED(color: TF.lampAmber, pulsing: true)
-        Text(modeName)
-          .font(.system(size: 9, weight: .semibold, design: .monospaced))
-          .tracking(2)
-          .foregroundStyle(TF.paperDim)
+        StatusLED(color: optimizedTone.ledColor, pulsing: optimizedTone.pulsing)
+        Text(OptimizedPanelCopy.status(for: state))
+          .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+          .tracking(1)
+          .foregroundStyle(optimizedTone.textColor)
+          .lineLimit(1)
+        Spacer(minLength: 8)
+        Text(modeDeviceLabel)
+          .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+          .tracking(1)
+          .foregroundStyle(TF.paperFaint)
           .lineLimit(1)
           .truncationMode(.tail)
       }
-      .padding(.horizontal, 10)
-      .frame(height: 19)
-      .background {
-        RoundedRectangle(cornerRadius: 4, style: .continuous)
-          .fill(
-            LinearGradient(
-              colors: [TF.ink2, TF.ink1],
-              startPoint: .top,
-              endPoint: .bottom
-            )
-          )
-      }
-      .overlay {
-        RoundedRectangle(cornerRadius: 4, style: .continuous)
-          .stroke(TF.deckLine, lineWidth: 1)
-      }
-      .frame(maxWidth: TF.screenBottomIndicatorWidth - 24)
+      OptimizedPanelCopy.bottomCardText(for: state)
+        .font(.system(size: TF.topTranscriptPanelBodyFontSize))
+        .lineSpacing(TF.topTranscriptPanelBodyLineSpacing)
+        .multilineTextAlignment(.leading)
+        .foregroundStyle(cardForeground)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
-    .frame(width: TF.screenBottomIndicatorWidth, height: TF.screenBottomIndicatorHeight)
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel(L("正在使用\(modeName)录音", "Recording in \(modeName)"))
+    .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
+    .padding(.vertical, 9)
+    .background(DeckGlassBackground())
+    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 13, style: .continuous)
+        .stroke(TF.deckLineStrong, lineWidth: 1)
+    }
+    .padding(.horizontal, 2)
+  }
+
+  private var optimizedTone: DeckMetaTone {
+    OptimizedPanelCopy.tone(for: state)
+  }
+
+  /// Trailing side of the card's status row: what the lamp-only capsule shows
+  /// in the other styles (mode · capture device).
+  private var modeDeviceLabel: String {
+    state.inputDeviceName.isEmpty
+      ? state.currentMode.name
+      : "\(state.currentMode.name) · \(state.inputDeviceName)"
+  }
+
+  /// Errors are red; status hints ("等待语音…", "此模式将直接插入原文") are
+  /// dimmed so they can't be mistaken for recognized content; real content
+  /// stays IME-candidate green.
+  private var cardForeground: Color {
+    if state.barPhase == .error { return TF.settingsAccentRed }
+    if OptimizedPanelCopy.bottomCardIsPlaceholder(for: state) { return TF.paperDim }
+    return TF.bottomCardLive
+  }
+
+  // MARK: - Mode Capsule (lamp-only styles)
+
+  private var modeCapsule: some View {
+    HStack(spacing: 6) {
+      StatusLED(color: TF.lampAmber, pulsing: true)
+      Text(state.currentMode.name)
+        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+        .tracking(2)
+        .foregroundStyle(TF.paperDim)
+        .lineLimit(1)
+        .truncationMode(.tail)
+    }
+    .padding(.horizontal, 10)
+    .frame(height: 19)
+    .background {
+      RoundedRectangle(cornerRadius: 4, style: .continuous)
+        .fill(
+          LinearGradient(
+            colors: [TF.ink2, TF.ink1],
+            startPoint: .top,
+            endPoint: .bottom
+          )
+        )
+    }
+    .overlay {
+      RoundedRectangle(cornerRadius: 4, style: .continuous)
+        .stroke(TF.deckLine, lineWidth: 1)
+    }
+    .frame(maxWidth: TF.screenBottomIndicatorWidth - 24)
   }
 }
 

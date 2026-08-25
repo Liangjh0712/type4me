@@ -315,6 +315,111 @@ final class FloatingBarPanelTests: XCTestCase {
     withExtendedLifetime(controller) {}
   }
 
+  func testBottomStyleShowsOptimizedCardWithoutTopPanel() throws {
+    _ = NSApplication.shared
+    let existingIndicators = Set(
+      NSApp.windows.compactMap { $0 as? ScreenBottomIndicatorPanel }.map(ObjectIdentifier.init)
+    )
+    try withPanelStyle(.bottom) {
+      let state = AppState()
+      state.currentMode = .formalWriting
+      let (_, controller, topPanel) = try makeStateControllerAndPanel(state: state)
+      defer { topPanel.orderOut(nil) }
+      let indicator = try XCTUnwrap(
+        NSApp.windows.compactMap { $0 as? ScreenBottomIndicatorPanel }
+          .first { !existingIndicators.contains(ObjectIdentifier($0)) }
+      )
+      defer { indicator.orderOut(nil) }
+
+      state.startRecording()
+      state.markRecordingReady()
+      state.setLiveTranscript(
+        RecognitionTranscript(
+          confirmedSegments: ["底部样式原文"],
+          partialText: "",
+          authoritativeText: "底部样式原文",
+          isFinal: false,
+          revision: 1
+        ))
+      state.showLiveOptimizationResult(
+        "底部样式优化稿", sourceText: "底部样式原文", sourceRevision: state.asrRevision,
+        modeID: state.currentMode.id)
+      for _ in 0..<12 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+      }
+
+      XCTAssertFalse(topPanel.isVisible)
+      XCTAssertTrue(indicator.isVisible)
+      XCTAssertGreaterThan(indicator.frame.width, TF.screenBottomIndicatorWidth)
+      XCTAssertGreaterThan(indicator.frame.height, TF.screenBottomIndicatorHeight)
+
+      state.stopRecording()
+      for _ in 0..<8 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+      }
+      XCTAssertFalse(topPanel.isVisible)
+      XCTAssertTrue(indicator.isVisible)
+
+      state.finalize(text: "底部样式优化稿", outcome: .copiedToClipboard)
+      for _ in 0..<40 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+      }
+      XCTAssertFalse(indicator.isVisible)
+      withExtendedLifetime(controller) {}
+    }
+  }
+
+  func testBottomStyleFailureForcesTopPanel() throws {
+    try withPanelStyle(.bottom) {
+      let state = AppState()
+      state.currentMode = .formalWriting
+      let (_, controller, topPanel) = try makeStateControllerAndPanel(state: state)
+      defer { topPanel.orderOut(nil) }
+
+      state.startRecording()
+      state.markRecordingReady()
+      state.setLiveTranscript(
+        RecognitionTranscript(
+          confirmedSegments: ["完整原文"],
+          partialText: "",
+          authoritativeText: "完整原文",
+          isFinal: false,
+          revision: 1
+        ))
+      for _ in 0..<8 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+      }
+      XCTAssertFalse(topPanel.isVisible)
+
+      state.showFinalOptimizationFailure("请求超时", sourceText: "完整原文")
+      for _ in 0..<10 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+      }
+
+      XCTAssertTrue(topPanel.isVisible)
+      withExtendedLifetime(controller) {}
+    }
+  }
+
+  /// Sets the panel style key for the duration of a test, restoring the
+  /// previous value (or absence) afterwards.
+  private func withPanelStyle(
+    _ style: TranscriptPanelStyle,
+    body: () throws -> Void
+  ) rethrows {
+    let key = TranscriptPanelStyle.storageKey
+    let previous = UserDefaults.standard.object(forKey: key)
+    UserDefaults.standard.set(style.rawValue, forKey: key)
+    defer {
+      if let previous {
+        UserDefaults.standard.set(previous, forKey: key)
+      } else {
+        UserDefaults.standard.removeObject(forKey: key)
+      }
+    }
+    try body()
+  }
+
   private func descendantViews(of view: NSView) -> [NSView] {
     view.subviews + view.subviews.flatMap(descendantViews(of:))
   }

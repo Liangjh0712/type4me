@@ -153,6 +153,7 @@ extension DemoState: FloatingBarState {
     var supportsLiveOptimizationPreview: Bool { false }
     var optimizedPanelText: String { processingResultText }
     var pendingOptimizationTail: String { "" }
+    var inputDeviceName: String { L("内置麦克风", "Built-in Microphone") }
     func selectPanelMode(_: ProcessingMode) {}
     func toggleTranscriptPanelCollapsed() { isTranscriptPanelCollapsed.toggle() }
     func requestPanelStop() {}

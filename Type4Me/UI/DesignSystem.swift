@@ -76,6 +76,11 @@ enum TF {
   static let paperDim = Color(red: 0.949, green: 0.925, blue: 0.875).opacity(0.60)
   static let paperFaint = Color(red: 0.949, green: 0.925, blue: 0.875).opacity(0.34)
 
+  /// Style-2 bottom card text, IME-candidate-bar inspired: vivid green for
+  /// recognized content ("this is what would be inserted"), dimmed paper for
+  /// status hints, red for errors.
+  static let bottomCardLive = Color(red: 0.494, green: 0.949, blue: 0.078)  // #7EF214
+
   /// Warm hairline borders on ink glass.
   static let deckLine = Color(red: 0.922, green: 0.894, blue: 0.831).opacity(0.11)
   static let deckLineStrong = Color(red: 0.922, green: 0.894, blue: 0.831).opacity(0.20)

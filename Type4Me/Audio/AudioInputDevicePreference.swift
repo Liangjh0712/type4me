@@ -87,6 +87,17 @@ enum AudioInputDevicePreferenceStore {
         return resolvedDevice(devices: devices)?.uid
     }
 
+    /// Display name of the device a recording would capture from right now:
+    /// the priority-resolved device when one is configured and online,
+    /// otherwise the system default input. Mirrors the two-step resolution in
+    /// RecognitionSession (resolvedCachedDeviceUID → engine fallback).
+    static func resolvedCaptureDeviceName() -> String? {
+        if let device = resolvedDevice(devices: cachedDevicesOrRefresh()) {
+            return device.name
+        }
+        return AVCaptureDevice.default(for: .audio)?.localizedName
+    }
+
     static func mode() -> AudioInputDevicePreferenceMode {
         migrateIfNeeded()
         let rawValue = UserDefaults.standard.string(forKey: modeKey)

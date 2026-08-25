@@ -14,7 +14,7 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
     @AppStorage("tf_startSound") private var startSound = StartSoundStyle.chime.rawValue
     @AppStorage("tf_launchAtLogin") private var launchAtLogin = true
     @AppStorage("tf_volumeReduction") private var volumeReduction = -1
-    @AppStorage(RecordingPanelPreference.storageKey) private var showsRecordingPanel = true
+    @AppStorage(TranscriptPanelStyle.storageKey) private var transcriptPanelStyle = TranscriptPanelStyle.top.rawValue
     @AppStorage("tf_language") private var language = AppLanguage.systemDefault
     @AppStorage("tf_preserveClipboard") private var preserveClipboard = true
     @AppStorage("tf_showDockIcon") private var showDockIcon = true
@@ -315,14 +315,8 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
                 .tracking(0.8)
                 .foregroundStyle(TF.settingsTextTertiary)
             settingsDropdown(
-                selection: Binding(
-                    get: { showsRecordingPanel ? "on" : "off" },
-                    set: { showsRecordingPanel = $0 == "on" }
-                ),
-                options: [
-                    ("on", L("显示", "Show")),
-                    ("off", L("关闭", "Off")),
-                ]
+                selection: $transcriptPanelStyle,
+                options: TranscriptPanelStyle.allCases.map { ($0.rawValue, $0.displayName) }
             )
         }
         .padding(.vertical, 6)
@@ -438,8 +432,27 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
             }
 
             microphonePreferenceDropdown
+
+            if let deviceName = currentEffectiveInputDeviceName {
+                HStack(spacing: 4) {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 9))
+                    Text(L("当前生效：", "Active: ") + deviceName)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(TF.settingsTextTertiary)
+            }
         }
         .padding(.vertical, 6)
+    }
+
+    /// The device a recording would capture from right now (priority-resolved
+    /// or system default). Re-evaluated on every render; the view refreshes
+    /// on `.audioInputDevicesDidChange` via `refreshMicrophones()`.
+    private var currentEffectiveInputDeviceName: String? {
+        AudioInputDevicePreferenceStore.resolvedCaptureDeviceName()
     }
 
     private func refreshMicrophones() {

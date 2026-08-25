@@ -497,6 +497,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               return
             }
 
+            // A final-optimization failure parks the bar in .processing with no
+            // auto-hide and the session suspended on a decision continuation.
+            // Treat a hotkey press as "abandon and record again" — resolve the
+            // pending decision with injection skipped (same as ESC), then start
+            // fresh. Without this, styles without on-panel retry buttons would
+            // trap the user here.
+            if phase == .processing,
+              MainActor.assumeIsolated({ self.appState.finalOptimizationFailureMessage != nil })
+            {
+              NSLog("[Type4Me] >>> HOTKEY: abandon failed optimization, record again")
+              DebugFileLogger.log("hotkey abandon failed optimization, starting new recording")
+              MainActor.assumeIsolated { self.hotkeyManager.resetActiveState() }
+              MainActor.assumeIsolated { self.appState.cancel() }
+              let selectedProvider = CredentialStore.selectedASRProvider
+              let resolvedMode = ASRProviderRegistry.resolvedMode(
+                for: capturedMode, provider: selectedProvider)
+              let effectiveMode =
+                availableModes.first(where: { $0.id == resolvedMode.id }) ?? resolvedMode
+              Task {
+                await self.session.abortInjection()
+                await self.session.stopRecording()
+                let ready = await self.session.awaitIdle()
+                if !ready {
+                  DebugFileLogger.log("hotkey abandon-failure start: awaitIdle timed out")
+                }
+                await MainActor.run {
+                  self.appState.currentMode = effectiveMode
+                  self.appState.startRecording()
+                }
+                await self.session.startRecording(mode: effectiveMode)
+              }
+              return
+            }
+
             // Block new recording while LLM/injection is still in progress.
             // The current session must finish (paste + history save) before a new one can start.
             if phase == .processing {

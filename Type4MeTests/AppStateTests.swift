@@ -94,33 +94,109 @@ final class AppStateTests: XCTestCase {
   }
 
   func testHiddenRecordingPanelDoesNotShowPanelUntilProcessing() {
-    let previous = UserDefaults.standard.object(forKey: RecordingPanelPreference.storageKey)
-    UserDefaults.standard.set(false, forKey: RecordingPanelPreference.storageKey)
+    withPanelStyle(.hidden) {
+      let appState = AppState()
+      var showCount = 0
+      var hideCount = 0
+      appState.onShowPanel = { showCount += 1 }
+      appState.onHidePanel = { hideCount += 1 }
+
+      appState.startRecording()
+      appState.markRecordingReady()
+
+      XCTAssertEqual(appState.barPhase, .recording)
+      XCTAssertEqual(showCount, 0)
+      XCTAssertEqual(hideCount, 1)
+
+      appState.stopRecording()
+
+      XCTAssertEqual(appState.barPhase, .processing)
+      XCTAssertEqual(showCount, 1)
+    }
+  }
+
+  func testBottomPanelStyleShowsPanelFromStart() {
+    withPanelStyle(.bottom) {
+      let appState = AppState()
+      var showCount = 0
+      var hideCount = 0
+      appState.onShowPanel = { showCount += 1 }
+      appState.onHidePanel = { hideCount += 1 }
+
+      appState.startRecording()
+
+      XCTAssertEqual(appState.barPhase, .preparing)
+      XCTAssertEqual(showCount, 1)
+      XCTAssertEqual(hideCount, 0)
+    }
+  }
+
+  func testPanelStyleMigrationFromShownBoolean() {
+    withLegacyPanelBoolean(true) {
+      XCTAssertEqual(TranscriptPanelStyle.current(), .top)
+      XCTAssertEqual(
+        UserDefaults.standard.string(forKey: TranscriptPanelStyle.storageKey), "top")
+      XCTAssertNil(
+        UserDefaults.standard.object(forKey: RecordingPanelPreference.storageKey))
+    }
+  }
+
+  func testPanelStyleMigrationFromHiddenBoolean() {
+    withLegacyPanelBoolean(false) {
+      XCTAssertEqual(TranscriptPanelStyle.current(), .hidden)
+      XCTAssertEqual(
+        UserDefaults.standard.string(forKey: TranscriptPanelStyle.storageKey), "hidden")
+      XCTAssertNil(
+        UserDefaults.standard.object(forKey: RecordingPanelPreference.storageKey))
+    }
+  }
+
+  func testPanelStyleDefaultsToTopWithoutAnyKeys() {
+    withPanelStyle(nil) {
+      XCTAssertEqual(TranscriptPanelStyle.current(), .top)
+      XCTAssertNil(UserDefaults.standard.object(forKey: RecordingPanelPreference.storageKey))
+    }
+  }
+
+  /// Saves/restores the style key around a test that runs with a given style
+  /// (nil = key absent). Also clears the retired boolean key so migrations
+  /// can't leak between tests.
+  private func withPanelStyle(
+    _ style: TranscriptPanelStyle?,
+    body: () throws -> Void
+  ) rethrows {
+    let key = TranscriptPanelStyle.storageKey
+    let previous = UserDefaults.standard.object(forKey: key)
+    UserDefaults.standard.removeObject(forKey: RecordingPanelPreference.storageKey)
+    if let style {
+      UserDefaults.standard.set(style.rawValue, forKey: key)
+    } else {
+      UserDefaults.standard.removeObject(forKey: key)
+    }
     defer {
       if let previous {
-        UserDefaults.standard.set(previous, forKey: RecordingPanelPreference.storageKey)
+        UserDefaults.standard.set(previous, forKey: key)
       } else {
-        UserDefaults.standard.removeObject(forKey: RecordingPanelPreference.storageKey)
+        UserDefaults.standard.removeObject(forKey: key)
       }
+      UserDefaults.standard.removeObject(forKey: RecordingPanelPreference.storageKey)
     }
+    try body()
+  }
 
-    let appState = AppState()
-    var showCount = 0
-    var hideCount = 0
-    appState.onShowPanel = { showCount += 1 }
-    appState.onHidePanel = { hideCount += 1 }
-
-    appState.startRecording()
-    appState.markRecordingReady()
-
-    XCTAssertEqual(appState.barPhase, .recording)
-    XCTAssertEqual(showCount, 0)
-    XCTAssertEqual(hideCount, 1)
-
-    appState.stopRecording()
-
-    XCTAssertEqual(appState.barPhase, .processing)
-    XCTAssertEqual(showCount, 1)
+  /// Runs a test with only the retired boolean key set (style key absent),
+  /// simulating a pre-migration install.
+  private func withLegacyPanelBoolean(
+    _ shown: Bool,
+    body: () throws -> Void
+  ) rethrows {
+    UserDefaults.standard.removeObject(forKey: TranscriptPanelStyle.storageKey)
+    UserDefaults.standard.set(shown, forKey: RecordingPanelPreference.storageKey)
+    defer {
+      UserDefaults.standard.removeObject(forKey: TranscriptPanelStyle.storageKey)
+      UserDefaults.standard.removeObject(forKey: RecordingPanelPreference.storageKey)
+    }
+    try body()
   }
 
   func testSetLiveTranscriptUsesCumulativeCanonicalText() {

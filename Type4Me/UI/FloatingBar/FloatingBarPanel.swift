@@ -169,9 +169,15 @@ final class ScreenBottomIndicatorPanel: NSPanel {
   override var canBecomeKey: Bool { false }
   override var canBecomeMain: Bool { false }
 
+  /// True while the user is modal-dragging the indicator. The controller
+  /// suppresses deferred resizes during a drag so the frame can't fight it.
+  private(set) var isDragging = false
+
   override func sendEvent(_ event: NSEvent) {
     if event.type == .leftMouseDown {
+      isDragging = true
       performDrag(with: event)
+      isDragging = false
       return
     }
     super.sendEvent(event)
@@ -198,19 +204,23 @@ final class FloatingBarController {
   private let screenBottomIndicatorPanel: ScreenBottomIndicatorPanel
   private let state: AppState
   private var hosting: NSHostingView<FloatingBarView<AppState>>!
-  private var screenBottomIndicatorHosting: NSHostingView<ScreenBottomRecordingIndicator>!
+  private var screenBottomIndicatorHosting: NSHostingView<ScreenBottomIndicatorView<AppState>>!
   private var targetScreen: NSScreen?
   private var expandedPanelWidth = TF.topTranscriptPanelMaxWidth
   private var maximumPanelHeight: CGFloat = 500
   private var panelGeneration = 0
   private var pendingResize: DispatchWorkItem?
+  private var pendingBottomResize: DispatchWorkItem?
   private var lastPanelCollapsed = false
   private var recenterPanelOnNextResize = false
   private var collapsedPanelOrigin: NSPoint?
-  /// Last position of the bottom indicator, keyed by display ID. The indicator
-  /// always appears on the target (frontmost) screen; a position is only
-  /// restored when recording again on the same display where the user left it.
-  private var screenBottomIndicatorOrigins: [NSNumber: NSPoint] = [:]
+  /// Last orb anchor (bottom-center of the indicator frame), keyed by display
+  /// ID. The indicator always appears on the target (frontmost) screen; a
+  /// position is only restored when recording again on the same display where
+  /// the user left it. Stored as an anchor rather than the frame origin so
+  /// the style-2 text card can grow the frame upward/around the orb without
+  /// moving it.
+  private var screenBottomIndicatorAnchors: [NSNumber: NSPoint] = [:]
 
   init(state: AppState) {
     self.state = state
@@ -230,10 +240,7 @@ final class FloatingBarController {
     panel.contentView = hosting
 
     screenBottomIndicatorHosting = NSHostingView(
-      rootView: ScreenBottomRecordingIndicator(
-        meter: state.audioLevel,
-        modeName: state.currentMode.name
-      )
+      rootView: ScreenBottomIndicatorView(state: state)
     )
     screenBottomIndicatorHosting.sizingOptions = []
     screenBottomIndicatorHosting.wantsLayer = true
@@ -426,37 +433,70 @@ final class FloatingBarController {
   }
 
   private func syncScreenBottomIndicator() {
-    if state.barPhase == .recording {
+    if shouldShowScreenBottomIndicator {
       showScreenBottomIndicator()
     } else {
       hideScreenBottomIndicator()
     }
   }
 
+  private var shouldShowScreenBottomIndicator: Bool {
+    switch TranscriptPanelStyle.current() {
+    case .top, .hidden:
+      return state.barPhase == .recording
+    case .bottom:
+      switch state.barPhase {
+      case .preparing, .recording, .processing, .recovering:
+        return true
+      case .error:
+        // Errors always carry a user-facing message worth surfacing.
+        return true
+      case .done:
+        // Mirrors the top deck's content predicate (feedbackMessage is always
+        // non-empty, so it can't be used directly): transcript text, a pending
+        // failure, or a non-standard feedback (Mac Action result).
+        return !state.transcriptionText.isEmpty
+          || !state.optimizedPanelText.isEmpty
+          || state.finalOptimizationFailureMessage != nil
+          || state.feedbackKind != .standard
+      case .hidden:
+        return false
+      }
+    }
+  }
+
   private func showScreenBottomIndicator() {
-    screenBottomIndicatorHosting.rootView = ScreenBottomRecordingIndicator(
-      meter: state.audioLevel,
-      modeName: state.currentMode.name
-    )
     screenBottomIndicatorPanel.contentView?.layer?.removeAllAnimations()
     if screenBottomIndicatorPanel.isVisible {
       screenBottomIndicatorPanel.alphaValue = 1
+      scheduleBottomIndicatorResize()
       return
     }
 
     configureForCurrentTarget()
     guard let targetScreen else { return }
+    // Cold open: reset to the current desired size BEFORE restoring the
+    // remembered anchor, so a tall style-2 frame from the last session can't
+    // be clamped against stale geometry and then yank the orb when it shrinks.
+    let size = desiredBottomIndicatorSize()
+    screenBottomIndicatorHosting.frame = NSRect(origin: .zero, size: size)
     if let displayID = Self.displayID(for: targetScreen),
-      let savedOrigin = screenBottomIndicatorOrigins[displayID]
+      let anchor = screenBottomIndicatorAnchors[displayID]
     {
-      let indicatorSize = screenBottomIndicatorPanel.frame.size
-      let origin = constrainedPanelOrigin(savedOrigin, size: indicatorSize, in: targetScreen)
-      screenBottomIndicatorPanel.setFrame(
-        NSRect(origin: origin, size: indicatorSize),
-        display: false
+      let origin = constrainedPanelOrigin(
+        NSPoint(x: anchor.x - size.width / 2, y: anchor.y),
+        size: size,
+        in: targetScreen
       )
+      screenBottomIndicatorPanel.setFrame(NSRect(origin: origin, size: size), display: false)
     } else {
       screenBottomIndicatorPanel.positionAtBottomCenter(in: targetScreen)
+      if screenBottomIndicatorPanel.frame.size != size {
+        var frame = screenBottomIndicatorPanel.frame
+        frame.origin.x = frame.midX - size.width / 2
+        frame.size = size
+        screenBottomIndicatorPanel.setFrame(frame, display: false)
+      }
     }
 
     screenBottomIndicatorPanel.alphaValue = 1
@@ -464,6 +504,7 @@ final class FloatingBarController {
   }
 
   private func hideScreenBottomIndicator() {
+    pendingBottomResize?.cancel()
     guard screenBottomIndicatorPanel.isVisible else { return }
     let frame = screenBottomIndicatorPanel.frame
     if let screen = NSScreen.screens.first(where: {
@@ -471,10 +512,73 @@ final class FloatingBarController {
     }),
       let displayID = Self.displayID(for: screen)
     {
-      screenBottomIndicatorOrigins[displayID] = frame.origin
+      screenBottomIndicatorAnchors[displayID] = NSPoint(x: frame.midX, y: frame.minY)
     }
     screenBottomIndicatorPanel.alphaValue = 0
     screenBottomIndicatorPanel.orderOut(nil)
+  }
+
+  // MARK: Bottom Indicator Sizing (style 2)
+
+  /// Lamp-only size by default; in style 2 the frame grows upward around the
+  /// orb to fit the optimized-transcript card.
+  private func desiredBottomIndicatorSize() -> CGSize {
+    let base = NSSize(
+      width: TF.screenBottomIndicatorWidth,
+      height: TF.screenBottomIndicatorHeight
+    )
+    guard TranscriptPanelStyle.current() == .bottom, state.barPhase != .hidden else {
+      return base
+    }
+    let cardWidth = min(520, (targetScreen?.visibleFrame.width ?? 800) - 80)
+    // Card text width: card horizontal padding + the view's 2pt card inset.
+    let textWidth = cardWidth - TF.topTranscriptPanelHorizontalPadding * 2 - 4
+    let cardText = OptimizedPanelCopy.bottomCardString(for: state)
+    // +34: vertical padding (9×2) + status row (~11pt) + row spacing (5pt).
+    var cardHeight = measuredTranscriptHeight(cardText, width: textWidth) + 34
+    // Style 2 drops the mode capsule (its info lives in the card's status
+    // row), so the stack below the card is just the 96pt orb.
+    let orbStackHeight: CGFloat = 96
+    // Cap so the grown frame can never reach past the top of the screen.
+    if let visible = targetScreen?.visibleFrame.height {
+      cardHeight = min(cardHeight, max(60, visible - TF.barBottomOffset - 40 - orbStackHeight))
+    }
+    let spacing: CGFloat = 10
+    return CGSize(
+      width: max(cardWidth + 4, base.width),
+      height: orbStackHeight + spacing + cardHeight
+    )
+  }
+
+  private func scheduleBottomIndicatorResize() {
+    guard !screenBottomIndicatorPanel.isDragging else { return }
+    pendingBottomResize?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.applyBottomIndicatorResize(to: self.desiredBottomIndicatorSize())
+    }
+    pendingBottomResize = work
+    DispatchQueue.main.async(execute: work)
+  }
+
+  /// Grows/shrinks around the orb: bottom edge fixed, width anchored at the
+  /// orb's horizontal center, so the lamp never moves as text arrives.
+  private func applyBottomIndicatorResize(to size: CGSize) {
+    guard screenBottomIndicatorPanel.isVisible else { return }
+    guard !screenBottomIndicatorPanel.isDragging else { return }
+    let old = screenBottomIndicatorPanel.frame
+    guard abs(old.width - size.width) > 0.5 || abs(old.height - size.height) > 0.5 else { return }
+    var frame = NSRect(
+      origin: NSPoint(x: old.midX - size.width / 2, y: old.minY),
+      size: size
+    )
+    if let screen = NSScreen.screens.first(where: {
+      $0.frame.contains(NSPoint(x: old.midX, y: old.midY))
+    }) {
+      frame.origin = constrainedPanelOrigin(frame.origin, size: size, in: screen)
+    }
+    screenBottomIndicatorHosting.frame = NSRect(origin: .zero, size: size)
+    screenBottomIndicatorPanel.setFrame(frame, display: true)
   }
 
   private static func displayID(for screen: NSScreen) -> NSNumber? {
@@ -484,6 +588,18 @@ final class FloatingBarController {
   func show() {
     panelGeneration &+= 1
     pendingResize?.cancel()
+
+    // Style 2 keeps the top deck out of the way — except when an optimization
+    // failure is pending: the deck's retry/insert-raw actions are the only
+    // way out of that no-auto-hide state, so every style shows it.
+    let topSuppressed =
+      TranscriptPanelStyle.current() == .bottom
+      && state.finalOptimizationFailureMessage == nil
+    if topSuppressed {
+      hideTopPanel()
+      syncScreenBottomIndicator()
+      return
+    }
 
     // Recording → processing reuses the same visible panel. Rebuilding the
     // hosting view and fading from zero here caused a visible disappear/reappear flash.
@@ -532,6 +648,10 @@ final class FloatingBarController {
 
   func hide() {
     hideScreenBottomIndicator()
+    hideTopPanel()
+  }
+
+  private func hideTopPanel() {
     if state.isTranscriptPanelCollapsed {
       collapsedPanelOrigin = panel.frame.origin
     }

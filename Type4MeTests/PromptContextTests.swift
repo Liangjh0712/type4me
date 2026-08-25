@@ -3,6 +3,47 @@ import XCTest
 
 final class PromptContextTests: XCTestCase {
 
+    func testCaptureRequirements_skipsPromptWithoutContextVariables() {
+        let requirements = PromptContext.captureRequirements(
+            for: "Rewrite this text: {text}"
+        )
+
+        XCTAssertTrue(requirements.isEmpty)
+    }
+
+    func testCaptureRequirements_detectsOnlyReferencedVariables() {
+        XCTAssertEqual(
+            PromptContext.captureRequirements(for: "Use {selected}"),
+            [.selected]
+        )
+        XCTAssertEqual(
+            PromptContext.captureRequirements(for: "Use {clipboard}"),
+            [.clipboard]
+        )
+        XCTAssertEqual(
+            PromptContext.captureRequirements(for: "Use {selected} and {clipboard}"),
+            [.selected, .clipboard]
+        )
+    }
+
+    func testCaptureRequirements_canRequireSelectionOutsidePrompt() {
+        let requirements = PromptContext.captureRequirements(
+            for: "Question: {text}",
+            requiresSelection: true
+        )
+
+        XCTAssertEqual(requirements, [.selected])
+    }
+
+    func testMergingContextPreservesPreviouslyCapturedFields() {
+        let selected = PromptContext(selectedText: "selection", clipboardText: "")
+        let clipboard = PromptContext(selectedText: "", clipboardText: "clipboard")
+        let merged = selected.merging(clipboard)
+
+        XCTAssertEqual(merged.selectedText, "selection")
+        XCTAssertEqual(merged.clipboardText, "clipboard")
+    }
+
     func testExpandContextVariables_replacesSelected() {
         let ctx = PromptContext(selectedText: "hello world", clipboardText: "")
         let result = ctx.expandContextVariables("Fix: {selected}")

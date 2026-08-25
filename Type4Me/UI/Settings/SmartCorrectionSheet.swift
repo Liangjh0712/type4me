@@ -38,7 +38,7 @@ struct SmartCorrectionSheet: View {
     @State private var hotwordSuggestions: [HotwordSuggestion] = []
     @State private var hotwordReason: String = ""
 
-    private let historyStore = HistoryStore()
+    private let historyStore = HistoryStore.shared
     private let generator = ASRVariantGenerator()
 
     // MARK: - Computed

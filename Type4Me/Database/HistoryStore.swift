@@ -6,6 +6,7 @@ extension Notification.Name {
 }
 
 actor HistoryStore {
+    static let shared = HistoryStore()
 
     private var db: OpaquePointer?
     private let audioArchive: AudioArchive
@@ -59,6 +60,15 @@ actor HistoryStore {
 
             // Index for ORDER BY created_at DESC pagination
             sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_history_created_at ON recognition_history(created_at DESC);", nil, nil, nil)
+        } else if let db {
+            sqlite3_close_v2(db)
+            self.db = nil
+        }
+    }
+
+    deinit {
+        if let db {
+            sqlite3_close_v2(db)
         }
     }
 

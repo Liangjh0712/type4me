@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Type4Me
 
@@ -19,7 +20,24 @@ final class HistoryStoreTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        store = nil
         try? FileManager.default.removeItem(at: testDirectory)
+    }
+
+    func testTemporaryStoresCloseDatabaseDescriptorOnDeinit() {
+        let baseline = openDescriptorCount(for: testPath)
+
+        for _ in 0..<20 {
+            autoreleasepool {
+                let temporaryStore = HistoryStore(
+                    path: testPath,
+                    audioArchive: AudioArchive(baseURL: testDirectory)
+                )
+                withExtendedLifetime(temporaryStore) {}
+            }
+        }
+
+        XCTAssertEqual(openDescriptorCount(for: testPath), baseline)
     }
 
     func testInsertAndFetchAll() async {
@@ -336,5 +354,42 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertNil(records.first(where: { $0.id == "audio-0" })?.audioPath)
         let retainedBytes = await store.audioStorageBytes()
         XCTAssertEqual(retainedBytes, 100)
+    }
+    private func openDescriptorCount(for path: String) -> Int {
+        let resolvedPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let pid = getpid()
+        let descriptorInfoSize = MemoryLayout<proc_fdinfo>.stride
+        let requiredBytes = Int(proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0))
+        guard requiredBytes > 0 else { return 0 }
+
+        var descriptors = [proc_fdinfo](
+            repeating: proc_fdinfo(),
+            count: requiredBytes / descriptorInfoSize
+        )
+        let usedBytes = descriptors.withUnsafeMutableBytes {
+            proc_pidinfo(pid, PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count))
+        }
+        guard usedBytes > 0 else { return 0 }
+
+        let pathInfoSize = Int32(MemoryLayout<vnode_fdinfowithpath>.stride)
+        return descriptors.prefix(Int(usedBytes) / descriptorInfoSize).reduce(into: 0) { count, descriptor in
+            var pathInfo = vnode_fdinfowithpath()
+            guard proc_pidfdinfo(
+                pid,
+                descriptor.proc_fd,
+                PROC_PIDFDVNODEPATHINFO,
+                &pathInfo,
+                pathInfoSize
+            ) == pathInfoSize else { return }
+
+            let descriptorPath = withUnsafePointer(to: &pathInfo.pvip.vip_path) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                    String(cString: $0)
+                }
+            }
+            if descriptorPath == resolvedPath {
+                count += 1
+            }
+        }
     }
 }

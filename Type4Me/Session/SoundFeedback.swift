@@ -347,9 +347,17 @@ enum SoundFeedback {
             guard AudioObjectGetPropertyDataSize(id, &outputAddress, 0, nil, &bufSize) == noErr,
                   bufSize > 0 else { continue }
 
-            let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-            defer { bufferList.deallocate() }
-            guard AudioObjectGetPropertyData(id, &outputAddress, 0, nil, &bufSize, bufferList) == noErr else { continue }
+            // AudioBufferList is a variable-length structure. A device with more than one
+            // output buffer needs more storage than MemoryLayout<AudioBufferList>.size.
+            let bufferListStorage = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(bufSize),
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { bufferListStorage.deallocate() }
+            let bufferList = bufferListStorage.assumingMemoryBound(to: AudioBufferList.self)
+            guard AudioObjectGetPropertyData(
+                id, &outputAddress, 0, nil, &bufSize, bufferListStorage
+            ) == noErr else { continue }
 
             let channelCount = (0..<Int(bufferList.pointee.mNumberBuffers)).reduce(0) { total, i in
                 total + Int(UnsafeMutableAudioBufferListPointer(bufferList)[i].mNumberChannels)

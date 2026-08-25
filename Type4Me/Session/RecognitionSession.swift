@@ -61,7 +61,7 @@ actor RecognitionSession {
 
   private let audioEngine = AudioCaptureEngine()
   private let injectionEngine = TextInjectionEngine()
-  let historyStore = HistoryStore()
+  let historyStore = HistoryStore.shared
   private var asrClient: (any SpeechRecognizer)?
 
   private let logger = Logger(
@@ -260,7 +260,119 @@ actor RecognitionSession {
 
   // MARK: - Prompt context (selected text + clipboard captured at recording start)
 
-  private var promptContext: PromptContext = PromptContext(selectedText: "", clipboardText: "")
+  private struct PendingPromptContextCapture: Sendable {
+    let id: UUID
+    let generation: Int
+    let requirements: PromptContext.CaptureRequirements
+    let task: Task<PromptContext, Never>
+  }
+
+  private var promptContext: PromptContext = .empty
+  private var capturedPromptContextRequirements: PromptContext.CaptureRequirements = []
+  private var pendingPromptContextCapture: PendingPromptContextCapture?
+  /// Serializes temporary Command+C fallbacks across consecutive sessions.
+  private var lastPromptContextCaptureTask: Task<PromptContext, Never>?
+  private var lastPromptContextCaptureID: UUID?
+
+  private func resetPromptContextCapture(
+    for mode: ProcessingMode,
+    generation: Int
+  ) {
+    promptContext = .empty
+    capturedPromptContextRequirements = []
+    pendingPromptContextCapture = nil
+    schedulePromptContextCaptureIfNeeded(for: mode, generation: generation)
+  }
+
+  private func schedulePromptContextCaptureIfNeeded(
+    for mode: ProcessingMode,
+    generation: Int
+  ) {
+    let requiresSelection = mode.executionKind == .selectionAsk
+      || mode.id == ProcessingMode.macActionId
+    let requested = PromptContext.captureRequirements(
+      for: mode.prompt,
+      requiresSelection: requiresSelection
+    )
+    let pendingRequirements = pendingPromptContextCapture?.generation == generation
+      ? pendingPromptContextCapture?.requirements ?? []
+      : []
+    let covered = capturedPromptContextRequirements.union(pendingRequirements)
+    let missing = requested.subtracting(covered)
+
+    guard !missing.isEmpty else {
+      if requested.isEmpty {
+        DebugFileLogger.log("prompt context capture skipped mode=\(mode.name) requirements=none")
+      }
+      return
+    }
+
+    let previousTask = lastPromptContextCaptureTask
+    let previousPending = pendingPromptContextCapture
+    let baseContext = promptContext
+    let id = UUID()
+    let combinedRequirements = covered.union(missing)
+    DebugFileLogger.log(
+      "prompt context capture scheduled mode=\(mode.name) "
+        + "missing=\(missing.logDescription) total=\(combinedRequirements.logDescription)"
+    )
+
+    let task = Task.detached {
+      let previousResult = await previousTask?.value
+      let base: PromptContext
+      if previousPending?.generation == generation, let previousResult {
+        base = previousResult
+      } else {
+        base = baseContext
+      }
+
+      let captureStartedAt = ContinuousClock.now
+      let addition = await PromptContext.capture(requirements: missing)
+      DebugFileLogger.log(
+        "prompt context capture completed requirements=\(missing.logDescription) "
+          + "duration=\(ContinuousClock.now - captureStartedAt)"
+      )
+      return base.merging(addition)
+    }
+
+    lastPromptContextCaptureTask = task
+    lastPromptContextCaptureID = id
+    pendingPromptContextCapture = PendingPromptContextCapture(
+      id: id,
+      generation: generation,
+      requirements: combinedRequirements,
+      task: task
+    )
+    Task { [weak self] in
+      _ = await task.value
+      await self?.clearPromptContextCaptureBarrier(id: id)
+    }
+  }
+
+  private func clearPromptContextCaptureBarrier(id: UUID) {
+    guard lastPromptContextCaptureID == id else { return }
+    lastPromptContextCaptureTask = nil
+    lastPromptContextCaptureID = nil
+  }
+
+  private func resolvePromptContextIfNeeded(generation: Int) async {
+    while let pending = pendingPromptContextCapture,
+      pending.generation == generation
+    {
+      let context = await pending.task.value
+      guard sessionGeneration == generation else { return }
+      guard pendingPromptContextCapture?.id == pending.id else { continue }
+
+      promptContext = context
+      capturedPromptContextRequirements.formUnion(pending.requirements)
+      pendingPromptContextCapture = nil
+      DebugFileLogger.log(
+        "prompt context capture resolved requirements="
+          + capturedPromptContextRequirements.logDescription
+      )
+      return
+    }
+  }
 
   /// Bundle identifier of the frontmost app when recording started.
   /// Used to select app-specific snippet rules.
@@ -518,12 +630,8 @@ actor RecognitionSession {
       bypassProxy: ProxyBypassMode.current.bypassASR
     )
 
-    // Capture prompt context while the user's selection is still active.
-    promptContext = await PromptContext.capture()
-    guard sessionGeneration == myGeneration else {
-      DebugFileLogger.log("startRecording: zombie detected after capture, bailing")
-      return
-    }
+    // Capture prompt context beside audio startup; resolve it only if the mode uses it.
+    resetPromptContextCapture(for: effectiveMode, generation: myGeneration)
 
     // Reset text state and clean up previous pipeline
     currentTranscript = .empty
@@ -744,6 +852,7 @@ actor RecognitionSession {
     resetSpeculativeLLM()
     pendingLLMError = nil
     currentMode = effectiveMode
+    schedulePromptContextCaptureIfNeeded(for: effectiveMode, generation: sessionGeneration)
     DebugFileLogger.log("session mode switched to \(effectiveMode.name)")
 
     if state == .recording,
@@ -864,6 +973,9 @@ actor RecognitionSession {
     activeProvider: ASRProvider,
     myGeneration: Int
   ) async {
+    await resolvePromptContextIfNeeded(generation: myGeneration)
+    guard sessionGeneration == myGeneration else { return }
+
     let question = questionText.trimmingCharacters(in: .whitespacesAndNewlines)
     let contextSource = SelectionAskPromptBuilder.contextSource(from: promptContext)
     let contextText = SelectionAskPromptBuilder.contextText(from: promptContext)
@@ -1557,6 +1669,8 @@ actor RecognitionSession {
         onASREvent?(.processingResult(text: committed))
       } else if Self.requiresFinalLLM(needsLLM: needsLLM, finalText: finalText) {
         state = .postProcessing
+        await resolvePromptContextIfNeeded(generation: myGeneration)
+        guard sessionGeneration == myGeneration else { return }
         if let llmConfig = loadEffectiveLLMConfig() {
           DebugFileLogger.log(
             "stop: final LLM firing revision=\(currentTranscript.revision) mode=\(currentMode.name) model=\(llmConfig.model) with \(finalText.count) chars"
@@ -2265,6 +2379,15 @@ actor RecognitionSession {
     guard currentTranscript.revision == sourceRevision,
       speculativeThrottle.beginDebouncedRequest(for: text)
     else { return }
+    let contextGeneration = sessionGeneration
+    await resolvePromptContextIfNeeded(generation: contextGeneration)
+    guard !Task.isCancelled,
+      sessionGeneration == contextGeneration,
+      state == .recording
+    else {
+      _ = speculativeThrottle.requestCompleted(input: text)
+      return
+    }
     guard let llmConfig = loadEffectiveLLMConfig() else {
       speculativeLLMUnavailable = true
       _ = speculativeThrottle.requestCompleted(input: text)
@@ -2697,6 +2820,9 @@ actor RecognitionSession {
     sessionGeneration &+= 1
     state = .idle
     currentTranscript = .empty
+    promptContext = .empty
+    capturedPromptContextRequirements = []
+    pendingPromptContextCapture = nil
     hasEmittedReadyForCurrentSession = false
     currentConfig = nil
     uploadFailureFlag = nil

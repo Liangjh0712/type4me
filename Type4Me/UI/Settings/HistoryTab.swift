@@ -123,7 +123,7 @@ struct HistoryTab: View {
 
     let isActive: Bool
 
-    private let historyStore = HistoryStore()
+    private let historyStore = HistoryStore.shared
 
     @State private var records: [HistoryRecord] = []
     @State private var sections: [DateSection] = []

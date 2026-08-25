@@ -46,6 +46,21 @@ protocol FloatingBarState: AnyObject, Observable {
   func insertRawAfterOptimizationFailure()
 }
 
+extension FloatingBarState {
+  /// Mode switching from a panel is only meaningful while capturing.
+  var canSelectPanelMode: Bool {
+    barPhase == .preparing || barPhase == .recording
+  }
+
+  func panelModeShortcutLabel(_ mode: ProcessingMode) -> String? {
+    guard let binding = mode.hotkeyBindings.first else { return nil }
+    return HotkeyRecorderView.keyDisplayName(
+      keyCode: binding.keyCode,
+      modifiers: binding.modifiers
+    )
+  }
+}
+
 /// LED tone for a deck status cluster (column headers, bottom card status).
 enum DeckMetaTone {
   case live, working, ok, failed, idle
@@ -698,7 +713,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
               Image(systemName: "checkmark")
             }
             Text(mode.name)
-            if let shortcut = modeShortcutLabel(mode) {
+            if let shortcut = state.panelModeShortcutLabel(mode) {
               Spacer()
               Text(shortcut)
             }
@@ -713,9 +728,9 @@ struct FloatingBarView<S: FloatingBarState>: View {
           .lineLimit(1)
         Image(systemName: "chevron.down")
           .font(.system(size: 7, weight: .bold))
-          .opacity(canSelectPanelMode ? 0.6 : 0.25)
+          .opacity(state.canSelectPanelMode ? 0.6 : 0.25)
       }
-      .foregroundStyle(TF.paper.opacity(canSelectPanelMode ? 1 : 0.55))
+      .foregroundStyle(TF.paper.opacity(state.canSelectPanelMode ? 1 : 0.55))
       .padding(.horizontal, 9)
       .frame(height: 22)
       .background {
@@ -737,20 +752,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
     .fixedSize()
-    .disabled(!canSelectPanelMode)
+    .disabled(!state.canSelectPanelMode)
     .accessibilityLabel(L("切换处理模式", "Switch processing mode"))
-  }
-
-  private var canSelectPanelMode: Bool {
-    state.barPhase == .preparing || state.barPhase == .recording
-  }
-
-  private func modeShortcutLabel(_ mode: ProcessingMode) -> String? {
-    guard let binding = mode.hotkeyBindings.first else { return nil }
-    return HotkeyRecorderView.keyDisplayName(
-      keyCode: binding.keyCode,
-      modifiers: binding.modifiers
-    )
   }
 
   private var emptyPreviewStatusLabel: String? {
@@ -1420,12 +1423,15 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
           .foregroundStyle(optimizedTone.textColor)
           .lineLimit(1)
         Spacer(minLength: 8)
-        Text(modeDeviceLabel)
-          .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-          .tracking(1)
-          .foregroundStyle(TF.paperFaint)
-          .lineLimit(1)
-          .truncationMode(.tail)
+        cardModeMenu
+        if !state.inputDeviceName.isEmpty {
+          Text("· \(state.inputDeviceName)")
+            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+            .tracking(1)
+            .foregroundStyle(TF.paperFaint)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        }
       }
       OptimizedPanelCopy.bottomCardText(for: state)
         .font(.system(size: TF.topTranscriptPanelBodyFontSize))
@@ -1449,12 +1455,43 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
     OptimizedPanelCopy.tone(for: state)
   }
 
-  /// Trailing side of the card's status row: what the lamp-only capsule shows
-  /// in the other styles (mode · capture device).
-  private var modeDeviceLabel: String {
-    state.inputDeviceName.isEmpty
-      ? state.currentMode.name
-      : "\(state.currentMode.name) · \(state.inputDeviceName)"
+  /// Compact mode switcher in the card's status row, mirroring the top deck's
+  /// panelModeMenu. The device name stays a static label next to it.
+  private var cardModeMenu: some View {
+    Menu {
+      ForEach(state.selectablePanelModes) { mode in
+        Button {
+          state.selectPanelMode(mode)
+        } label: {
+          HStack {
+            if mode.id == state.currentMode.id {
+              Image(systemName: "checkmark")
+            }
+            Text(mode.name)
+            if let shortcut = state.panelModeShortcutLabel(mode) {
+              Spacer()
+              Text(shortcut)
+            }
+          }
+        }
+      }
+    } label: {
+      HStack(spacing: 3) {
+        Text(state.currentMode.name)
+          .lineLimit(1)
+        Image(systemName: "chevron.down")
+          .font(.system(size: 6, weight: .bold))
+          .opacity(state.canSelectPanelMode ? 0.6 : 0.25)
+      }
+      .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+      .tracking(1)
+      .foregroundStyle(TF.paperFaint.opacity(state.canSelectPanelMode ? 1 : 0.6))
+    }
+    .menuStyle(.borderlessButton)
+    .menuIndicator(.hidden)
+    .fixedSize()
+    .disabled(!state.canSelectPanelMode)
+    .accessibilityLabel(L("切换处理模式", "Switch processing mode"))
   }
 
   /// Errors are red; status hints ("等待语音…", "此模式将直接插入原文") are

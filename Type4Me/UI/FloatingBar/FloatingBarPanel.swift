@@ -173,11 +173,25 @@ final class ScreenBottomIndicatorPanel: NSPanel {
   /// suppresses deferred resizes during a drag so the frame can't fight it.
   private(set) var isDragging = false
 
+  /// Height of the orb band at the bottom of a style-2 frame; everything
+  /// above it is the transcript card, which hosts interactive controls.
+  private static let orbBandHeight: CGFloat = 96
+
   override func sendEvent(_ event: NSEvent) {
     if event.type == .leftMouseDown {
-      isDragging = true
-      performDrag(with: event)
-      isDragging = false
+      // Style 2's card contains an interactive mode menu — clicks there must
+      // reach SwiftUI, so only the orb band below it stays a drag handle.
+      // The lamp-only styles have no interactive content: drag from anywhere.
+      let inDragArea =
+        TranscriptPanelStyle.current() != .bottom
+        || event.locationInWindow.y <= Self.orbBandHeight
+      if inDragArea {
+        isDragging = true
+        performDrag(with: event)
+        isDragging = false
+      } else {
+        super.sendEvent(event)
+      }
       return
     }
     super.sendEvent(event)
@@ -303,7 +317,15 @@ final class FloatingBarController {
     } else {
       panel.isMovableByWindowBackground = state.isTranscriptPanelCollapsed
     }
-    scheduleComputedSizeUpdate()
+    // Skip measuring the top deck while style 2 suppresses it: every layout
+    // change would otherwise run two NSString boundingRect passes for an
+    // invisible panel, competing with the bottom indicator's own resize.
+    let topSuppressed =
+      TranscriptPanelStyle.current() == .bottom
+      && state.finalOptimizationFailureMessage == nil
+    if !topSuppressed {
+      scheduleComputedSizeUpdate()
+    }
     syncScreenBottomIndicator()
   }
 
@@ -531,11 +553,16 @@ final class FloatingBarController {
       return base
     }
     let cardWidth = min(520, (targetScreen?.visibleFrame.width ?? 800) - 80)
-    // Card text width: card horizontal padding + the view's 2pt card inset.
-    let textWidth = cardWidth - TF.topTranscriptPanelHorizontalPadding * 2 - 4
+    // Card text width in the view is cardWidth - horizontal padding (12×2).
+    // Measure with an extra 8pt of headroom: SwiftUI and TextKit don't always
+    // agree on CJK kinsoku line breaks, and if the view wraps one line earlier
+    // than the measurement the panel ends up a line short and the text is
+    // truncated with an ellipsis until the next resize.
+    let textWidth = cardWidth - TF.topTranscriptPanelHorizontalPadding * 2 - 8
     let cardText = OptimizedPanelCopy.bottomCardString(for: state)
-    // +34: vertical padding (9×2) + status row (~11pt) + row spacing (5pt).
-    var cardHeight = measuredTranscriptHeight(cardText, width: textWidth) + 34
+    // +40: vertical padding (9×2) + status row (~11pt) + row spacing (5pt)
+    // + 6pt safety against line-metric differences.
+    var cardHeight = measuredTranscriptHeight(cardText, width: textWidth) + 40
     // Style 2 drops the mode capsule (its info lives in the card's status
     // row), so the stack below the card is just the 96pt orb.
     let orbStackHeight: CGFloat = 96

@@ -401,6 +401,59 @@ final class FloatingBarPanelTests: XCTestCase {
     }
   }
 
+  func testBottomStyleHeightTracksStreamingText() throws {
+    _ = NSApplication.shared
+    let existingIndicators = Set(
+      NSApp.windows.compactMap { $0 as? ScreenBottomIndicatorPanel }.map(ObjectIdentifier.init)
+    )
+    try withPanelStyle(.bottom) {
+      let state = AppState()
+      state.currentMode = .direct
+      let (_, controller, topPanel) = try makeStateControllerAndPanel(state: state)
+      defer { topPanel.orderOut(nil) }
+      let indicator = try XCTUnwrap(
+        NSApp.windows.compactMap { $0 as? ScreenBottomIndicatorPanel }
+          .first { !existingIndicators.contains(ObjectIdentifier($0)) }
+      )
+      defer { indicator.orderOut(nil) }
+
+      state.startRecording()
+      state.markRecordingReady()
+      // Stream text like live ASR partials: a few chars at a time, punctuation
+      // included (CJK kinsoku line breaks are where SwiftUI and the NSString
+      // measurement can disagree on line counts).
+      let sentence = "有一个问题，就是比如说我输入了一句话，它占满了这一行，说完之后，"
+      var heights: [(chars: Int, height: CGFloat)] = []
+      for step in 1...20 {
+        let chunk = String(repeating: sentence, count: 3).prefix(step * 3)
+        state.setLiveTranscript(
+          RecognitionTranscript(
+            confirmedSegments: [String(chunk)],
+            partialText: "",
+            authoritativeText: String(chunk),
+            isFinal: false,
+            revision: step
+          ))
+        for _ in 0..<3 {
+          RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        heights.append((chunk.count, indicator.frame.height))
+      }
+      for (chars, height) in heights {
+        print("HEIGHT-TRACE chars=\(chars) height=\(height)")
+      }
+      // The panel must never shrink while text streams, and by 60 chars it
+      // must be taller than the single-line frame.
+      for pair in zip(heights, heights.dropFirst()) {
+        XCTAssertGreaterThanOrEqual(
+          pair.1.height, pair.0.height,
+          "panel shrank from \(pair.0) to \(pair.1) while text grew")
+      }
+      XCTAssertGreaterThan(heights.last!.height, heights.first!.height)
+      withExtendedLifetime(controller) {}
+    }
+  }
+
   /// Sets the panel style key for the duration of a test, restoring the
   /// previous value (or absence) afterwards.
   private func withPanelStyle(

@@ -5,6 +5,7 @@ struct HotkeyRecorderView: View {
 
     @Binding var keyCode: Int?
     @Binding var modifiers: UInt64?
+    var keyboardOnly = false
 
     @State private var isRecording = false
     @State private var eventMonitor: Any?
@@ -63,7 +64,11 @@ struct HotkeyRecorderView: View {
     // MARK: - Display
 
     private var displayText: String {
-        if isRecording { return L("按下快捷键、鼠标或耳机按键...", "Press a key, mouse or headphone button...") }
+        if isRecording {
+            return keyboardOnly
+                ? L("按下键盘快捷键...", "Press a keyboard shortcut...")
+                : L("按下快捷键、鼠标或耳机按键...", "Press a key, mouse or headphone button...")
+        }
         guard let kc = keyCode else { return L("未设置", "Not set") }
         return Self.keyDisplayName(keyCode: kc, modifiers: modifiers)
     }
@@ -72,6 +77,7 @@ struct HotkeyRecorderView: View {
 
     private func startRecording() {
         isRecording = true
+        NotificationCenter.default.post(name: .hotkeyRecordingDidStart, object: nil)
         pendingModifierCode = nil
         modifierCaptureTask?.cancel()
         modifierCaptureTask = nil
@@ -84,7 +90,11 @@ struct HotkeyRecorderView: View {
             await MainActor.run { stopRecording() }
         }
 
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .otherMouseDown, .systemDefined]) { event in
+        var eventMask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown]
+        if !keyboardOnly {
+            eventMask.formUnion([.otherMouseDown, .systemDefined])
+        }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { event in
             // Media key pressed (headphone buttons, keyboard media keys)
             if event.type == .systemDefined {
                 guard event.subtype.rawValue == 8 else { return event }
@@ -182,6 +192,7 @@ struct HotkeyRecorderView: View {
     }
 
     private func stopRecording() {
+        let wasRecording = isRecording
         isRecording = false
         recordingTimeoutTask?.cancel()
         recordingTimeoutTask = nil
@@ -192,6 +203,9 @@ struct HotkeyRecorderView: View {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
+        }
+        if wasRecording {
+            NotificationCenter.default.post(name: .hotkeyRecordingDidEnd, object: nil)
         }
     }
 

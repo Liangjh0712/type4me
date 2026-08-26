@@ -25,6 +25,8 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
     @AppStorage(AudioInputDevicePreferenceStore.modeKey) private var microphonePreferenceMode = AudioInputDevicePreferenceMode.systemDefault.rawValue
     @AppStorage(AudioInputDevicePreferenceStore.priorityEntriesKey) private var microphonePriorityEntriesStorage = ""
     @AppStorage("tf_selectedSpeakerUID") private var selectedSpeakerUID = ""
+    @AppStorage(FloatingShortcutPreferences.isEnabledKey)
+    private var floatingShortcutPanelEnabled = false
 
     @State private var hasMic = false
     @State private var hasAccessibility = false
@@ -32,6 +34,7 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
     @State private var availableSpeakers: [(uid: String, name: String)] = []
     @State private var showMicrophonePrioritySheet = false
     @State private var draftMicrophonePriorityEntries: [AudioInputDevicePreferenceEntry] = []
+    @State private var floatingShortcutButtons = FloatingShortcutPreferences.loadButtons()
 
     typealias TestStatus = SettingsTestStatus
 
@@ -123,6 +126,80 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
             Spacer().frame(height: 16)
 
+            settingsGroupCard(L("悬浮快捷键", "Floating Shortcuts"), icon: "keyboard.fill") {
+                settingsToggleRow(
+                    L("显示悬浮快捷键", "Show Floating Shortcuts"),
+                    subtitle: L(
+                        "在所有桌面和全屏应用上方显示可点击按键",
+                        "Show clickable keys above every desktop and full-screen app"
+                    ),
+                    isOn: $floatingShortcutPanelEnabled
+                )
+
+                if floatingShortcutPanelEnabled {
+                    SettingsDivider()
+
+                    ForEach($floatingShortcutButtons) { $button in
+                        HStack(spacing: 10) {
+                            FixedWidthTextField(
+                                text: $button.title,
+                                placeholder: L("按钮名称", "Button name")
+                            )
+                            .padding(.horizontal, 10)
+                            .frame(width: 120, height: 32)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(TF.settingsCardAlt))
+
+                            HotkeyRecorderView(
+                                keyCode: $button.keyCode,
+                                modifiers: $button.modifiers,
+                                keyboardOnly: true
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Button {
+                                removeFloatingShortcut(button.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(TF.settingsTextTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .help(L("删除按钮", "Delete button"))
+                        }
+                        .padding(.vertical, 7)
+
+                        if button.id != floatingShortcutButtons.last?.id {
+                            SettingsDivider()
+                        }
+                    }
+
+                    if floatingShortcutButtons.count < FloatingShortcutPreferences.maximumButtonCount {
+                        Button {
+                            addFloatingShortcut()
+                        } label: {
+                            Label(L("添加按钮", "Add Button"), systemImage: "plus")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(TF.settingsTextSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 10)
+                    }
+                }
+
+                Text(
+                    L(
+                        "拖动左侧手柄可移动位置；点击箭头折叠或展开，点击 × 关闭。按钮按下和松开会模拟真实键盘，支持语音快捷键与组合键。",
+                        "Drag the left handle to move the panel, use the arrow to collapse or expand it, and × to close. Press and release mirror a physical keyboard, including voice hotkeys and key combinations."
+                    )
+                )
+                .font(.system(size: 10))
+                .foregroundStyle(TF.settingsTextTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 10)
+            }
+
+            Spacer().frame(height: 16)
+
             // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             // CARD 3: 系统权限
             // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -164,6 +241,7 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
                         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
                         hasAccessibility = AXIsProcessTrustedWithOptions(options)
                     }
+
                 }
             }
 
@@ -208,6 +286,12 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
         }
         .onChange(of: micKeepAlive) { _, _ in
             AudioKeepAliveManager.syncMicState()
+        }
+        .onChange(of: floatingShortcutPanelEnabled) { _, enabled in
+            FloatingShortcutPreferences.setEnabled(enabled)
+        }
+        .onChange(of: floatingShortcutButtons) { _, buttons in
+            FloatingShortcutPreferences.saveButtons(buttons)
         }
         .onReceive(NotificationCenter.default.publisher(for: .audioInputDevicesDidChange)) { _ in
             refreshMicrophones()
@@ -775,12 +859,29 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
         .background(RoundedRectangle(cornerRadius: 8).fill(TF.settingsCardAlt))
     }
 
+    private func addFloatingShortcut() {
+        guard floatingShortcutButtons.count < FloatingShortcutPreferences.maximumButtonCount else {
+            return
+        }
+        floatingShortcutButtons.append(
+            FloatingShortcutButtonConfiguration(
+                title: L("按钮 \(floatingShortcutButtons.count + 1)", "Button \(floatingShortcutButtons.count + 1)"),
+                keyCode: nil
+            )
+        )
+    }
+
+    private func removeFloatingShortcut(_ id: UUID) {
+        floatingShortcutButtons.removeAll { $0.id == id }
+    }
+
     // MARK: - Permissions
 
     private func checkPermissions() {
         hasMic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         hasAccessibility = AXIsProcessTrusted()
     }
+
 
     // MARK: - Login Item
 

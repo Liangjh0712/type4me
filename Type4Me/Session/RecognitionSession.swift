@@ -226,7 +226,7 @@ actor RecognitionSession {
 
   // MARK: - Accumulated text
 
-  private let maxRecordingDuration: TimeInterval = 600  // 10 minutes
+  private let maxRecordingDuration: TimeInterval = 1200  // 20 minutes
 
   private var currentTranscript: RecognitionTranscript = .empty
   private var eventConsumptionTask: Task<Void, Never>?

@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let permissionGuideModel = PermissionGuideModel()
   /// Computed dynamically per recording based on audio device topology.
   private var floatingBarController: FloatingBarController?
+  private var cursorOverlayController: CursorOverlayController?
   private var floatingShortcutPanelController: FloatingShortcutPanelController?
   private let headsetButtonToastController = HeadsetButtonToastController()
   private lazy var selectionAskController = SelectionAskController {
@@ -89,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     DebugFileLogger.startSession()
     DebugFileLogger.log("applicationDidFinishLaunching")
     floatingBarController = FloatingBarController(state: appState)
+    cursorOverlayController = CursorOverlayController(state: appState)
     floatingShortcutPanelController = FloatingShortcutPanelController()
 
     // Bridge ASR events → AppState for floating bar display

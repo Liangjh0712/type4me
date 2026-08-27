@@ -147,6 +147,29 @@ final class ModeStorageTests: XCTestCase {
     )
   }
 
+  func testLoadMigratesLightEditingGenerationFormalWritingPrompt() throws {
+    let storage = ModeStorage(fileURL: testURL)
+    var previous = ProcessingMode.formalWriting
+    previous.prompt = """
+      # Role
+      你是一个文本整理专家，核心职责是将语音识别得到的原始口语内容，精准转化为逻辑清晰、表达通顺、符合书面表达习惯的文本。
+      # 边界规则
+      3. 以轻编辑为原则，保留说话人表达特征，禁止过度重写
+      ## 结构化规则（优先于轻编辑原则）
+      # 输入内容
+      <speech_transcript>
+      {text}
+      </speech_transcript>
+      """
+
+    try storage.save([ProcessingMode.direct, previous])
+    let loaded = storage.load()
+
+    let migrated = loaded.first(where: { $0.id == ProcessingMode.formalWriting.id })
+    XCTAssertEqual(migrated?.prompt, ProcessingMode.formalWriting.prompt)
+    XCTAssertTrue(migrated?.prompt.contains("结构化表达整理专家") == true)
+  }
+
   func testCustomizedSeededDefaultPromptsArePreserved() throws {
     let storage = ModeStorage(fileURL: testURL)
     var customFormalWriting = ProcessingMode.formalWriting

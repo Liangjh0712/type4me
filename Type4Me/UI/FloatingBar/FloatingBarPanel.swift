@@ -317,13 +317,14 @@ final class FloatingBarController {
     } else {
       panel.isMovableByWindowBackground = state.isTranscriptPanelCollapsed
     }
-    // Skip measuring the top deck while style 2 suppresses it: every layout
+    // Skip measuring the top deck while style 2/3 suppresses it: every layout
     // change would otherwise run two NSString boundingRect passes for an
     // invisible panel, competing with the bottom indicator's own resize.
-    let topSuppressed =
-      TranscriptPanelStyle.current() == .bottom
+    let layoutStyle = TranscriptPanelStyle.current()
+    let layoutTopSuppressed =
+      (layoutStyle == .bottom || layoutStyle == .cursor)
       && state.finalOptimizationFailureMessage == nil
-    if !topSuppressed {
+    if !layoutTopSuppressed {
       scheduleComputedSizeUpdate()
     }
     syncScreenBottomIndicator()
@@ -466,6 +467,11 @@ final class FloatingBarController {
     switch TranscriptPanelStyle.current() {
     case .top, .hidden:
       return state.barPhase == .recording
+    case .cursor:
+      // Style 3 is minimal by design: the mouse-anchored capsule is the only
+      // recording UI (its status dot carries the live/processing state), so
+      // the tally lamp stays hidden.
+      return false
     case .bottom:
       switch state.barPhase {
       case .preparing, .recording, .processing, .recovering:
@@ -616,11 +622,12 @@ final class FloatingBarController {
     panelGeneration &+= 1
     pendingResize?.cancel()
 
-    // Style 2 keeps the top deck out of the way — except when an optimization
-    // failure is pending: the deck's retry/insert-raw actions are the only
-    // way out of that no-auto-hide state, so every style shows it.
+    // Styles 2/3 keep the top deck out of the way — except when an
+    // optimization failure is pending: the deck's retry/insert-raw actions
+    // are the only way out of that no-auto-hide state, so every style shows it.
+    let style = TranscriptPanelStyle.current()
     let topSuppressed =
-      TranscriptPanelStyle.current() == .bottom
+      (style == .bottom || style == .cursor)
       && state.finalOptimizationFailureMessage == nil
     if topSuppressed {
       hideTopPanel()

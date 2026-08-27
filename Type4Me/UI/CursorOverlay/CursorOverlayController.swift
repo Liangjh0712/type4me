@@ -183,8 +183,14 @@ final class CursorOverlayController {
   /// capsule stuck at its initial width.
   private func measuredSize() -> NSSize {
     let text = CursorOverlayCopy.displayText(for: state)
-    let textWidth = ceil(
-      (text as NSString).size(withAttributes: [.font: Self.textFont]).width)
+    // Cap at the view's textMaxWidth: the view head-truncates beyond it, so
+    // the capsule content stops growing there. Measuring the full run would
+    // oversize the panel, and SwiftUI centers the capped content in the
+    // slack — the capsule visibly drifted right as the transcript grew.
+    let textWidth = min(
+      ceil((text as NSString).size(withAttributes: [.font: Self.textFont]).width),
+      CursorOverlayMetrics.textMaxWidth
+    )
     // 10pt padding ×2 + 6pt dot + 6pt dot-text spacing + 6pt text-cluster spacing.
     let width = textWidth + 38 + secondaryWidth()
     return NSSize(width: min(max(width, 80), Self.maxPanelWidth), height: 24)

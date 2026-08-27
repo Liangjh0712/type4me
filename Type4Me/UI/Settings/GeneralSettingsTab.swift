@@ -126,7 +126,18 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
             Spacer().frame(height: 16)
 
-            settingsGroupCard(L("悬浮快捷键", "Floating Shortcuts"), icon: "keyboard.fill") {
+            settingsGroupCard(
+                L("悬浮快捷键", "Floating Shortcuts"),
+                icon: "keyboard.fill",
+                trailing: AnyView(
+                    Text("\(floatingShortcutButtons.count)/\(FloatingShortcutPreferences.maximumButtonCount)")
+                        .font(.custom("SF Mono", size: 9).weight(.semibold))
+                        .foregroundStyle(TF.settingsAccentAmber)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(TF.settingsAccentAmber.opacity(0.10)))
+                )
+            ) {
                 settingsToggleRow(
                     L("显示悬浮快捷键", "Show Floating Shortcuts"),
                     subtitle: L(
@@ -141,6 +152,11 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
                     ForEach($floatingShortcutButtons) { $button in
                         HStack(spacing: 10) {
+                            Text(floatingShortcutSlotLabel(for: button.id))
+                                .font(.custom("SF Mono", size: 9).weight(.bold))
+                                .foregroundStyle(TF.settingsAccentAmber)
+                                .frame(width: 26, height: 26)
+                                .background(Circle().fill(TF.settingsAccentAmber.opacity(0.10)))
                             FixedWidthTextField(
                                 text: $button.title,
                                 placeholder: L("按钮名称", "Button name")
@@ -166,7 +182,11 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
                             .buttonStyle(.plain)
                             .help(L("删除按钮", "Delete button"))
                         }
-                        .padding(.vertical, 7)
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(TF.settingsCardAlt.opacity(0.42))
+                        )
 
                         if button.id != floatingShortcutButtons.last?.id {
                             SettingsDivider()
@@ -177,9 +197,14 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
                         Button {
                             addFloatingShortcut()
                         } label: {
-                            Label(L("添加按钮", "Add Button"), systemImage: "plus")
-                                .font(.system(size: 11, weight: .medium))
+                            Label(L("添加按键", "Add Key"), systemImage: "plus")
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(TF.settingsTextSecondary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(
+                                    Capsule().fill(TF.settingsCardAlt.opacity(0.78))
+                                )
                         }
                         .buttonStyle(.plain)
                         .padding(.top, 10)
@@ -188,8 +213,8 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
                 Text(
                     L(
-                        "拖动左侧手柄可移动位置；点击箭头折叠或展开，点击 × 关闭。按钮按下和松开会模拟真实键盘，支持语音快捷键与组合键。",
-                        "Drag the left handle to move the panel, use the arrow to collapse or expand it, and × to close. Press and release mirror a physical keyboard, including voice hotkeys and key combinations."
+                        "拖动灯轨移动位置；箭头折叠，× 关闭。Fn 第一次点击锁定、第二次释放；普通按键保持按下/松开语义。",
+                        "Drag the lit rail to move, use the arrow to collapse, and × to close. Fn latches on the first click and releases on the second; regular keys remain momentary."
                     )
                 )
                 .font(.system(size: 10))
@@ -857,6 +882,13 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
         .padding(14)
         .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 8).fill(TF.settingsCardAlt))
+    }
+
+    private func floatingShortcutSlotLabel(for id: UUID) -> String {
+        guard let index = floatingShortcutButtons.firstIndex(where: { $0.id == id }) else {
+            return "--"
+        }
+        return String(format: "%02d", index + 1)
     }
 
     private func addFloatingShortcut() {

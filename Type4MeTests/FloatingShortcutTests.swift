@@ -26,7 +26,7 @@ final class FloatingShortcutTests: XCTestCase {
     XCTAssertTrue(FloatingShortcutPreferences.isCollapsed(userDefaults: defaults))
   }
 
-  func testPreferencesUseReturnButtonWhenNoConfigurationExists() {
+  func testPreferencesUseReturnAndFnWhenNoConfigurationExists() {
     let suiteName = "FloatingShortcutPreferencesDefaultsTests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -35,7 +35,7 @@ final class FloatingShortcutTests: XCTestCase {
       FloatingShortcutPreferences.loadButtons(userDefaults: defaults),
       FloatingShortcutPreferences.defaultButtons
     )
-    XCTAssertEqual(FloatingShortcutPreferences.defaultButtons.first?.keyCode, 36)
+    XCTAssertEqual(FloatingShortcutPreferences.defaultButtons.compactMap(\.keyCode), [36, 63])
   }
 
   func testPreferencesLimitButtonCount() {
@@ -52,6 +52,26 @@ final class FloatingShortcutTests: XCTestCase {
       FloatingShortcutPreferences.loadButtons(userDefaults: defaults).count,
       FloatingShortcutPreferences.maximumButtonCount
     )
+  }
+
+  func testFnPressStateAlternatesOneLogicalEdgePerClick() {
+    var state = FloatingShortcutPressState()
+    let edges = [true, false, true, false].compactMap {
+      state.consume(pointerPressed: $0, latchesAcrossClicks: true)
+    }
+
+    XCTAssertEqual(edges, [true, false])
+    XCTAssertFalse(state.isActive)
+  }
+
+  func testRegularPressStateMirrorsPointerEdges() {
+    var state = FloatingShortcutPressState()
+    let edges = [true, true, false, false].compactMap {
+      state.consume(pointerPressed: $0, latchesAcrossClicks: false)
+    }
+
+    XCTAssertEqual(edges, [true, false])
+    XCTAssertFalse(state.isActive)
   }
 
   func testExecutorMirrorsPhysicalKeyDownAndUp() {
@@ -75,6 +95,25 @@ final class FloatingShortcutTests: XCTestCase {
       [
         "36:\(CGEventFlags.maskCommand.rawValue):down",
         "36:\(CGEventFlags.maskCommand.rawValue):up",
+      ]
+    )
+  }
+
+  func testExecutorAddsFnFlagForModifierOnlyButton() {
+    var events: [String] = []
+    let executor = FloatingShortcutExecutor { keyCode, modifiers, pressed in
+      events.append("\(keyCode):\(modifiers.rawValue):\(pressed ? "down" : "up")")
+    }
+    let button = FloatingShortcutButtonConfiguration(title: "Fn", keyCode: 63)
+
+    executor.setPressed(true, for: button)
+    executor.setPressed(false, for: button)
+
+    XCTAssertEqual(
+      events,
+      [
+        "63:\(CGEventFlags.maskSecondaryFn.rawValue):down",
+        "63:0:up",
       ]
     )
   }

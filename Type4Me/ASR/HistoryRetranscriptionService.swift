@@ -125,23 +125,9 @@ enum HistoryRetranscriptionService {
                 try await client.endAudio()
 
                 let events = await client.events
-                for await event in events {
-                    switch event {
-                    case .transcript(let transcript) where transcript.isFinal:
-                        let text = transcript.authoritativeText.isEmpty
-                            ? transcript.composedText
-                            : transcript.authoritativeText
-                        await client.disconnect()
-                        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
-                    case .error, .completed:
-                        await client.disconnect()
-                        return nil
-                    default:
-                        continue
-                    }
-                }
+                let text = await sessionFinalText(from: events)
                 await client.disconnect()
-                return nil
+                return text
             } catch {
                 DebugFileLogger.log("history retranscription failed: \(error)")
                 await client.disconnect()
@@ -165,6 +151,39 @@ enum HistoryRetranscriptionService {
                 }
             }
         }
+    }
+
+    /// Reduce an ASR event stream to the session's final text.
+    ///
+    /// Transcript events are cumulative snapshots, and utterance-level
+    /// `isFinal` is NOT session-final (RecognitionSession's teardown drain
+    /// relies on this): the first final can be an early endpointed utterance
+    /// — even an empty one, e.g. the retained start chime — while recognition
+    /// is still ongoing. Keep the latest non-empty snapshot until a terminal
+    /// event or stream end.
+    static func sessionFinalText(from events: AsyncStream<RecognitionEvent>) async -> String? {
+        var latestText = ""
+        for await event in events {
+            if Task.isCancelled { break }
+            switch event {
+            case .transcript(let transcript):
+                let text = transcript.authoritativeText.isEmpty
+                    ? transcript.composedText
+                    : transcript.authoritativeText
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    latestText = text
+                }
+            case .error(let error):
+                DebugFileLogger.log(
+                    "sessionFinalText: stream error after \(latestText.count) chars: \(error)")
+                return latestText.isEmpty ? nil : latestText
+            case .completed:
+                return latestText.isEmpty ? nil : latestText
+            default:
+                continue
+            }
+        }
+        return latestText.isEmpty ? nil : latestText
     }
 
     private static func resolveConfig(for provider: ASRProvider) -> (any ASRProviderConfig)? {

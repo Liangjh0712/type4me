@@ -2713,26 +2713,9 @@ actor RecognitionSession {
         try await client.endAudio()
 
         let events = await client.events
-        for await event in events {
-          switch event {
-          case .transcript(let transcript) where transcript.isFinal:
-            await client.disconnect()
-            let text =
-              transcript.authoritativeText.isEmpty
-              ? transcript.composedText : transcript.authoritativeText
-            return text.isEmpty ? nil : text
-          case .error:
-            await client.disconnect()
-            return nil
-          case .completed:
-            await client.disconnect()
-            return nil
-          default:
-            continue
-          }
-        }
+        let text = await HistoryRetranscriptionService.sessionFinalText(from: events)
         await client.disconnect()
-        return nil
+        return text
       } catch {
         DebugFileLogger.log("batch fallback error: \(error)")
         await client.disconnect()

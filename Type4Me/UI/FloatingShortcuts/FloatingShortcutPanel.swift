@@ -1,17 +1,41 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Configuration
+
+/// What a deck cell does. Plain keys post CGEvents; the mode cell opens the
+/// processing-mode list. Older prefs JSON has no `action` field and decodes
+/// as `.key`.
+enum FloatingShortcutAction: String, Codable, Equatable, Sendable {
+  case key
+  case modeSwitch
+}
+
 struct FloatingShortcutButtonConfiguration: Codable, Equatable, Identifiable, Sendable {
   let id: UUID
   var title: String
   var keyCode: Int?
   var modifiers: UInt64?
+  var action: FloatingShortcutAction
 
-  init(id: UUID = UUID(), title: String, keyCode: Int?, modifiers: UInt64? = nil) {
+  init(
+    id: UUID = UUID(), title: String, keyCode: Int?, modifiers: UInt64? = nil,
+    action: FloatingShortcutAction = .key
+  ) {
     self.id = id
     self.title = title
     self.keyCode = keyCode
     self.modifiers = modifiers
+    self.action = action
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(UUID.self, forKey: .id)
+    title = try container.decode(String.self, forKey: .title)
+    keyCode = try container.decodeIfPresent(Int.self, forKey: .keyCode)
+    modifiers = try container.decodeIfPresent(UInt64.self, forKey: .modifiers)
+    action = try container.decodeIfPresent(FloatingShortcutAction.self, forKey: .action) ?? .key
   }
 }
 
@@ -28,6 +52,19 @@ enum FloatingShortcutPreferences {
     FloatingShortcutButtonConfiguration(title: "Fn", keyCode: 63),
   ]
 
+  /// Keys offered by the deck's + cell. Anything more exotic is recorded in
+  /// Settings, which syncs back into the deck through the same prefs.
+  static let presetKeys: [(title: String, keyCode: Int, modifiers: UInt64?)] = [
+    ("↵ 回车", 36, nil),
+    ("fn", 63, nil),
+    ("空格", 49, nil),
+    ("Esc", 53, nil),
+    ("Tab", 48, nil),
+    ("⌫ 删除", 51, nil),
+    ("⌘C 复制", 8, CGEventFlags.maskCommand.rawValue),
+    ("⌘V 粘贴", 9, CGEventFlags.maskCommand.rawValue),
+  ]
+
   static func isEnabled(userDefaults: UserDefaults = .standard) -> Bool {
     userDefaults.bool(forKey: isEnabledKey)
   }
@@ -36,15 +73,6 @@ enum FloatingShortcutPreferences {
     userDefaults.set(enabled, forKey: isEnabledKey)
     NotificationCenter.default.post(name: .floatingShortcutsDidChange, object: nil)
   }
-  static func isCollapsed(userDefaults: UserDefaults = .standard) -> Bool {
-    userDefaults.bool(forKey: isCollapsedKey)
-  }
-
-  static func setCollapsed(_ collapsed: Bool, userDefaults: UserDefaults = .standard) {
-    userDefaults.set(collapsed, forKey: isCollapsedKey)
-    NotificationCenter.default.post(name: .floatingShortcutsDidChange, object: nil)
-  }
-
 
   static func loadButtons(userDefaults: UserDefaults = .standard)
     -> [FloatingShortcutButtonConfiguration]
@@ -89,6 +117,8 @@ enum FloatingShortcutPreferences {
 extension Notification.Name {
   static let floatingShortcutsDidChange = Notification.Name("Type4MeFloatingShortcutsDidChange")
 }
+
+// MARK: - Executor
 
 final class FloatingShortcutExecutor {
   typealias EventPoster = (_ keyCode: CGKeyCode, _ modifiers: CGEventFlags, _ pressed: Bool) -> Void
@@ -173,11 +203,9 @@ final class FloatingShortcutExecutor {
   }
 }
 
-private final class FloatingShortcutPanel: NSPanel {
-  /// Window-coordinate rects that stay clickable (keys, utility buttons).
-  /// A left mouse-down anywhere else drags the panel.
-  var interactiveRects: [NSRect] = []
+// MARK: - Panel
 
+private final class FloatingShortcutPanel: NSPanel {
   init() {
     super.init(
       contentRect: NSRect(x: 0, y: 0, width: 140, height: 52),
@@ -190,7 +218,7 @@ private final class FloatingShortcutPanel: NSPanel {
     level = .floating
     isOpaque = false
     backgroundColor = .clear
-    hasShadow = true
+    hasShadow = false
     collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
     hidesOnDeactivate = false
     animationBehavior = .utilityWindow
@@ -201,9 +229,15 @@ private final class FloatingShortcutPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 
   override func sendEvent(_ event: NSEvent) {
-    if event.type == .leftMouseDown,
-      !interactiveRects.contains(where: { $0.contains(event.locationInWindow) })
-    {
+    if event.type == .leftMouseDown {
+      // Every clickable element on the deck is a real NSButton, so the
+      // hit-test decides click-vs-drag. Hand-computed interactive rects were
+      // dropped — they drifted away from SwiftUI's layout on the capsule and
+      // the same fragility applied here.
+      if let hit = contentView?.hitTest(event.locationInWindow), hit is NSButton {
+        super.sendEvent(event)
+        return
+      }
       performDrag(with: event)
       return
     }
@@ -211,12 +245,23 @@ private final class FloatingShortcutPanel: NSPanel {
   }
 }
 
+// MARK: - Style
+
 private enum FloatingShortcutDeckStyle {
   static let accent = Color(red: 0.38, green: 0.85, blue: 0.76)
   static let latch = Color(red: 1.00, green: 0.74, blue: 0.34)
-  static let keyHeight: CGFloat = 28
-  static let deckCornerRadius: CGFloat = 13
-  static let keyCornerRadius: CGFloat = 7
+  static let keyHeight: CGFloat = 20
+  static let deckCornerRadius: CGFloat = 9
+  static let keyCornerRadius: CGFloat = 5
+  static let settingsCellWidth: CGFloat = 24
+
+  /// Fixed mode-cell width shared by the view and the panel-size math —
+  /// derived from a per-character estimate (never measured at render time),
+  /// so SwiftUI and the controller always agree exactly.
+  static func modeCellWidth(_ name: String) -> CGFloat {
+    let units = name.prefix(5).reduce(CGFloat(0)) { $0 + ($1.isASCII ? 5.5 : 10) }
+    return min(72, max(36, 16 + units))
+  }
 }
 
 extension FloatingShortcutButtonConfiguration {
@@ -239,75 +284,122 @@ extension FloatingShortcutButtonConfiguration {
   /// Deterministic key width shared by the view and the panel-size calculation.
   var compactKeyWidth: CGFloat {
     let count = compactKeyLabel.count
-    let perChar: CGFloat = count > 3 ? 7 : 9
-    return min(92, max(34, 20 + CGFloat(count) * perChar))
+    let perChar: CGFloat = count > 3 ? 7 : 8
+    return min(88, max(30, 18 + CGFloat(count) * perChar))
+  }
+
+  /// Width of this cell as laid out on the deck (key or mode cell).
+  func cellWidth(modeName: String) -> CGFloat {
+    action == .modeSwitch
+      ? FloatingShortcutDeckStyle.modeCellWidth(modeName)
+      : compactKeyWidth
   }
 }
 
-private struct FloatingShortcutPanelView: View {
-  let buttons: [FloatingShortcutButtonConfiguration]
-  let isCollapsed: Bool
-  let onPressedChanged: (FloatingShortcutButtonConfiguration, Bool) -> Void
-  let onToggleCollapsed: () -> Void
-  let onClose: () -> Void
+// MARK: - Deck View
 
-  @State private var isDeckHovered = false
+private struct FloatingShortcutPanelView: View {
+  var state: AppState
+  let buttons: [FloatingShortcutButtonConfiguration]
+  let onPressedChanged: (FloatingShortcutButtonConfiguration, Bool) -> Void
+  /// Menu actions receive the clicked NSView so the controller can pop an
+  /// NSMenu anchored at the cell.
+  let onSettings: (NSView) -> Void
+  let onShowModes: (NSView) -> Void
 
   var body: some View {
-    Group {
-      if isCollapsed {
-        collapsedDeck
-      } else {
-        expandedDeck
-      }
-    }
-    .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isCollapsed)
-  }
-
-  private var expandedDeck: some View {
     deckChrome {
       HStack(spacing: 6) {
-        if buttons.isEmpty {
-          emptySlot
-        }
-
         ForEach(buttons) { button in
-          FloatingShortcutKeyButton(button: button) { pressed in
-            onPressedChanged(button, pressed)
+          if button.action == .modeSwitch {
+            modeCell
+          } else {
+            FloatingShortcutKeyButton(
+              button: button,
+              onPressedChanged: { onPressedChanged(button, $0) }
+            )
           }
         }
 
-        Button(action: onToggleCollapsed) {
-          Image(systemName: "chevron.compact.left")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(.white.opacity(0.45))
-            .frame(width: 16, height: FloatingShortcutDeckStyle.keyHeight)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(L("折叠快捷键", "Collapse shortcuts"))
+        settingsCell
       }
-      .padding(.leading, 5)
-      .padding(.trailing, 6)
-      .padding(.vertical, 6)
+      .padding(.leading, 4)
+      .padding(.trailing, 5)
+      .padding(.vertical, 3)
     }
   }
 
-  private var collapsedDeck: some View {
-    deckChrome {
-      Button(action: onToggleCollapsed) {
-        Image(systemName: "keyboard")
-          .font(.system(size: 12, weight: .medium))
-          .foregroundStyle(.white.opacity(0.85))
-          .frame(width: 26, height: 24)
-          .contentShape(Rectangle())
-      }
-      .buttonStyle(.plain)
-      .help(L("展开快捷键", "Expand shortcuts"))
-      .padding(.leading, 5)
-      .padding(.trailing, 6)
-      .padding(.vertical, 5)
+  /// Mode cell: shows the current mode name, click pops the mode list.
+  private var modeCell: some View {
+    HStack(spacing: 5) {
+      Circle()
+        .fill(FloatingShortcutDeckStyle.accent)
+        .frame(width: 5, height: 5)
+        .shadow(color: FloatingShortcutDeckStyle.accent.opacity(0.8), radius: 3)
+      Text(state.currentMode.name)
+        .font(.system(size: 10, weight: .semibold, design: .rounded))
+        .foregroundStyle(.white.opacity(0.88))
+        .lineLimit(1)
+        .truncationMode(.tail)
     }
+    .padding(.horizontal, 10)
+    .frame(
+      width: FloatingShortcutDeckStyle.modeCellWidth(state.currentMode.name),
+      height: FloatingShortcutDeckStyle.keyHeight
+    )
+    .background(
+      RoundedRectangle(
+        cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+      )
+      .fill(FloatingShortcutDeckStyle.accent.opacity(0.10))
+    )
+    .overlay(
+      RoundedRectangle(
+        cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+      )
+      .strokeBorder(FloatingShortcutDeckStyle.accent.opacity(0.28), lineWidth: 0.5)
+    )
+    .overlay {
+      DeckClickButton(
+        help: L("切换处理模式", "Switch processing mode"),
+        onHoverChanged: nil
+      ) { view in
+        onShowModes(view)
+      }
+    }
+    .accessibilityLabel(L("模式切换", "Mode switch"))
+  }
+
+  /// Trailing gear cell: the ONLY on-deck management entry. Add/remove live
+  /// inside its menu — inline × badges on every cell misfired too easily.
+  private var settingsCell: some View {
+    Image(systemName: "gearshape.fill")
+      .font(.system(size: 10, weight: .semibold))
+      .foregroundStyle(.white.opacity(0.55))
+      .frame(
+        width: FloatingShortcutDeckStyle.settingsCellWidth,
+        height: FloatingShortcutDeckStyle.keyHeight
+      )
+      .background(
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+        )
+        .fill(.white.opacity(0.06))
+      )
+      .overlay(
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+        )
+        .strokeBorder(.white.opacity(0.10), lineWidth: 0.5)
+      )
+      .overlay {
+        DeckClickButton(
+          help: L("管理格子（添加 / 移除）", "Manage cells (add / remove)"),
+          onHoverChanged: nil
+        ) { view in
+          onSettings(view)
+        }
+      }
   }
 
   private func deckChrome<Content: View>(
@@ -319,11 +411,21 @@ private struct FloatingShortcutPanelView: View {
           cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
           style: .continuous
         )
-        .fill(
-          LinearGradient(
-            colors: [Color(white: 0.105), Color(white: 0.055)],
-            startPoint: .top,
-            endPoint: .bottom
+        .fill(.ultraThinMaterial)
+        .overlay(
+          // Same frosted-glass + dark-tint recipe as the transcript capsule:
+          // lighter than the old near-black plate, and the two floating
+          // surfaces now share one material language.
+          RoundedRectangle(
+            cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
+            style: .continuous
+          )
+          .fill(
+            LinearGradient(
+              colors: [.black.opacity(0.38), .black.opacity(0.50)],
+              startPoint: .top,
+              endPoint: .bottom
+            )
           )
         )
       }
@@ -341,56 +443,10 @@ private struct FloatingShortcutPanelView: View {
           lineWidth: 0.5
         )
       )
-      .overlay(alignment: .topTrailing) { closeBadge }
-      .onHover { isDeckHovered = $0 }
-      .animation(.easeOut(duration: 0.15), value: isDeckHovered)
-      .contextMenu {
-        Button(
-          isCollapsed
-            ? L("展开快捷键", "Expand shortcuts")
-            : L("折叠快捷键", "Collapse shortcuts"),
-          action: onToggleCollapsed
-        )
-        Divider()
-        Button(L("关闭悬浮快捷键", "Close floating shortcuts"), action: onClose)
-      }
-      .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
-      .padding(6)
-  }
-
-  @ViewBuilder private var closeBadge: some View {
-    if isDeckHovered {
-      Button(action: onClose) {
-        Image(systemName: "xmark")
-          .font(.system(size: 7, weight: .bold))
-          .foregroundStyle(.white.opacity(0.75))
-          .frame(width: 14, height: 14)
-          .background(Circle().fill(Color(white: 0.13)))
-          .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
-      }
-      .buttonStyle(.plain)
-      .help(L("关闭悬浮快捷键", "Close floating shortcuts"))
-      .offset(x: 3, y: -3)
-      .transition(.scale(scale: 0.5).combined(with: .opacity))
-    }
-  }
-
-  private var emptySlot: some View {
-    HStack(spacing: 5) {
-      Image(systemName: "keyboard.badge.ellipsis")
-        .font(.system(size: 11))
-      Text(L("待配置", "UNMAPPED"))
-        .font(.system(size: 10, weight: .medium))
-    }
-    .foregroundStyle(.white.opacity(0.45))
-    .padding(.horizontal, 10)
-    .frame(height: FloatingShortcutDeckStyle.keyHeight)
-    .overlay(
-      RoundedRectangle(cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous)
-        .strokeBorder(.white.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-    )
   }
 }
+
+// MARK: - Key Cell
 
 struct FloatingShortcutPressState: Equatable {
   private(set) var isActive = false
@@ -428,7 +484,9 @@ private struct FloatingShortcutKeyButton: View {
 
   private var fill: Color {
     if pressState.isActive { return accent.opacity(0.16) }
-    return .white.opacity(isHovered ? 0.10 : 0.06)
+    // Keys sit on a frosted-glass plate now (lighter than the old near-black
+    // one), so the idle fill gets a bit more body to stay defined.
+    return .white.opacity(isHovered ? 0.12 : 0.08)
   }
 
   private var glyphColor: Color {
@@ -450,7 +508,7 @@ private struct FloatingShortcutKeyButton: View {
     Text(button.compactKeyLabel)
       .font(
         .system(
-          size: button.compactKeyLabel.count > 3 ? 10.5 : 13,
+          size: button.compactKeyLabel.count > 3 ? 9 : 11,
           weight: .semibold,
           design: .rounded
         )
@@ -498,6 +556,82 @@ private struct FloatingShortcutKeyButton: View {
       .accessibilityValue(button.compactKeyLabel)
   }
 }
+
+// MARK: - Click Interaction (utility buttons / mode cell / add cell / badges)
+
+/// Transparent real NSButton (title explicitly emptied — NSButton's default
+/// title is the literal string "Button", which once rendered over the row
+/// text). Participates in the panel hit-test so clicks never become drags,
+/// and reports itself to the handler so menus can anchor at the cell.
+private struct DeckClickButton: NSViewRepresentable {
+  let help: String
+  let onHoverChanged: ((Bool) -> Void)?
+  let onClick: (NSView) -> Void
+
+  func makeNSView(context: Context) -> DeckClickNSButton {
+    let button = DeckClickNSButton()
+    configure(button)
+    return button
+  }
+
+  func updateNSView(_ nsView: DeckClickNSButton, context: Context) {
+    configure(nsView)
+  }
+
+  private func configure(_ button: DeckClickNSButton) {
+    button.title = ""
+    button.isBordered = false
+    button.setButtonType(.momentaryPushIn)
+    button.focusRingType = .none
+    button.toolTip = help
+    button.onClick = onClick
+    button.onHoverChanged = onHoverChanged
+  }
+}
+
+private final class DeckClickTarget: NSObject {
+  var handler: ((NSView) -> Void)?
+  @objc func clicked(_ sender: Any?) {
+    if let view = sender as? NSView { handler?(view) }
+  }
+}
+
+private final class DeckClickNSButton: NSButton {
+  var onClick: ((NSView) -> Void)? {
+    get { clickTarget.handler }
+    set { clickTarget.handler = newValue }
+  }
+  var onHoverChanged: ((Bool) -> Void)?
+  private let clickTarget = DeckClickTarget()
+
+  init() {
+    super.init(frame: .zero)
+    target = clickTarget
+    action = #selector(DeckClickTarget.clicked(_:))
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError() }
+
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  override func updateTrackingAreas() {
+    for area in trackingAreas { removeTrackingArea(area) }
+    addTrackingArea(
+      NSTrackingArea(
+        rect: bounds,
+        options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+        owner: self
+      )
+    )
+    super.updateTrackingAreas()
+  }
+
+  override func mouseEntered(with event: NSEvent) { onHoverChanged?(true) }
+  override func mouseExited(with event: NSEvent) { onHoverChanged?(false) }
+}
+
+// MARK: - Press-and-hold Interaction (key cells)
 
 private struct FloatingShortcutPressInteraction: NSViewRepresentable {
   let help: String
@@ -580,8 +714,18 @@ private final class FloatingShortcutPressNSView: NSButton {
   }
 }
 
+// MARK: - Menus
+
+private final class DeckMenuTarget: NSObject {
+  var handler: (() -> Void)?
+  @objc func run(_ sender: Any?) { handler?() }
+}
+
+// MARK: - Controller
+
 @MainActor
 final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
+  private let state: AppState
   private let panel = FloatingShortcutPanel()
   private let userDefaults: UserDefaults
   private let executor: FloatingShortcutExecutor
@@ -591,9 +735,11 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
   private var hasPositionedPanel = false
 
   init(
+    state: AppState,
     userDefaults: UserDefaults = .standard,
     executor: FloatingShortcutExecutor = FloatingShortcutExecutor()
   ) {
+    self.state = state
     self.userDefaults = userDefaults
     self.executor = executor
     super.init()
@@ -608,7 +754,23 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
         self?.syncFromPreferences()
       }
     }
+    startModeObservation()
     syncFromPreferences()
+  }
+
+  /// The mode cell's width tracks the current mode's name, so a mode switch
+  /// (from the deck, a hotkey, or anywhere else) re-lays-out the deck.
+  private func startModeObservation() {
+    withObservationTracking {
+      _ = state.currentMode.id
+    } onChange: { [weak self] in
+      DispatchQueue.main.async { [weak self] in
+        MainActor.assumeIsolated {
+          self?.startModeObservation()
+          self?.syncFromPreferences()
+        }
+      }
+    }
   }
 
   deinit {
@@ -625,29 +787,22 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
     }
 
     let buttons = FloatingShortcutPreferences.loadButtons(userDefaults: userDefaults)
-      .filter { $0.keyCode != nil }
-    let isCollapsed = FloatingShortcutPreferences.isCollapsed(userDefaults: userDefaults)
+      .filter { $0.keyCode != nil || $0.action == .modeSwitch }
     let view = FloatingShortcutPanelView(
+      state: state,
       buttons: buttons,
-      isCollapsed: isCollapsed,
       onPressedChanged: { [weak self] button, pressed in
         self?.executor.setPressed(pressed, for: button)
       },
-      onToggleCollapsed: { [weak self] in
-        guard let self else { return }
-        FloatingShortcutPreferences.setCollapsed(
-          !isCollapsed,
-          userDefaults: self.userDefaults
-        )
+      onSettings: { [weak self] anchor in
+        MainActor.assumeIsolated { self?.showSettingsMenu(anchor: anchor) }
       },
-      onClose: { [weak self] in
-        guard let self else { return }
-        self.executor.releaseAll()
-        FloatingShortcutPreferences.setEnabled(false, userDefaults: self.userDefaults)
+      onShowModes: { [weak self] anchor in
+        MainActor.assumeIsolated { self?.showModeMenu(anchor: anchor) }
       }
     )
 
-    let size = panelSize(buttons: buttons, isCollapsed: isCollapsed)
+    let size = panelSize(buttons: buttons)
     if let hostingView {
       hostingView.rootView = view
       hostingView.frame = NSRect(origin: .zero, size: size)
@@ -664,14 +819,20 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
 
     isApplyingFrame = true
     let origin = resolvedOrigin(for: size)
-    panel.setFrame(NSRect(origin: origin, size: size), display: true)
+    let target = NSRect(origin: origin, size: size)
+    // Cell add/remove resizes the deck; glide instead of jumping. Left edge
+    // stays anchored so the strip shrinks in place.
+    if panel.isVisible, !target.size.equalTo(panel.frame.size) {
+      NSAnimationContext.runAnimationGroup { context in
+        context.duration = 0.2
+        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        panel.animator().setFrame(target, display: true)
+      }
+    } else {
+      panel.setFrame(target, display: true)
+    }
     hasPositionedPanel = true
     isApplyingFrame = false
-    panel.interactiveRects = interactiveRects(
-      buttons: buttons,
-      isCollapsed: isCollapsed,
-      panelSize: size
-    )
     panel.orderFrontRegardless()
   }
 
@@ -680,78 +841,147 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
     FloatingShortcutPreferences.savePosition(panel.frame.origin, userDefaults: userDefaults)
   }
 
-  private func panelSize(
-    buttons: [FloatingShortcutButtonConfiguration],
-    isCollapsed: Bool
-  ) -> NSSize {
-    let shadowPadding: CGFloat = 12  // 6pt on every side
-    let spacing: CGFloat = 6
-    let horizontalPadding: CGFloat = 5 + 6  // leading + trailing
+  // MARK: - Add / Remove
 
-    if isCollapsed {
-      let width = horizontalPadding + 26 + shadowPadding
-      return NSSize(width: width, height: 24 + 10 + shadowPadding)
-    }
-
-    let keysWidth = buttons.isEmpty
-      ? CGFloat(84)
-      : buttons.reduce(0) { $0 + $1.compactKeyWidth }
-    let itemCount = buttons.isEmpty ? 2 : buttons.count + 1  // keys/empty + chevron
-    let width =
-      horizontalPadding + keysWidth + 16
-      + CGFloat(itemCount - 1) * spacing + shadowPadding
-    return NSSize(
-      width: width,
-      height: FloatingShortcutDeckStyle.keyHeight + 12 + shadowPadding
-    )
+  private func removeButton(_ button: FloatingShortcutButtonConfiguration) {
+    var buttons = FloatingShortcutPreferences.loadButtons(userDefaults: userDefaults)
+    buttons.removeAll { $0.id == button.id }
+    FloatingShortcutPreferences.saveButtons(buttons, userDefaults: userDefaults)
   }
 
-  /// Clickable regions in window coordinates (y flipped from SwiftUI layout).
-  /// Everything else on the deck acts as a drag surface.
-  private func interactiveRects(
-    buttons: [FloatingShortcutButtonConfiguration],
-    isCollapsed: Bool,
-    panelSize: NSSize
-  ) -> [NSRect] {
-    let shadowInset: CGFloat = 6
-    var rects: [NSRect] = []
+  private func addButton(_ button: FloatingShortcutButtonConfiguration) {
+    var buttons = FloatingShortcutPreferences.loadButtons(userDefaults: userDefaults)
+    guard buttons.count < FloatingShortcutPreferences.maximumButtonCount else { return }
+    buttons.append(button)
+    FloatingShortcutPreferences.saveButtons(buttons, userDefaults: userDefaults)
+  }
 
-    // Hover close-badge zone at the top-trailing corner.
-    rects.append(
-      NSRect(x: panelSize.width - 22, y: panelSize.height - 20, width: 22, height: 20)
+  /// The gear cell's menu: the deliberate home for ALL deck management —
+  /// add presets, add the mode cell, remove existing cells, or jump to the
+  /// full Settings editor (custom key recording lives there). Keeping this
+  /// off the deck surface is deliberate: inline × badges misfired too often.
+  private func showSettingsMenu(anchor: NSView) {
+    let current = FloatingShortcutPreferences.loadButtons(userDefaults: userDefaults)
+    let menu = NSMenu()
+    var targets: [DeckMenuTarget] = []
+
+    func addItem(
+      _ title: String,
+      enabled: Bool = true,
+      handler: @escaping () -> Void
+    ) {
+      let item = NSMenuItem(
+        title: title, action: #selector(DeckMenuTarget.run(_:)), keyEquivalent: "")
+      let target = DeckMenuTarget()
+      target.handler = { [weak self] in
+        MainActor.assumeIsolated {
+          guard self != nil else { return }
+          handler()
+        }
+      }
+      item.target = target
+      item.isEnabled = enabled
+      targets.append(target)
+      menu.addItem(item)
+    }
+
+    let atCapacity = current.count >= FloatingShortcutPreferences.maximumButtonCount
+
+    for preset in FloatingShortcutPreferences.presetKeys {
+      let alreadyAdded = current.contains {
+        $0.keyCode == preset.keyCode && ($0.modifiers ?? 0) == (preset.modifiers ?? 0)
+      }
+      addItem(preset.title, enabled: !alreadyAdded && !atCapacity) { [weak self] in
+        self?.addButton(
+          FloatingShortcutButtonConfiguration(
+            title: preset.title, keyCode: preset.keyCode, modifiers: preset.modifiers
+          )
+        )
+      }
+    }
+    addItem(
+      L("模式切换", "Mode switch"),
+      enabled: !atCapacity && !current.contains { $0.action == .modeSwitch }
+    ) { [weak self] in
+      self?.addButton(
+        FloatingShortcutButtonConfiguration(
+          title: L("模式", "Mode"), keyCode: nil, action: .modeSwitch
+        )
+      )
+    }
+
+    if !current.isEmpty {
+      menu.addItem(.separator())
+      for button in current {
+        let label =
+          button.action == .modeSwitch
+          ? L("模式切换", "Mode switch")
+          : button.title
+        addItem(L("移除 \(label)", "Remove \(label)")) { [weak self] in
+          self?.removeButton(button)
+        }
+      }
+    }
+
+    menu.addItem(.separator())
+    addItem(L("打开设置…", "Open Settings…")) {
+      AppDelegate.openSettingsAction?()
+    }
+
+    // Targets must outlive the menu's run loop.
+    objc_setAssociatedObject(menu, &deckMenuTargetKey, targets, .OBJC_ASSOCIATION_RETAIN)
+    menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+  }
+
+  private func showModeMenu(anchor: NSView) {
+    let menu = NSMenu()
+    var targets: [DeckMenuTarget] = []
+
+    for mode in state.selectablePanelModes {
+      let item = NSMenuItem(
+        title: mode.name, action: #selector(DeckMenuTarget.run(_:)), keyEquivalent: "")
+      let target = DeckMenuTarget()
+      target.handler = { [weak self] in
+        MainActor.assumeIsolated {
+          guard let self else { return }
+          if self.state.barPhase == .preparing || self.state.barPhase == .recording {
+            self.state.selectPanelMode(mode)
+          } else if self.state.currentMode.id != mode.id {
+            self.state.currentMode = mode
+          }
+        }
+      }
+      item.target = target
+      targets.append(target)
+      item.state = mode.id == state.currentMode.id ? .on : .off
+      menu.addItem(item)
+    }
+
+    objc_setAssociatedObject(menu, &deckMenuTargetKey, targets, .OBJC_ASSOCIATION_RETAIN)
+    menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+  }
+
+  // MARK: - Geometry
+
+  private func panelSize(
+    buttons: [FloatingShortcutButtonConfiguration]
+  ) -> NSSize {
+    // The panel hugs the deck exactly — no shadow padding, no transparent
+    // drag margin (that dead ring around the deck was pure overhead).
+    let spacing: CGFloat = 6
+    let horizontalPadding: CGFloat = 4 + 5  // leading + trailing
+
+    let modeName = state.currentMode.name
+    let cellsWidth = buttons.reduce(0) { $0 + $1.cellWidth(modeName: modeName) }
+    let itemCount = buttons.count + 1  // cells + settings gear
+    let width =
+      horizontalPadding + cellsWidth
+      + FloatingShortcutDeckStyle.settingsCellWidth
+      + CGFloat(itemCount - 1) * spacing
+    return NSSize(
+      width: width,
+      height: FloatingShortcutDeckStyle.keyHeight + 6
     )
-
-    if isCollapsed {
-      rects.append(
-        NSRect(
-          x: shadowInset + 5,
-          y: panelSize.height - shadowInset - 5 - 24,
-          width: 26,
-          height: 24
-        )
-      )
-      return rects
-    }
-
-    var x = shadowInset + 5
-    let keyY = panelSize.height - shadowInset - 6 - FloatingShortcutDeckStyle.keyHeight
-    if buttons.isEmpty {
-      x += 84 + 6  // empty slot is a drag surface; skip to the chevron
-    }
-    for button in buttons {
-      rects.append(
-        NSRect(
-          x: x,
-          y: keyY,
-          width: button.compactKeyWidth,
-          height: FloatingShortcutDeckStyle.keyHeight
-        )
-      )
-      x += button.compactKeyWidth + 6
-    }
-    // Collapse chevron.
-    rects.append(NSRect(x: x, y: keyY, width: 16, height: FloatingShortcutDeckStyle.keyHeight))
-    return rects
   }
 
   private func resolvedOrigin(for size: NSSize) -> NSPoint {
@@ -787,3 +1017,5 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
     )
   }
 }
+
+private var deckMenuTargetKey: UInt8 = 0

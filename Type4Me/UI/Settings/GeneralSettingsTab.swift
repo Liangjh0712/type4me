@@ -213,8 +213,8 @@ struct GeneralSettingsTab: View, SettingsCardHelpers {
 
                 Text(
                     L(
-                        "拖动灯轨移动位置；箭头折叠，× 关闭。Fn 第一次点击锁定、第二次释放；普通按键保持按下/松开语义。",
-                        "Drag the lit rail to move, use the arrow to collapse, and × to close. Fn latches on the first click and releases on the second; regular keys remain momentary."
+                        "拖动横条移动位置；齿轮菜单管理格子（添加/移除按键、模式切换），更冷门的按键在下方录制。",
+                        "Drag the strip to move it. Manage cells from the gear menu (add/remove keys, mode switch); record more exotic keys below."
                     )
                 )
                 .font(.system(size: 10))

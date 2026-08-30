@@ -91,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     DebugFileLogger.log("applicationDidFinishLaunching")
     floatingBarController = FloatingBarController(state: appState)
     cursorOverlayController = CursorOverlayController(state: appState)
-    floatingShortcutPanelController = FloatingShortcutPanelController()
+    floatingShortcutPanelController = FloatingShortcutPanelController(state: appState)
 
     // Bridge ASR events → AppState for floating bar display
     let session = self.session

@@ -1,57 +1,38 @@
 import AppKit
 
-/// Pure placement math for the cursor overlay, kept free of AX/AppKit-window
-/// dependencies so it is unit-testable without a running app.
+/// Pure placement math for the fixed-position transcript capsule, kept free
+/// of AX/AppKit-window dependencies so it is unit-testable without a running
+/// app.
 enum CursorOverlayPlacement {
-  /// Vertical gap between the caret line and the panel.
-  static let gap: CGFloat = 4
   /// Minimum inset from the screen's visible frame.
   static let screenMargin: CGFloat = 8
+  /// Lift above the visible frame's bottom edge for the first-run default
+  /// (horizontally centered, floating over the Dock area).
+  static let defaultBottomLift: CGFloat = 36
 
-  /// Panel origin (Cocoa coords) anchored to a caret rect. Prefers below the
-  /// caret line (where the next line of text would go), flips above when
-  /// there's no room, and clamps into the visible frame. Degenerate cases
-  /// (panel larger than the screen) clamp instead of overflowing.
-  static func origin(
-    anchor: CGRect,
-    panelSize: NSSize,
-    visibleFrame: CGRect
-  ) -> NSPoint {
-    let minY = visibleFrame.minY + screenMargin
-    let maxY = max(minY, visibleFrame.maxY - screenMargin - panelSize.height)
+  /// Clamp an origin so the panel stays fully inside the visible frame.
+  static func clamped(_ origin: NSPoint, size: NSSize, visibleFrame: CGRect) -> NSPoint {
     let minX = visibleFrame.minX + screenMargin
-    let maxX = max(minX, visibleFrame.maxX - screenMargin - panelSize.width)
-
-    let belowY = anchor.minY - gap - panelSize.height
-    let aboveY = anchor.maxY + gap
-
-    let unclampedY: CGFloat
-    if belowY >= minY {
-      unclampedY = belowY
-    } else if aboveY <= maxY {
-      unclampedY = aboveY
-    } else {
-      // Neither fits — clamp the below position into the screen.
-      unclampedY = belowY
-    }
-
+    let maxX = max(minX, visibleFrame.maxX - screenMargin - size.width)
+    let minY = visibleFrame.minY + screenMargin
+    let maxY = max(minY, visibleFrame.maxY - screenMargin - size.height)
     return NSPoint(
-      x: min(max(anchor.minX, minX), maxX),
-      y: min(max(unclampedY, minY), maxY)
+      x: min(max(origin.x, minX), maxX),
+      y: min(max(origin.y, minY), maxY)
     )
   }
 
-  /// Convenience overload resolving the visible frame from an NSScreen.
-  static func origin(anchor: CGRect, panelSize: NSSize, in screen: NSScreen) -> NSPoint {
-    origin(anchor: anchor, panelSize: panelSize, visibleFrame: screen.visibleFrame)
+  /// Bottom-centered origin used until the user drags the capsule elsewhere.
+  static func defaultOrigin(size: NSSize, visibleFrame: CGRect) -> NSPoint {
+    clamped(
+      NSPoint(x: visibleFrame.midX - size.width / 2, y: visibleFrame.minY + defaultBottomLift),
+      size: size,
+      visibleFrame: visibleFrame
+    )
   }
 
-  /// Screen whose visible frame contains the anchor; falls back to the
-  /// primary screen. Multi-display setups place the overlay next to the
-  /// caret's own display, never on another one.
-  static func screen(containing anchor: CGRect) -> NSScreen? {
-    let anchorPoint = NSPoint(x: anchor.midX, y: anchor.midY)
-    return NSScreen.screens.first { $0.frame.contains(anchorPoint) }
-      ?? NSScreen.screens.first
+  /// Screen whose frame contains the point; falls back to the primary screen.
+  static func screen(containing point: NSPoint) -> NSScreen? {
+    NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.screens.first
   }
 }

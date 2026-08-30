@@ -39,7 +39,7 @@ enum TranscriptPanelStyle: String, CaseIterable {
     case .bottom:
       return L("样式二 · 底部优化稿", "Style 2 · Bottom Optimized")
     case .cursor:
-      return L("样式三 · 光标跟随", "Style 3 · At Cursor")
+      return L("样式三 · 悬浮胶囊", "Style 3 · Floating Capsule")
     case .hidden:
       return L("关闭", "Off")
     }

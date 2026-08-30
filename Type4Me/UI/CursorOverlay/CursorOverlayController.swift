@@ -1,17 +1,18 @@
 import AppKit
 import SwiftUI
 
-/// Borderless capsule panel for the cursor overlay. Same NSPanel idioms as
-/// the other floating surfaces (see HeadsetButtonToastPanel /
+/// Borderless capsule panel for the fixed-position transcript overlay. Same
+/// NSPanel idioms as the other floating surfaces (see HeadsetButtonToastPanel /
 /// FloatingBarPanel), except it accepts mouse events: the capsule is
-/// draggable so the user can move it when it occludes content.
+/// draggable so the user can park it where they want it.
 final class CursorOverlayPanel: NSPanel {
-  /// Called after any press-drag on the capsule.
+  /// Called after any press-drag on the capsule (performDrag blocks until
+  /// mouse-up, so this fires once the move is complete).
   var onUserDrag: (() -> Void)?
 
   init() {
     super.init(
-      contentRect: NSRect(origin: .zero, size: NSSize(width: 160, height: 30)),
+      contentRect: NSRect(origin: .zero, size: NSSize(width: 160, height: 61)),
       styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
       backing: .buffered,
       defer: false
@@ -32,8 +33,14 @@ final class CursorOverlayPanel: NSPanel {
 
   override func sendEvent(_ event: NSEvent) {
     if event.type == .leftMouseDown {
-      // No interactive controls — every press is a drag (the occlusion
-      // escape hatch). Non-activating panel: focus stays with the target app.
+      // Real NSButtons (the capsule's end actions) get their clicks via the
+      // normal hit-test — never hand-computed rects, which drifted away from
+      // SwiftUI's layout and swallowed clicks into drags. Everything else
+      // drags. Non-activating panel: focus stays with the target app.
+      if let hit = contentView?.hitTest(event.locationInWindow), hit is NSButton {
+        super.sendEvent(event)
+        return
+      }
       performDrag(with: event)
       onUserDrag?()
       return
@@ -42,40 +49,50 @@ final class CursorOverlayPanel: NSPanel {
   }
 }
 
-/// Drives the style-3 cursor overlay: shows the capsule next to the mouse
-/// pointer when recording starts, keeps it through post-processing, hides on
-/// completion.
+/// Drives the style-3 transcript capsule: shows it while recording and
+/// post-processing, hides on completion.
 ///
-/// Anchoring is deliberately mouse-only, captured ONCE per recording: the
-/// pointer sits where the user just clicked (almost always the target
-/// field), and it never lies — caret geometry via accessibility was tried
-/// and abandoned (multi-channel probing still proved unreliable across real
-/// apps). The capsule never re-anchors on its own, but the user can drag
-/// it; manual placement wins over auto-layout for the rest of the session.
+/// Placement is FIXED, not pointer-anchored: the capsule appears at a
+/// persisted position every time (bottom-center of the active screen on
+/// first run). Dragging it stores the new origin in UserDefaults; the
+/// pointer-follow anchoring was dropped because a moving target made the
+/// status harder, not easier, to glance at. Until the first drag, the
+/// capsule re-centers as its width grows with the transcript; afterwards the
+/// user's origin wins and only the size tracks the text.
 ///
 /// Subscribes to AppState via Swift Observation (withObservationTracking) so
 /// the existing single-assignment panel closures stay owned by
 /// FloatingBarController.
 @MainActor
 final class CursorOverlayController {
+  private static let positionXKey = "tf_cursorOverlayPositionX"
+  private static let positionYKey = "tf_cursorOverlayPositionY"
+
   private let state: AppState
+  private let userDefaults: UserDefaults
   private let panel = CursorOverlayPanel()
   private let hosting: NSHostingView<CursorOverlayView<AppState>>
 
-  /// Anchor captured once at recording start, in Cocoa screen coordinates.
-  private var anchor: CGRect?
-  /// Set when the user drags the capsule: auto-placement stops overriding
-  /// the origin (size still tracks the transcript).
-  private var userHasRepositioned = false
   private var lastPhase: FloatingBarPhase = .hidden
 
-  init(state: AppState) {
+  init(state: AppState, userDefaults: UserDefaults = .standard) {
     self.state = state
-    hosting = NSHostingView(rootView: CursorOverlayView(state: state))
+    self.userDefaults = userDefaults
+    hosting = NSHostingView(
+      rootView: CursorOverlayView(state: state, onSend: {})
+    )
     hosting.sizingOptions = []
+    // The capsule view fills the hosting view, so AppKit's animated frame
+    // changes drive the whole resize — no SwiftUI/AppKit sync issues.
+    hosting.autoresizingMask = [.width, .height]
+    hosting.frame = NSRect(origin: .zero, size: NSSize(width: 160, height: 61))
     panel.contentView = hosting
     panel.onUserDrag = { [weak self] in
-      MainActor.assumeIsolated { self?.userHasRepositioned = true }
+      MainActor.assumeIsolated { self?.savePosition() }
+    }
+    // Real send closure can only capture self after full initialization.
+    hosting.rootView = CursorOverlayView(state: state) { [weak self] in
+      MainActor.assumeIsolated { self?.handleSend() }
     }
     startObserving()
   }
@@ -103,32 +120,34 @@ final class CursorOverlayController {
     let enteredRecording = isActive && !wasActive
     lastPhase = phase
 
-    guard TranscriptPanelStyle.current() == .cursor else {
+    guard TranscriptPanelStyle.current(userDefaults: userDefaults) == .cursor else {
       if panel.isVisible { hide() }
       return
     }
 
     if enteredRecording {
-      captureAnchorAndShow()
+      show()
     }
 
     switch phase {
     case .hidden, .done, .error:
       hide()
     default:
-      // Re-fit the capsule as the transcript grows; the anchor is static.
+      // Re-fit the capsule as the transcript grows.
       if panel.isVisible { updateFrame() }
     }
   }
 
+  // MARK: - Done button
+
+  /// Done button: stop & insert (no trailing keypresses).
+  private func handleSend() {
+    state.requestPanelStop()
+  }
+
   // MARK: - Show / hide
 
-  private func captureAnchorAndShow() {
-    // Tooltip geometry: anchor just right of the pointer tip, capsule hangs
-    // below it (flips above near the screen bottom via placement rules).
-    let mouse = NSEvent.mouseLocation
-    anchor = CGRect(x: mouse.x + 14, y: mouse.y - 16, width: 1, height: 16)
-    userHasRepositioned = false
+  private func show() {
     updateFrame()
     guard !panel.isVisible else { return }
     panel.alphaValue = 0
@@ -140,7 +159,6 @@ final class CursorOverlayController {
   }
 
   private func hide() {
-    anchor = nil
     guard panel.isVisible else { return }
     let panelRef = panel
     NSAnimationContext.runAnimationGroup(
@@ -154,22 +172,68 @@ final class CursorOverlayController {
     )
   }
 
+  // MARK: - Position persistence
+
+  private func loadPosition() -> NSPoint? {
+    guard userDefaults.object(forKey: Self.positionXKey) != nil,
+      userDefaults.object(forKey: Self.positionYKey) != nil
+    else { return nil }
+    return NSPoint(
+      x: userDefaults.double(forKey: Self.positionXKey),
+      y: userDefaults.double(forKey: Self.positionYKey)
+    )
+  }
+
+  private func savePosition() {
+    let origin = panel.frame.origin
+    userDefaults.set(origin.x, forKey: Self.positionXKey)
+    userDefaults.set(origin.y, forKey: Self.positionYKey)
+  }
+
   // MARK: - Geometry
 
   private func updateFrame() {
     let size = measuredSize()
     let origin: NSPoint
-    if userHasRepositioned, panel.isVisible {
-      // Manual placement wins: keep the user's origin, track only size.
-      origin = panel.frame.origin
+    if let saved = loadPosition() {
+      let screen = CursorOverlayPlacement.screen(
+        containing: panel.isVisible ? panel.frame.origin : saved
+      )
+      let proposed: NSPoint
+      if panel.isVisible {
+        // Resize in place: left and top edges anchored to the current frame,
+        // so bucket crossings glide around a stable anchor.
+        proposed = NSPoint(x: panel.frame.origin.x, y: panel.frame.maxY - size.height)
+      } else {
+        // User-parked position wins on first show. A stale position (e.g.
+        // disconnected display) clamps onto the primary screen via
+        // screen(containing:)'s fallback.
+        proposed = saved
+      }
+      origin = screen.map {
+        CursorOverlayPlacement.clamped(proposed, size: size, visibleFrame: $0.visibleFrame)
+      } ?? proposed
     } else {
-      guard let anchor,
-        let screen = CursorOverlayPlacement.screen(containing: anchor)
+      // Never dragged: keep the bottom-center default, re-centering as the
+      // capsule grows.
+      guard let screen = CursorOverlayPlacement.screen(containing: NSEvent.mouseLocation)
       else { return }
-      origin = CursorOverlayPlacement.origin(anchor: anchor, panelSize: size, in: screen)
+      origin = CursorOverlayPlacement.defaultOrigin(size: size, visibleFrame: screen.visibleFrame)
     }
-    hosting.frame = NSRect(origin: .zero, size: size)
-    panel.setFrame(NSRect(origin: origin, size: size), display: true)
+
+    let target = NSRect(origin: origin, size: size)
+    guard !target.equalTo(panel.frame) else { return }
+    if panel.isVisible, !target.size.equalTo(panel.frame.size) {
+      // Width is bucket-quantized, so this fires only a handful of times per
+      // utterance (bucket crossings / button show-hide) — each one glides.
+      NSAnimationContext.runAnimationGroup { context in
+        context.duration = 0.18
+        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        panel.animator().setFrame(target, display: true)
+      }
+    } else {
+      panel.setFrame(target, display: true)
+    }
   }
 
   /// Font the capsule view renders text with; measurement must match.
@@ -182,34 +246,48 @@ final class CursorOverlayController {
   /// (narrow frame → truncated text → narrow measurement) that kept the
   /// capsule stuck at its initial width.
   private func measuredSize() -> NSSize {
+    let buttonsVisible = CursorOverlayMetrics.showsActionButtons(state.barPhase)
     let text = CursorOverlayCopy.displayText(for: state)
     // Cap at the view's textMaxWidth: the view head-truncates beyond it, so
-    // the capsule content stops growing there. Measuring the full run would
-    // oversize the panel, and SwiftUI centers the capped content in the
-    // slack — the capsule visibly drifted right as the transcript grew.
+    // the capsule content stops growing there.
     let textWidth = min(
       ceil((text as NSString).size(withAttributes: [.font: Self.textFont]).width),
-      CursorOverlayMetrics.textMaxWidth
+      CursorOverlayMetrics.textMaxWidth(buttonsVisible: buttonsVisible)
     )
-    // 10pt padding ×2 + 6pt dot + 6pt dot-text spacing + 6pt text-cluster spacing.
-    let width = textWidth + 38 + secondaryWidth()
-    return NSSize(width: min(max(width, 80), Self.maxPanelWidth), height: 24)
+    // Two always-visible bars: main row (dot+spacing+text, plus the two 18pt
+    // end buttons and their gaps while capturing) and the meta strip below
+    // (indented to align under the text). Width hugs the wider of the two.
+    let textRowWidth = (buttonsVisible ? 64 : 12) + textWidth
+    let metaRowWidth =
+      CursorOverlayMetrics.metaIndent(buttonsVisible: buttonsVisible) + secondaryWidth()
+    let contentWidth = max(textRowWidth, metaRowWidth)
+    // 12pt horizontal padding ×2 + 12pt shadow padding (6pt/side).
+    let width = Self.quantizedWidth(contentWidth + 36)
+    // Main capsule 30 + 4pt gap + meta strip 15 + 12pt shadow padding.
+    return NSSize(width: width, height: 61)
   }
 
-  /// Absolute panel cap: text cap + horizontal chrome + widest secondary cluster.
-  private static var maxPanelWidth: CGFloat {
-    CursorOverlayMetrics.textMaxWidth + 38 + 320
+  /// Width grows in fixed buckets instead of tracking every glyph: transcript
+  /// revisions arrive several times a second, and hugging the text made the
+  /// capsule step wider each time (the "jittery" feel). Crossing a bucket is
+  /// rare, and each crossing is an animated glide.
+  private static func quantizedWidth(_ raw: CGFloat) -> CGFloat {
+    let minWidth: CGFloat = 160
+    let step: CGFloat = 96
+    let cap: CGFloat = 640
+    guard raw > minWidth else { return minWidth }
+    return min(minWidth + ceil((raw - minWidth) / step) * step, cap)
   }
 
-  /// Width of the right-side secondary cluster, measured with the same
-  /// font, children order and spacing the view uses.
+  /// Width of the bottom meta cluster, measured with the same font,
+  /// children order and spacing the view uses.
   private func secondaryWidth() -> CGFloat {
     func measure(_ s: String) -> CGFloat {
       ceil((s as NSString).size(withAttributes: [.font: Self.secondaryFont]).width)
     }
     let secondary = CursorOverlayCopy.secondary(for: state)
     let sep = CursorOverlayMetrics.secondarySeparator
-    var children: [CGFloat] = [1]  // divider
+    var children: [CGFloat] = []
     if let device = secondary.device {
       children.append(min(measure(device), CursorOverlayMetrics.secondaryItemMaxWidth))
       children.append(measure(sep))

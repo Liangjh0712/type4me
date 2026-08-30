@@ -174,11 +174,13 @@ final class FloatingShortcutExecutor {
 }
 
 private final class FloatingShortcutPanel: NSPanel {
-  private static let dragHandleWidth: CGFloat = 36
+  /// Window-coordinate rects that stay clickable (keys, utility buttons).
+  /// A left mouse-down anywhere else drags the panel.
+  var interactiveRects: [NSRect] = []
 
   init() {
     super.init(
-      contentRect: NSRect(x: 0, y: 0, width: 180, height: 58),
+      contentRect: NSRect(x: 0, y: 0, width: 140, height: 52),
       styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
       backing: .buffered,
       defer: false
@@ -200,7 +202,7 @@ private final class FloatingShortcutPanel: NSPanel {
 
   override func sendEvent(_ event: NSEvent) {
     if event.type == .leftMouseDown,
-      event.locationInWindow.x <= Self.dragHandleWidth
+      !interactiveRects.contains(where: { $0.contains(event.locationInWindow) })
     {
       performDrag(with: event)
       return
@@ -210,14 +212,36 @@ private final class FloatingShortcutPanel: NSPanel {
 }
 
 private enum FloatingShortcutDeckStyle {
-  static let shellTop = Color(red: 0.075, green: 0.145, blue: 0.180)
-  static let shellBottom = Color(red: 0.020, green: 0.045, blue: 0.058)
-  static let keyTop = Color(red: 0.100, green: 0.184, blue: 0.224)
-  static let keyBottom = Color(red: 0.040, green: 0.083, blue: 0.104)
-  static let edge = Color(red: 0.780, green: 0.840, blue: 0.830).opacity(0.18)
-  static let legend = Color(red: 0.949, green: 0.925, blue: 0.875)
-  static let brass = Color(red: 1.000, green: 0.714, blue: 0.282)
-  static let signal = Color(red: 0.373, green: 0.827, blue: 0.753)
+  static let accent = Color(red: 0.38, green: 0.85, blue: 0.76)
+  static let latch = Color(red: 1.00, green: 0.74, blue: 0.34)
+  static let keyHeight: CGFloat = 28
+  static let deckCornerRadius: CGFloat = 13
+  static let keyCornerRadius: CGFloat = 7
+}
+
+extension FloatingShortcutButtonConfiguration {
+  var compactKeyLabel: String {
+    guard let keyCode else { return "—" }
+    switch keyCode {
+    case 36: return "↵"
+    case 49: return "SPACE"
+    case 53: return "ESC"
+    case 63: return "fn"
+    default:
+      return HotkeyRecorderView.keyDisplayName(keyCode: keyCode, modifiers: modifiers)
+    }
+  }
+
+  var latchesAcrossClicks: Bool {
+    keyCode == 63 && (modifiers ?? 0) == 0
+  }
+
+  /// Deterministic key width shared by the view and the panel-size calculation.
+  var compactKeyWidth: CGFloat {
+    let count = compactKeyLabel.count
+    let perChar: CGFloat = count > 3 ? 7 : 9
+    return min(92, max(34, 20 + CGFloat(count) * perChar))
+  }
 }
 
 private struct FloatingShortcutPanelView: View {
@@ -226,6 +250,8 @@ private struct FloatingShortcutPanelView: View {
   let onPressedChanged: (FloatingShortcutButtonConfiguration, Bool) -> Void
   let onToggleCollapsed: () -> Void
   let onClose: () -> Void
+
+  @State private var isDeckHovered = false
 
   var body: some View {
     Group {
@@ -239,170 +265,130 @@ private struct FloatingShortcutPanelView: View {
   }
 
   private var expandedDeck: some View {
-    HStack(spacing: 7) {
-      dragHandle(height: 48)
-
-      Rectangle()
-        .fill(FloatingShortcutDeckStyle.edge)
-        .frame(width: 1, height: 36)
-
-      ForEach(buttons) { button in
-        FloatingShortcutKeyButton(button: button) { pressed in
-          onPressedChanged(button, pressed)
+    deckChrome {
+      HStack(spacing: 6) {
+        if buttons.isEmpty {
+          emptySlot
         }
-      }
 
-      if buttons.isEmpty {
-        VStack(spacing: 3) {
-          Image(systemName: "keyboard.badge.ellipsis")
-            .font(.system(size: 14, weight: .medium))
-          Text(L("待配置", "UNMAPPED"))
-            .font(.custom("SF Mono", size: 8).weight(.semibold))
-            .tracking(1.1)
+        ForEach(buttons) { button in
+          FloatingShortcutKeyButton(button: button) { pressed in
+            onPressedChanged(button, pressed)
+          }
         }
-        .foregroundStyle(FloatingShortcutDeckStyle.legend.opacity(0.52))
-        .frame(width: 84, height: 48)
-      }
 
-      VStack(spacing: 3) {
-        utilityButton(
-          symbol: "chevron.compact.left",
-          help: L("折叠快捷键", "Collapse shortcuts"),
-          action: onToggleCollapsed
-        )
-        utilityButton(
-          symbol: "xmark",
-          help: L("关闭悬浮快捷键", "Close floating shortcuts"),
-          action: onClose
-        )
+        Button(action: onToggleCollapsed) {
+          Image(systemName: "chevron.compact.left")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white.opacity(0.45))
+            .frame(width: 16, height: FloatingShortcutDeckStyle.keyHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(L("折叠快捷键", "Collapse shortcuts"))
       }
+      .padding(.leading, 5)
+      .padding(.trailing, 6)
+      .padding(.vertical, 6)
     }
-    .padding(.horizontal, 7)
-    .padding(.vertical, 6)
-    .background(deckBackground(cornerRadius: 15))
-    .overlay(deckBorder(cornerRadius: 15))
-    .shadow(color: .black.opacity(0.42), radius: 14, y: 7)
-    .padding(4)
   }
 
   private var collapsedDeck: some View {
-    HStack(spacing: 5) {
-      dragHandle(height: 38)
-
+    deckChrome {
       Button(action: onToggleCollapsed) {
-        VStack(spacing: 1) {
-          Image(systemName: "keyboard.fill")
-            .font(.system(size: 12, weight: .semibold))
-          Text("KEYS")
-            .font(.custom("SF Mono", size: 6.5).weight(.bold))
-            .tracking(0.8)
-        }
-        .foregroundStyle(FloatingShortcutDeckStyle.legend.opacity(0.78))
-        .frame(width: 34, height: 36)
-        .background(
-          RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(FloatingShortcutDeckStyle.keyBottom)
-        )
-        .overlay(
-          RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .stroke(FloatingShortcutDeckStyle.edge, lineWidth: 1)
-        )
+        Image(systemName: "keyboard")
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(.white.opacity(0.85))
+          .frame(width: 26, height: 24)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .help(L("展开快捷键", "Expand shortcuts"))
-
-      utilityButton(
-        symbol: "xmark",
-        help: L("关闭悬浮快捷键", "Close floating shortcuts"),
-        action: onClose
-      )
+      .padding(.leading, 5)
+      .padding(.trailing, 6)
+      .padding(.vertical, 5)
     }
-    .padding(.horizontal, 6)
-    .padding(.vertical, 5)
-    .background(deckBackground(cornerRadius: 13))
-    .overlay(deckBorder(cornerRadius: 13))
-    .shadow(color: .black.opacity(0.38), radius: 11, y: 5)
-    .padding(3)
   }
 
-  private func dragHandle(height: CGFloat) -> some View {
-    VStack(spacing: 3) {
-      Circle()
-        .fill(FloatingShortcutDeckStyle.signal)
-        .frame(width: 4, height: 4)
-        .shadow(color: FloatingShortcutDeckStyle.signal.opacity(0.8), radius: 3)
-      ForEach(0..<5, id: \.self) { _ in
-        Capsule()
-          .fill(FloatingShortcutDeckStyle.legend.opacity(0.22))
-          .frame(width: 10, height: 1)
-      }
-    }
-    .frame(width: 22, height: height)
-    .background(
-      RoundedRectangle(cornerRadius: 7, style: .continuous)
-        .fill(Color.black.opacity(0.16))
-    )
-    .contentShape(Rectangle())
-    .help(L("拖动面板", "Drag panel"))
-  }
-
-  private func utilityButton(
-    symbol: String,
-    help: String,
-    action: @escaping () -> Void
+  private func deckChrome<Content: View>(
+    @ViewBuilder content: () -> Content
   ) -> some View {
-    Button(action: action) {
-      Image(systemName: symbol)
-        .font(.system(size: 9, weight: .bold))
-        .foregroundStyle(FloatingShortcutDeckStyle.legend.opacity(0.58))
-        .frame(width: 22, height: 22)
-        .background(
-          RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(Color.black.opacity(0.16))
+    content()
+      .background {
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
+          style: .continuous
         )
-        .overlay(
-          RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .stroke(FloatingShortcutDeckStyle.edge.opacity(0.7), lineWidth: 1)
-        )
-    }
-    .buttonStyle(.plain)
-    .help(help)
-  }
-
-  private func deckBackground(cornerRadius: CGFloat) -> some View {
-    ZStack {
-      RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(
           LinearGradient(
-            colors: [
-              FloatingShortcutDeckStyle.shellTop.opacity(0.98),
-              FloatingShortcutDeckStyle.shellBottom.opacity(0.98),
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-          )
-        )
-      RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        .fill(
-          LinearGradient(
-            colors: [.white.opacity(0.07), .clear, .black.opacity(0.12)],
+            colors: [Color(white: 0.105), Color(white: 0.055)],
             startPoint: .top,
             endPoint: .bottom
           )
         )
+      }
+      .overlay(
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
+          style: .continuous
+        )
+        .strokeBorder(
+          LinearGradient(
+            colors: [.white.opacity(0.16), .white.opacity(0.05)],
+            startPoint: .top,
+            endPoint: .bottom
+          ),
+          lineWidth: 0.5
+        )
+      )
+      .overlay(alignment: .topTrailing) { closeBadge }
+      .onHover { isDeckHovered = $0 }
+      .animation(.easeOut(duration: 0.15), value: isDeckHovered)
+      .contextMenu {
+        Button(
+          isCollapsed
+            ? L("展开快捷键", "Expand shortcuts")
+            : L("折叠快捷键", "Collapse shortcuts"),
+          action: onToggleCollapsed
+        )
+        Divider()
+        Button(L("关闭悬浮快捷键", "Close floating shortcuts"), action: onClose)
+      }
+      .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+      .padding(6)
+  }
+
+  @ViewBuilder private var closeBadge: some View {
+    if isDeckHovered {
+      Button(action: onClose) {
+        Image(systemName: "xmark")
+          .font(.system(size: 7, weight: .bold))
+          .foregroundStyle(.white.opacity(0.75))
+          .frame(width: 14, height: 14)
+          .background(Circle().fill(Color(white: 0.13)))
+          .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+      }
+      .buttonStyle(.plain)
+      .help(L("关闭悬浮快捷键", "Close floating shortcuts"))
+      .offset(x: 3, y: -3)
+      .transition(.scale(scale: 0.5).combined(with: .opacity))
     }
   }
 
-  private func deckBorder(cornerRadius: CGFloat) -> some View {
-    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-      .stroke(
-        LinearGradient(
-          colors: [FloatingShortcutDeckStyle.edge, Color.black.opacity(0.45)],
-          startPoint: .top,
-          endPoint: .bottom
-        ),
-        lineWidth: 1
-      )
+  private var emptySlot: some View {
+    HStack(spacing: 5) {
+      Image(systemName: "keyboard.badge.ellipsis")
+        .font(.system(size: 11))
+      Text(L("待配置", "UNMAPPED"))
+        .font(.system(size: 10, weight: .medium))
+    }
+    .foregroundStyle(.white.opacity(0.45))
+    .padding(.horizontal, 10)
+    .frame(height: FloatingShortcutDeckStyle.keyHeight)
+    .overlay(
+      RoundedRectangle(cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous)
+        .strokeBorder(.white.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+    )
   }
 }
 
@@ -434,110 +420,87 @@ private struct FloatingShortcutKeyButton: View {
     return trimmed.isEmpty ? L("快捷键", "SHORTCUT") : trimmed
   }
 
-  private var shortcut: String {
-    guard let keyCode = button.keyCode else { return "—" }
-    switch keyCode {
-    case 36: return "↵"
-    case 49: return "SPACE"
-    case 53: return "ESC"
-    case 63: return "fn"
-    default:
-      return HotkeyRecorderView.keyDisplayName(keyCode: keyCode, modifiers: button.modifiers)
-    }
-  }
-
-  private var latchesAcrossClicks: Bool {
-    button.keyCode == 63 && (button.modifiers ?? 0) == 0
-  }
-
   private var accent: Color {
-    latchesAcrossClicks && pressState.isActive
-      ? FloatingShortcutDeckStyle.brass
-      : FloatingShortcutDeckStyle.signal
+    button.latchesAcrossClicks && pressState.isActive
+      ? FloatingShortcutDeckStyle.latch
+      : FloatingShortcutDeckStyle.accent
+  }
+
+  private var fill: Color {
+    if pressState.isActive { return accent.opacity(0.16) }
+    return .white.opacity(isHovered ? 0.10 : 0.06)
+  }
+
+  private var glyphColor: Color {
+    if pressState.isActive { return accent }
+    return .white.opacity(isHovered ? 0.95 : 0.80)
+  }
+
+  private var edgeGradient: LinearGradient {
+    LinearGradient(
+      colors: pressState.isActive
+        ? [accent.opacity(0.55), accent.opacity(0.22)]
+        : [.white.opacity(0.14), .white.opacity(0.05)],
+      startPoint: .top,
+      endPoint: .bottom
+    )
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      HStack(spacing: 4) {
-        Text(title.uppercased())
-          .font(.custom("SF Mono", size: 7.5).weight(.semibold))
-          .tracking(1.1)
-          .foregroundStyle(FloatingShortcutDeckStyle.legend.opacity(0.48))
-          .lineLimit(1)
-        Spacer(minLength: 2)
-        Circle()
-          .fill(accent.opacity(pressState.isActive ? 1 : 0.34))
-          .frame(width: 4, height: 4)
-          .shadow(color: accent.opacity(pressState.isActive ? 0.9 : 0), radius: 3)
-      }
-
-      Text(shortcut)
-        .font(.custom("SF Mono", size: shortcut.count > 5 ? 10 : 15).weight(.bold))
-        .tracking(shortcut.count > 5 ? 0.2 : 0.8)
-        .foregroundStyle(FloatingShortcutDeckStyle.legend)
-        .lineLimit(1)
-        .minimumScaleFactor(0.68)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    .padding(.horizontal, 9)
-    .frame(width: 84, height: 48)
-    .background(
-      RoundedRectangle(cornerRadius: 9, style: .continuous)
-        .fill(
-          LinearGradient(
-            colors: pressState.isActive
-              ? [accent.opacity(0.30), FloatingShortcutDeckStyle.keyBottom]
-              : [
-                FloatingShortcutDeckStyle.keyTop.opacity(isHovered ? 1 : 0.72),
-                FloatingShortcutDeckStyle.keyBottom,
-              ],
-            startPoint: .top,
-            endPoint: .bottom
-          )
+    Text(button.compactKeyLabel)
+      .font(
+        .system(
+          size: button.compactKeyLabel.count > 3 ? 10.5 : 13,
+          weight: .semibold,
+          design: .rounded
         )
-    )
-    .overlay(alignment: .top) {
-      Capsule()
-        .fill(accent.opacity(pressState.isActive ? 0.95 : (isHovered ? 0.42 : 0.16)))
-        .frame(height: 1.5)
-        .padding(.horizontal, 8)
-        .padding(.top, 1)
-    }
-    .overlay(
-      RoundedRectangle(cornerRadius: 9, style: .continuous)
-        .stroke(
-          pressState.isActive ? accent.opacity(0.62) : FloatingShortcutDeckStyle.edge,
-          lineWidth: 1
-        )
-    )
-    .shadow(
-      color: pressState.isActive ? accent.opacity(0.16) : .black.opacity(isHovered ? 0.36 : 0.26),
-      radius: pressState.isActive ? 5 : 3,
-      y: pressState.isActive ? 0 : 2
-    )
-    .offset(y: pressState.isActive ? 1 : (isHovered ? -1 : 0))
-    .scaleEffect(pressState.isActive ? 0.975 : 1)
-    .animation(.spring(response: 0.2, dampingFraction: 0.78), value: pressState.isActive)
-    .animation(.easeOut(duration: 0.14), value: isHovered)
-    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-    .overlay {
-      FloatingShortcutPressInteraction(
-        onHoverChanged: { isHovered = $0 },
-        onPressedChanged: { pointerPressed in
-          guard let logicalPressed = pressState.consume(
-            pointerPressed: pointerPressed,
-            latchesAcrossClicks: latchesAcrossClicks
-          ) else { return }
-          onPressedChanged(logicalPressed)
-        }
       )
-    }
-    .accessibilityLabel(title)
-    .accessibilityValue(shortcut)
+      .foregroundStyle(glyphColor)
+      .shadow(color: pressState.isActive ? accent.opacity(0.9) : .clear, radius: 6)
+      .lineLimit(1)
+      .minimumScaleFactor(0.7)
+      .frame(width: button.compactKeyWidth, height: FloatingShortcutDeckStyle.keyHeight)
+      .background(
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius,
+          style: .continuous
+        )
+        .fill(fill)
+      )
+      .overlay(
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius,
+          style: .continuous
+        )
+        .strokeBorder(edgeGradient, lineWidth: 0.5)
+      )
+      .shadow(color: pressState.isActive ? accent.opacity(0.35) : .clear, radius: 8)
+      .scaleEffect(pressState.isActive ? 0.94 : 1)
+      .animation(.spring(response: 0.18, dampingFraction: 0.7), value: pressState.isActive)
+      .animation(.easeOut(duration: 0.12), value: isHovered)
+      .contentShape(
+        RoundedRectangle(cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous)
+      )
+      .overlay {
+        FloatingShortcutPressInteraction(
+          help: title,
+          onHoverChanged: { isHovered = $0 },
+          onPressedChanged: { pointerPressed in
+            guard let logicalPressed = pressState.consume(
+              pointerPressed: pointerPressed,
+              latchesAcrossClicks: button.latchesAcrossClicks
+            ) else { return }
+            onPressedChanged(logicalPressed)
+          }
+        )
+      }
+      .accessibilityLabel(title)
+      .accessibilityValue(button.compactKeyLabel)
   }
 }
 
 private struct FloatingShortcutPressInteraction: NSViewRepresentable {
+  let help: String
   let onHoverChanged: (Bool) -> Void
   let onPressedChanged: (Bool) -> Void
 
@@ -547,12 +510,14 @@ private struct FloatingShortcutPressInteraction: NSViewRepresentable {
     view.isBordered = false
     view.focusRingType = .none
     view.setButtonType(.momentaryPushIn)
+    view.toolTip = help
     view.onHoverChanged = onHoverChanged
     view.onPressedChanged = onPressedChanged
     return view
   }
 
   func updateNSView(_ nsView: FloatingShortcutPressNSView, context: Context) {
+    nsView.toolTip = help
     nsView.onHoverChanged = onHoverChanged
     nsView.onPressedChanged = onPressedChanged
   }
@@ -682,7 +647,7 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
       }
     )
 
-    let size = panelSize(buttonCount: buttons.count, isCollapsed: isCollapsed)
+    let size = panelSize(buttons: buttons, isCollapsed: isCollapsed)
     if let hostingView {
       hostingView.rootView = view
       hostingView.frame = NSRect(origin: .zero, size: size)
@@ -702,6 +667,11 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
     panel.setFrame(NSRect(origin: origin, size: size), display: true)
     hasPositionedPanel = true
     isApplyingFrame = false
+    panel.interactiveRects = interactiveRects(
+      buttons: buttons,
+      isCollapsed: isCollapsed,
+      panelSize: size
+    )
     panel.orderFrontRegardless()
   }
 
@@ -710,15 +680,78 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
     FloatingShortcutPreferences.savePosition(panel.frame.origin, userDefaults: userDefaults)
   }
 
-  private func panelSize(buttonCount: Int, isCollapsed: Bool) -> NSSize {
-    guard !isCollapsed else { return NSSize(width: 106, height: 54) }
-    let visibleKeyCount = max(1, buttonCount)
-    let keyWidthWithSpacing: CGFloat = 91
-    let fixedWidth: CGFloat = 81
+  private func panelSize(
+    buttons: [FloatingShortcutButtonConfiguration],
+    isCollapsed: Bool
+  ) -> NSSize {
+    let shadowPadding: CGFloat = 12  // 6pt on every side
+    let spacing: CGFloat = 6
+    let horizontalPadding: CGFloat = 5 + 6  // leading + trailing
+
+    if isCollapsed {
+      let width = horizontalPadding + 26 + shadowPadding
+      return NSSize(width: width, height: 24 + 10 + shadowPadding)
+    }
+
+    let keysWidth = buttons.isEmpty
+      ? CGFloat(84)
+      : buttons.reduce(0) { $0 + $1.compactKeyWidth }
+    let itemCount = buttons.isEmpty ? 2 : buttons.count + 1  // keys/empty + chevron
+    let width =
+      horizontalPadding + keysWidth + 16
+      + CGFloat(itemCount - 1) * spacing + shadowPadding
     return NSSize(
-      width: fixedWidth + CGFloat(visibleKeyCount) * keyWidthWithSpacing,
-      height: 68
+      width: width,
+      height: FloatingShortcutDeckStyle.keyHeight + 12 + shadowPadding
     )
+  }
+
+  /// Clickable regions in window coordinates (y flipped from SwiftUI layout).
+  /// Everything else on the deck acts as a drag surface.
+  private func interactiveRects(
+    buttons: [FloatingShortcutButtonConfiguration],
+    isCollapsed: Bool,
+    panelSize: NSSize
+  ) -> [NSRect] {
+    let shadowInset: CGFloat = 6
+    var rects: [NSRect] = []
+
+    // Hover close-badge zone at the top-trailing corner.
+    rects.append(
+      NSRect(x: panelSize.width - 22, y: panelSize.height - 20, width: 22, height: 20)
+    )
+
+    if isCollapsed {
+      rects.append(
+        NSRect(
+          x: shadowInset + 5,
+          y: panelSize.height - shadowInset - 5 - 24,
+          width: 26,
+          height: 24
+        )
+      )
+      return rects
+    }
+
+    var x = shadowInset + 5
+    let keyY = panelSize.height - shadowInset - 6 - FloatingShortcutDeckStyle.keyHeight
+    if buttons.isEmpty {
+      x += 84 + 6  // empty slot is a drag surface; skip to the chevron
+    }
+    for button in buttons {
+      rects.append(
+        NSRect(
+          x: x,
+          y: keyY,
+          width: button.compactKeyWidth,
+          height: FloatingShortcutDeckStyle.keyHeight
+        )
+      )
+      x += button.compactKeyWidth + 6
+    }
+    // Collapse chevron.
+    rects.append(NSRect(x: x, y: keyY, width: 16, height: FloatingShortcutDeckStyle.keyHeight))
+    return rects
   }
 
   private func resolvedOrigin(for size: NSSize) -> NSPoint {

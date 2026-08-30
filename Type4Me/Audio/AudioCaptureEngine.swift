@@ -23,9 +23,12 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
 
     static let sampleRate: Double = 16000
     static let channels: AVAudioChannelCount = 1
-    static let chunkDurationMs: Int = 200
-    static let samplesPerChunk: Int = 3200
-    static let chunkByteSize: Int = 6400
+    /// 100ms packets: streaming ASR servers (volcano/deepgram/…) answer per
+    /// packet, so smaller packets roughly halve partial-result latency and
+    /// make the live transcript feel silky instead of stepping every ~400ms.
+    static let chunkDurationMs: Int = 100
+    static let samplesPerChunk: Int = 1600
+    static let chunkByteSize: Int = 3200
     static let targetFormat: AVAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: 16000,

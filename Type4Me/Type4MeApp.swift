@@ -624,13 +624,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
       NSLog("[Type4Me] >>> HOTKEY: ESC abort injection (phase=%@)", String(describing: phase))
       DebugFileLogger.log("hotkey ESC abort injection phase=\(phase)")
-      MainActor.assumeIsolated { self.appState.stopRecording() }
-      if phase == .preparing {
-        Task { await self.session.cancelRecording() }
-      } else {
+      if phase == .processing {
+        // Recording already ended: let the pipeline finish (history kept),
+        // only skip the injection.
         Task {
           await self.session.abortInjection()
           await self.session.stopRecording()
+        }
+      } else {
+        // Same as the panel × button: cancel IMMEDIATELY. The old path went
+        // through stopRecording(), which visibly parked the bar in
+        // "校准中" (processing) before the cancel landed.
+        MainActor.assumeIsolated {
+          self.appState.cancel()
+          self.hotkeyManager.isProcessing = false
+          self.safeResetHotkeyState()
+        }
+        let pendingModeChange = self.panelModeSessionTask
+        self.panelModeSessionTask = nil
+        Task {
+          await pendingModeChange?.value
+          await self.session.cancelRecording()
         }
       }
       return true

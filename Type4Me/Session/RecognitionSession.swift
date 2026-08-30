@@ -231,7 +231,6 @@ actor RecognitionSession {
   private var currentTranscript: RecognitionTranscript = .empty
   private var eventConsumptionTask: Task<Void, Never>?
   private var maxDurationTask: Task<Void, Never>?
-  private var firstStreamingTextTimeoutTask: Task<Void, Never>?
   private var hasEmittedReadyForCurrentSession = false
   private var audioChunkContinuation: AsyncStream<Data>.Continuation?
   private var audioChunkSenderTask: Task<Void, Never>?
@@ -409,8 +408,6 @@ actor RecognitionSession {
   private var finalOptimizationDecisionCont: CheckedContinuation<FinalOptimizationDecision, Never>?
   private var finalOptimizationDecisionTimeoutTask: Task<Void, Never>?
   private var llmAttemptCounter = 0
-  /// Continuation resumed when first non-empty streaming text arrives (for short-recording wait).
-  private var firstStreamingTextCont: CheckedContinuation<Bool, Never>?
 
   // MARK: - Toggle
 
@@ -1447,52 +1444,36 @@ actor RecognitionSession {
       return
     }
 
-    // Short recordings can stop before the first streaming token arrives. Wait up
-    // to 1s for any text so genuine speech is not discarded as silence; once text
-    // exists, the normal teardown below still drains the complete ASR event stream.
+    // Quick bail: no streaming text at stop time (ANY duration) — the user
+    // either stayed silent or pressed the hotkey by accident. Skip the ASR
+    // teardown, the LLM, injection and history entirely; the bar has
+    // already vanished (AppState cancels instantly on empty text), so the
+    // old 1s grace for late partials only bought back ~0.5s of speech at
+    // the cost of silently inserting into a hidden UI — dropped by design.
     let provider = activeProvider
     let providerIsStreaming = ASRProviderRegistry.capabilities(for: provider).isStreaming
     if providerIsStreaming {
-      let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
       let hasStreamingText = !currentTranscript.composedText
         .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      if duration < 5 && !hasStreamingText {
-        // Phase 1: wait up to 1s for any streaming text
-        DebugFileLogger.log(
-          "stop: short recording (\(String(format: "%.1f", duration))s) with no streaming text, waiting for partial"
-        )
-        let gotText = await awaitFirstStreamingText(timeout: .seconds(1))
-
-        if !gotText {
-          // No streaming text after 1s — likely not real speech, fast exit
-          DebugFileLogger.log("stop: no streaming text after 1s wait, fast exit")
-          if let client = asrClient {
-            await client.disconnect()
-            self.asrClient = nil
-          }
-          eventConsumptionTask?.cancel()
-          eventConsumptionTask = nil
-          await persistCurrentHistory(
-            rawText: "",
-            processedText: nil,
-            finalText: "",
-            status: "asr_no_text_audio_saved"
-          )
-          onASREvent?(.finalizedEmpty)
-          if sessionGeneration == myGeneration, state != .idle {
-            state = .idle
-            hasEmittedReadyForCurrentSession = false
-            currentTranscript = .empty
-            warmUpASRConnection()
-          }
-          resetSpeculativeLLM()
-          SystemVolumeManager.restore()
-          return
+      if !hasStreamingText {
+        DebugFileLogger.log("stop: no streaming text at stop, fast exit")
+        discardCurrentAudio()
+        if let client = asrClient {
+          await client.disconnect()
+          self.asrClient = nil
         }
-
-        DebugFileLogger.log(
-          "stop: streaming text arrived; continuing to full teardown +\(ContinuousClock.now - stopT0)"
-        )
+        eventConsumptionTask?.cancel()
+        eventConsumptionTask = nil
+        onASREvent?(.finalizedEmpty)
+        if sessionGeneration == myGeneration, state != .idle {
+          state = .idle
+          hasEmittedReadyForCurrentSession = false
+          currentTranscript = .empty
+          warmUpASRConnection()
+        }
+        resetSpeculativeLLM()
+        SystemVolumeManager.restore()
+        return
       }
     }
 
@@ -2078,12 +2059,6 @@ actor RecognitionSession {
       audioEngine.updateAudioJournalPartialTranscript(transcript.canonicalText)
       if !transcript.canonicalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         speechDetected = true
-        if let cont = firstStreamingTextCont {
-          firstStreamingTextCont = nil
-          firstStreamingTextTimeoutTask?.cancel()
-          firstStreamingTextTimeoutTask = nil
-          cont.resume(returning: true)
-        }
       }
       DebugFileLogger.log(
         "asr revision=\(transcript.revision) source=\(transcript.textSource.rawValue) chars=\(transcript.canonicalText.count)"
@@ -2620,31 +2595,6 @@ actor RecognitionSession {
     }
   }
 
-  private func resumeFirstStreamingTextOnTimeout() {
-    if let cont = firstStreamingTextCont {
-      firstStreamingTextCont = nil
-      firstStreamingTextTimeoutTask = nil
-      cont.resume(returning: false)
-    }
-  }
-
-  /// Wait for the ASR to emit any non-empty streaming text, with timeout.
-  /// Returns true if text arrived, false on timeout.
-  private func awaitFirstStreamingText(timeout: Duration) async -> Bool {
-    let text = currentTranscript.composedText
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    if !text.isEmpty { return true }
-    return await withCheckedContinuation { continuation in
-      self.firstStreamingTextTimeoutTask?.cancel()
-      self.firstStreamingTextCont = continuation
-      self.firstStreamingTextTimeoutTask = Task { [weak self] in
-        try? await Task.sleep(for: timeout)
-        guard let self, !Task.isCancelled else { return }
-        await self.resumeFirstStreamingTextOnTimeout()
-      }
-    }
-  }
-
   static func shouldAttemptBatchFallback(
     uploadFailed: Bool,
     asrTeardownClean: Bool,
@@ -2760,12 +2710,6 @@ actor RecognitionSession {
     NSLog("[Session] forceReset from state=%@", String(describing: state))
     DebugFileLogger.log("forceReset from state=\(state)")
 
-    if let cont = firstStreamingTextCont {
-      firstStreamingTextCont = nil
-      firstStreamingTextTimeoutTask?.cancel()
-      firstStreamingTextTimeoutTask = nil
-      cont.resume(returning: false)
-    }
     finalOptimizationDecisionTimeoutTask?.cancel()
     finalOptimizationDecisionTimeoutTask = nil
     if let continuation = finalOptimizationDecisionCont {

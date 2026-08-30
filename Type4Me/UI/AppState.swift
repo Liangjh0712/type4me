@@ -1187,6 +1187,14 @@ final class AppState {
     case .preparing:
       cancel()
     case .recording:
+      // Zero recognized characters = the user said nothing (accidental
+      // hotkey press): vanish instantly instead of parking in "校准中"
+      // while the server finalizes a predictably empty result. The session
+      // short-circuits the same way, so no late event resurrects the bar.
+      if transcriptionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        cancel()
+        return
+      }
       recordingStopDate = Date()
       processingFinishTime = nil
       asrStabilityTask?.cancel()

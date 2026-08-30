@@ -9,6 +9,8 @@ final class CursorOverlayPanel: NSPanel {
   /// Called after any press-drag on the capsule (performDrag blocks until
   /// mouse-up, so this fires once the move is complete).
   var onUserDrag: (() -> Void)?
+  /// Double-click anywhere off the buttons: re-center the capsule.
+  var onDoubleClick: (() -> Void)?
 
   init() {
     super.init(
@@ -41,6 +43,10 @@ final class CursorOverlayPanel: NSPanel {
         super.sendEvent(event)
         return
       }
+      if event.clickCount >= 2 {
+        onDoubleClick?()
+        return
+      }
       performDrag(with: event)
       onUserDrag?()
       return
@@ -65,8 +71,8 @@ final class CursorOverlayPanel: NSPanel {
 /// FloatingBarController.
 @MainActor
 final class CursorOverlayController {
-  private static let positionXKey = "tf_cursorOverlayPositionX"
-  private static let positionYKey = "tf_cursorOverlayPositionY"
+  private static let positionXKey = "tf_cursorOverlayPosition3X"
+  private static let positionYKey = "tf_cursorOverlayPosition3Y"
 
   private let state: AppState
   private let userDefaults: UserDefaults
@@ -89,6 +95,9 @@ final class CursorOverlayController {
     panel.contentView = hosting
     panel.onUserDrag = { [weak self] in
       MainActor.assumeIsolated { self?.savePosition() }
+    }
+    panel.onDoubleClick = { [weak self] in
+      MainActor.assumeIsolated { self?.recenter() }
     }
     // Real send closure can only capture self after full initialization.
     hosting.rootView = CursorOverlayView(state: state) { [weak self] in
@@ -190,6 +199,25 @@ final class CursorOverlayController {
     userDefaults.set(origin.y, forKey: Self.positionYKey)
   }
 
+  /// Double-click gesture: forget the parked position and glide back to the
+  /// default (bottom-center of the current screen).
+  private func recenter() {
+    userDefaults.removeObject(forKey: Self.positionXKey)
+    userDefaults.removeObject(forKey: Self.positionYKey)
+    guard let screen = CursorOverlayPlacement.screen(
+      containing: NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+    ) else { return }
+    let size = measuredSize()
+    let origin = CursorOverlayPlacement.defaultOrigin(
+      size: size, visibleFrame: screen.visibleFrame
+    )
+    NSAnimationContext.runAnimationGroup { context in
+      context.duration = 0.25
+      context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+      panel.animator().setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+  }
+
   // MARK: - Geometry
 
   private func updateFrame() {
@@ -236,69 +264,14 @@ final class CursorOverlayController {
     }
   }
 
-  /// Font the capsule view renders text with; measurement must match.
-  private static let textFont = NSFont.systemFont(ofSize: 13, weight: .medium)
-  /// Monospaced font the secondary cluster renders with.
-  private static let secondaryFont = NSFont.monospacedSystemFont(ofSize: 9, weight: .medium)
-
-  /// Manual text measurement. NSHostingView.fittingSize measures with the
-  /// view's CURRENT frame as the size proposal, which creates a fixed point
-  /// (narrow frame → truncated text → narrow measurement) that kept the
-  /// capsule stuck at its initial width.
+  /// FIXED panel size (capsule width; the action pills live INSIDE the meta
+  /// row at its edges, so nothing sticks out sideways). The capsule never
+  /// grows with the transcript: a moving frame edge makes the reader's gaze
+  /// drift, while a fixed layout keeps the text tail — the one thing being
+  /// read — at a stable screen position. Text overflow is handled view-side
+  /// by head-truncation.
   private func measuredSize() -> NSSize {
-    let buttonsVisible = CursorOverlayMetrics.showsActionButtons(state.barPhase)
-    let text = CursorOverlayCopy.displayText(for: state)
-    // Cap at the view's textMaxWidth: the view head-truncates beyond it, so
-    // the capsule content stops growing there.
-    let textWidth = min(
-      ceil((text as NSString).size(withAttributes: [.font: Self.textFont]).width),
-      CursorOverlayMetrics.textMaxWidth(buttonsVisible: buttonsVisible)
-    )
-    // Two always-visible bars: main row (dot+spacing+text, plus the two 18pt
-    // end buttons and their gaps while capturing) and the meta strip below
-    // (indented to align under the text). Width hugs the wider of the two.
-    let textRowWidth = (buttonsVisible ? 64 : 12) + textWidth
-    let metaRowWidth =
-      CursorOverlayMetrics.metaIndent(buttonsVisible: buttonsVisible) + secondaryWidth()
-    let contentWidth = max(textRowWidth, metaRowWidth)
-    // 12pt horizontal padding ×2 + 12pt shadow padding (6pt/side).
-    let width = Self.quantizedWidth(contentWidth + 36)
-    // Main capsule 30 + 4pt gap + meta strip 15 + 12pt shadow padding.
-    return NSSize(width: width, height: 61)
-  }
-
-  /// Width grows in fixed buckets instead of tracking every glyph: transcript
-  /// revisions arrive several times a second, and hugging the text made the
-  /// capsule step wider each time (the "jittery" feel). Crossing a bucket is
-  /// rare, and each crossing is an animated glide.
-  private static func quantizedWidth(_ raw: CGFloat) -> CGFloat {
-    let minWidth: CGFloat = 160
-    let step: CGFloat = 96
-    let cap: CGFloat = 640
-    guard raw > minWidth else { return minWidth }
-    return min(minWidth + ceil((raw - minWidth) / step) * step, cap)
-  }
-
-  /// Width of the bottom meta cluster, measured with the same font,
-  /// children order and spacing the view uses.
-  private func secondaryWidth() -> CGFloat {
-    func measure(_ s: String) -> CGFloat {
-      ceil((s as NSString).size(withAttributes: [.font: Self.secondaryFont]).width)
-    }
-    let secondary = CursorOverlayCopy.secondary(for: state)
-    let sep = CursorOverlayMetrics.secondarySeparator
-    var children: [CGFloat] = []
-    if let device = secondary.device {
-      children.append(min(measure(device), CursorOverlayMetrics.secondaryItemMaxWidth))
-      children.append(measure(sep))
-    }
-    children.append(min(measure(secondary.mode), CursorOverlayMetrics.secondaryItemMaxWidth))
-    children.append(measure(sep))
-    children.append(measure(secondary.charCount))
-    if state.recordingStartDate != nil {
-      children.append(measure(sep))
-      children.append(measure("88:88"))  // fixed estimate; timer maxes at 20:00
-    }
-    return children.reduce(0, +) + CGFloat(children.count - 1) * 5
+    // 30pt capsule + 4pt gap + 17pt action/meta row + 2×2pt safety padding.
+    NSSize(width: CursorOverlayMetrics.panelWidth, height: 55)
   }
 }

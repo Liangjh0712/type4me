@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Type4Me 浮层重设计 · 三版对比</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    /* Signal Desk ink palette (from app icon) */
+    --ink0: 8,17,26;
+    --ink1: 13,26,36;
+    --ink2: 20,39,54;
+    --paper: 242,236,223;
+    --signal-teal: 95,211,192;
+    --lamp-amber: 255,182,72;
+    --hot-red: 255,109,92;
+  }
+
+  html, body { height: 100%; }
+
+  body {
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+    background: #12151a;
+    color: #e8e6e1;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- Chrome ---------- */
+
+  header {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; gap: 20px;
+    padding: 14px 28px;
+    background: rgba(12,14,18,0.92);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+  }
+
+  header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.3px; }
+  header .hint { font-size: 11px; color: rgba(255,255,255,0.4); margin-left: auto; }
+
+  .tabs { display: flex; gap: 6px; }
+
+  .tab {
+    padding: 6px 14px; border-radius: 7px; border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.65);
+    font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+    font-family: inherit;
+  }
+  .tab:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); }
+  .tab.on {
+    background: rgba(var(--signal-teal),0.16);
+    border-color: rgba(var(--signal-teal),0.45);
+    color: rgb(var(--signal-teal));
+  }
+
+  /* ---------- Desktop stage ---------- */
+
+  .stage {
+    min-height: calc(100vh - 55px);
+    padding: 40px 28px 80px;
+    background:
+      radial-gradient(1200px 700px at 20% 10%, #2b3a4d 0%, transparent 55%),
+      radial-gradient(900px 600px at 85% 75%, #3d2f3f 0%, transparent 50%),
+      linear-gradient(155deg, #1b2430 0%, #131a24 45%, #0e1218 100%);
+    background-attachment: fixed;
+  }
+
+  /* Fake window behind the overlays so glass has something to bite on */
+  .desk-note {
+    max-width: 1180px; margin: 0 auto 34px;
+    padding: 18px 22px; border-radius: 12px;
+    background: rgba(255,255,255,0.045);
+    border: 1px solid rgba(255,255,255,0.08);
+    font-size: 12.5px; line-height: 1.75; color: rgba(255,255,255,0.6);
+  }
+  .desk-note b { color: rgba(255,255,255,0.92); font-weight: 600; }
+  .desk-note code {
+    font-family: "SF Mono", ui-monospace, monospace; font-size: 11.5px;
+    background: rgba(0,0,0,0.3); padding: 1px 5px; border-radius: 4px;
+    color: rgb(var(--signal-teal));
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  .row {
+    margin-bottom: 46px;
+  }
+
+  .row-label {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 14px; padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+  }
+  .row-label .n {
+    font-size: 12.5px; font-weight: 600; color: rgba(255,255,255,0.88);
+  }
+  .row-label .d {
+    font-size: 11px; color: rgba(255,255,255,0.38);
+    font-family: "SF Mono", ui-monospace, monospace;
+  }
+
+  .specimens { display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; }
+
+  .specimen { display: flex; flex-direction: column; gap: 7px; }
+  .specimen > .cap {
+    font-size: 10px; letter-spacing: 0.4px; text-transform: uppercase;
+    color: rgba(255,255,255,0.3); font-weight: 600;
+  }
+
+  .variant { display: none; }
+  .variant.on { display: block; }
+
+  /* =========================================================
+     VARIANT A — 墨玻璃 Ink Glass
+     One material everywhere: deep teal-ink glass + warm paper text.
+     ========================================================= */
+
+  .a-glass {
+    background:
+      linear-gradient(180deg, rgba(var(--ink2),0.80) 0%, rgba(var(--ink0),0.86) 100%);
+    backdrop-filter: blur(22px) saturate(1.3);
+    -webkit-backdrop-filter: blur(22px) saturate(1.3);
+    border: 0.5px solid rgba(var(--paper),0.13);
+  }
+
+  /* -- style 3 capsule -- */
+  .a-cap {
+    width: 480px; border-radius: 999px;
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 16px;
+    position: relative; overflow: hidden;
+  }
+  /* backlight bleeding from the dot */
+  .a-cap::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(180px 60px at 0% 50%, rgba(var(--signal-teal),0.15), transparent 70%);
+    pointer-events: none;
+  }
+  .a-cap.working::before {
+    background: radial-gradient(180px 60px at 0% 50%, rgba(var(--lamp-amber),0.15), transparent 70%);
+  }
+  .a-cap.err::before {
+    background: radial-gradient(180px 60px at 0% 50%, rgba(var(--hot-red),0.15), transparent 70%);
+  }
+
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%; flex: none;
+    background: rgb(var(--signal-teal));
+    box-shadow: 0 0 7px rgba(var(--signal-teal),0.85);
+    animation: breathe 1.9s ease-in-out infinite;
+  }
+  .working .dot { background: rgb(var(--lamp-amber)); box-shadow: 0 0 7px rgba(var(--lamp-amber),0.85); }
+  .err .dot { background: rgb(var(--hot-red)); box-shadow: 0 0 7px rgba(var(--hot-red),0.85); animation: none; }
+  .done .dot { background: rgb(var(--signal-teal)); box-shadow: 0 0 7px rgba(var(--signal-teal),0.6); animation: none; }
+  .hint .dot { background: rgba(var(--paper),0.4); box-shadow: none; }
+
+  @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: 0.32; } }
+
+  .a-text {
+    font-size: 13px; font-weight: 500; color: rgba(var(--paper),0.94);
+    white-space: nowrap; overflow: hidden; flex: 1;
+    letter-spacing: 0.2px;
+  }
+  .a-text.dim { color: rgba(var(--paper),0.44); }
+  .a-text.frozen { color: rgba(var(--paper),0.68); }
+
+  /* meta becomes an integrated footer rail, not a floating pill */
+  .a-stack { display: flex; flex-direction: column; gap: 4px; width: 480px; }
+
+  .a-meta {
+    display: flex; align-items: center; gap: 0;
+    width: 480px; height: 18px; border-radius: 999px;
+    padding: 0 3px;
+  }
+  .a-meta .info {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 500; color: rgba(var(--paper),0.44);
+    letter-spacing: 0.2px;
+  }
+  .a-meta .sep { opacity: 0.4; }
+
+  .a-pill {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 2px 9px; border-radius: 999px; flex: none;
+    font-size: 9px; font-weight: 600;
+    border: 0.5px solid rgba(var(--paper),0.14);
+    background: rgba(var(--ink0),0.5);
+    color: rgba(var(--paper),0.62); cursor: pointer;
+  }
+  .a-pill.primary {
+    color: rgb(var(--signal-teal));
+    border-color: rgba(var(--signal-teal),0.34);
+    background: rgba(var(--signal-teal),0.10);
+  }
+  .a-pill svg { width: 7px; height: 7px; }
+
+  /* -- shortcut deck -- */
+  .a-deck {
+    height: 26px; border-radius: 9px;
+    display: flex; align-items: center; gap: 4px; padding: 3px 5px;
+  }
+  .a-key {
+    height: 20px; min-width: 34px; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center; padding: 0 8px;
+    font-size: 11px; font-weight: 600; color: rgba(var(--paper),0.82);
+    background: rgba(var(--paper),0.07);
+    border: 0.5px solid rgba(var(--paper),0.08);
+  }
+  .a-key.mode {
+    font-size: 10px; color: rgb(var(--signal-teal));
+    border-color: rgba(var(--signal-teal),0.35);
+    background: rgba(var(--signal-teal),0.09);
+  }
+  .a-key.gear { min-width: 22px; padding: 0; font-size: 10px; color: rgba(var(--paper),0.5); }
+
+  /* -- top panel -- */
+  .a-top { width: 620px; border-radius: 13px; overflow: hidden; }
+  .a-top-head {
+    height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 12px;
+    border-bottom: 0.5px solid rgba(var(--paper),0.09);
+  }
+  .a-top-title { font-size: 11.5px; font-weight: 600; color: rgba(var(--paper),0.9); }
+  .a-top-badge {
+    font-size: 9px; font-weight: 600; padding: 2px 7px; border-radius: 999px;
+    background: rgba(var(--signal-teal),0.14); color: rgb(var(--signal-teal));
+    border: 0.5px solid rgba(var(--signal-teal),0.3);
+  }
+  .a-top-meter { display: flex; gap: 2px; align-items: flex-end; height: 13px; margin-left: auto; }
+  .a-top-meter i {
+    width: 2px; border-radius: 1px; background: rgb(var(--signal-teal));
+    animation: bounce 0.9s ease-in-out infinite;
+  }
+  @keyframes bounce { 0%,100% { height: 3px; opacity: 0.45; } 50% { height: 11px; opacity: 1; } }
+
+  .a-top-body {
+    padding: 10px 12px 12px; font-size: 13px; line-height: 1.62;
+    color: rgba(var(--paper),0.9);
+  }
+  .a-top-body .tail { color: rgba(var(--paper),0.42); }
+  .a-top-foot {
+    display: flex; align-items: center; gap: 6px; padding: 8px 12px 10px;
+  }
+
+  /* -- bottom indicator -- */
+  .a-bottom {
+    width: 132px; border-radius: 14px; padding: 14px 12px;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+  }
+  .a-lamp {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: radial-gradient(circle at 42% 36%, rgba(var(--lamp-amber),1) 0%, rgba(var(--lamp-amber),0.55) 45%, rgba(var(--lamp-amber),0.12) 72%, transparent 78%);
+    display: flex; align-items: center; justify-content: center;
+    animation: breathe 1.9s ease-in-out infinite;
+  }
+  .a-lamp.live {
+    background: radial-gradient(circle at 42% 36%, rgba(var(--signal-teal),1) 0%, rgba(var(--signal-teal),0.55) 45%, rgba(var(--signal-teal),0.12) 72%, transparent 78%);
+  }
+  .a-bars { display: flex; gap: 2.5px; align-items: flex-end; height: 16px; }
+  .a-bars i { width: 2.5px; border-radius: 1.5px; background: rgba(var(--paper),0.7); animation: bounce 0.85s ease-in-out infinite; }
+  .a-bottom .lbl {
+    font-size: 10px; font-weight: 600; color: rgba(var(--paper),0.72); letter-spacing: 0.3px;
+  }
+  .a-bottom .tm {
+    font-family: "SF Mono", ui-monospace, monospace; font-size: 9px;
+    color: rgba(var(--paper),0.42);
+  }
+
+  /* -- toast -- */
+  .a-toast {
+    border-radius: 10px; padding: 9px 14px;
+    display: flex; align-items: center; gap: 9px;
+    font-size: 11.5px; font-weight: 500; color: rgba(var(--paper),0.9);
+  }
+
+  /* -- selection ask -- */
+  .a-ask { width: 380px; border-radius: 13px; overflow: hidden; }
+  .a-ask-head {
+    padding: 9px 13px; display: flex; align-items: center; gap: 8px;
+    border-bottom: 0.5px solid rgba(var(--paper),0.09);
+    font-size: 11px; font-weight: 600; color: rgba(var(--paper),0.85);
+  }
+  .a-ask-body { padding: 11px 13px; font-size: 12.5px; line-height: 1.6; color: rgba(var(--paper),0.88); }
+  .a-ask-foot { padding: 0 13px 11px; display: flex; gap: 6px; }
+
+  /* =========================================================
+     VARIANT B — 静霜 Quiet Frost
+     One row only. Meta on hover. Nearly invisible.
+     ========================================================= */
+
+  .b-glass {
+    background: rgba(6,8,11,0.42);
+    backdrop-filter: blur(34px) saturate(1.7);
+    -webkit-backdrop-filter: blur(34px) saturate(1.7);
+    border: 0.5px solid rgba(255,255,255,0.13);
+  }
+
+  .b-cap {
+    width: 460px; border-radius: 999px; padding: 9px 8px 9px 17px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .b-text {
+    font-size: 13.5px; font-weight: 450; color: rgba(255,255,255,0.93);
+    white-space: nowrap; overflow: hidden; flex: 1; letter-spacing: 0.2px;
+  }
+  .b-text.dim { color: rgba(255,255,255,0.42); }
+  .b-text.frozen { color: rgba(255,255,255,0.66); }
+
+  /* timer lives inline, right side — the only always-on metadata */
+  .b-time {
+    font-family: "SF Mono", ui-monospace, monospace; font-size: 10px;
+    color: rgba(255,255,255,0.34); flex: none; letter-spacing: 0.3px;
+  }
+
+  .b-ghost {
+    width: 22px; height: 22px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,0.4); cursor: pointer;
+    background: rgba(255,255,255,0.06);
+    transition: all 0.13s;
+  }
+  .b-ghost:hover { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.9); }
+  .b-ghost.primary { color: rgba(var(--signal-teal),0.85); background: rgba(var(--signal-teal),0.11); }
+  .b-ghost.primary:hover { background: rgba(var(--signal-teal),0.22); color: rgb(var(--signal-teal)); }
+  .b-ghost svg { width: 9px; height: 9px; }
+
+  /* hover-revealed meta */
+  .b-hoverwrap { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .b-hoverwrap .b-meta {
+    opacity: 0; transition: opacity 0.18s;
+    font-family: "SF Mono", ui-monospace, monospace; font-size: 9px;
+    color: rgba(255,255,255,0.36); letter-spacing: 0.3px;
+    display: flex; gap: 6px;
+  }
+  .b-hoverwrap:hover .b-meta { opacity: 1; }
+  .b-meta.forced { opacity: 1 !important; }
+
+  .b-deck {
+    height: 26px; border-radius: 9px;
+    display: flex; align-items: center; gap: 4px; padding: 3px 5px;
+  }
+  .b-key {
+    height: 20px; min-width: 34px; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center; padding: 0 8px;
+    font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.85);
+    background: rgba(255,255,255,0.08);
+  }
+  .b-key.mode { font-size: 10px; color: rgba(var(--signal-teal),0.95); background: rgba(var(--signal-teal),0.13); }
+  .b-key.gear { min-width: 22px; padding: 0; font-size: 10px; color: rgba(255,255,255,0.45); background: transparent; }
+
+  .b-top { width: 620px; border-radius: 14px; overflow: hidden; }
+  .b-top-head {
+    height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 14px;
+  }
+  .b-top-body { padding: 2px 14px 14px; font-size: 13px; line-height: 1.65; color: rgba(255,255,255,0.9); }
+  .b-top-body .tail { color: rgba(255,255,255,0.4); }
+
+  .b-bottom {
+    border-radius: 999px; padding: 8px 16px;
+    display: flex; align-items: center; gap: 10px;
+  }
+
+  .b-toast { border-radius: 999px; padding: 8px 15px; display: flex; align-items: center; gap: 9px;
+             font-size: 11.5px; color: rgba(255,255,255,0.9); }
+
+  .b-ask { width: 380px; border-radius: 14px; padding: 13px 15px; }
+
+  /* =========================================================
+     VARIANT C — 仪表 Instrument
+     Solid object. Level meter as the anchor. Edge rail = state.
+     ========================================================= */
+
+  .c-body {
+    background: linear-gradient(180deg, rgba(17,20,25,0.93) 0%, rgba(10,12,15,0.95) 100%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 0.5px solid rgba(255,255,255,0.09);
+  }
+
+  .c-cap {
+    width: 470px; border-radius: 9px; overflow: hidden;
+    display: flex; align-items: stretch; position: relative;
+  }
+  /* left level meter block */
+  .c-meter {
+    width: 42px; flex: none; display: flex; align-items: center; justify-content: center;
+    gap: 2.5px; border-right: 0.5px solid rgba(255,255,255,0.07);
+    background: rgba(0,0,0,0.22);
+  }
+  .c-meter i {
+    width: 2.5px; border-radius: 1.5px; background: rgb(var(--signal-teal));
+    animation: bounce 0.85s ease-in-out infinite;
+  }
+  .c-cap.working .c-meter i { background: rgb(var(--lamp-amber)); animation-duration: 1.6s; }
+  .c-cap.err .c-meter i { background: rgb(var(--hot-red)); animation: none; height: 4px; }
+  .c-cap.done .c-meter i { background: rgba(var(--signal-teal),0.85); animation: none; height: 4px; }
+  .c-cap.hint .c-meter i { background: rgba(255,255,255,0.28); animation-duration: 2.4s; }
+
+  .c-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .c-line1 {
+    display: flex; align-items: center; gap: 10px; padding: 8px 11px 6px;
+  }
+  .c-text {
+    font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.95);
+    white-space: nowrap; overflow: hidden; flex: 1; letter-spacing: 0.2px;
+  }
+  .c-text.dim { color: rgba(255,255,255,0.4); }
+  .c-text.frozen { color: rgba(255,255,255,0.66); }
+
+  .c-btn {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.4px;
+    padding: 3px 9px; border-radius: 5px; flex: none; cursor: pointer;
+    border: 0.5px solid rgba(255,255,255,0.15); color: rgba(255,255,255,0.6);
+    background: rgba(255,255,255,0.05);
+  }
+  .c-btn.primary {
+    color: #0b1416; background: rgb(var(--signal-teal)); border-color: transparent;
+  }
+
+  .c-line2 {
+    display: flex; align-items: center; gap: 6px; padding: 0 11px 7px;
+    font-family: "SF Mono", ui-monospace, monospace; font-size: 9px;
+    color: rgba(255,255,255,0.36); letter-spacing: 0.3px;
+  }
+  .c-line2 .sep { opacity: 0.35; }
+  .c-line2 .spacer { flex: 1; }
+
+  /* bottom rail = the state light */
+  .c-rail {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 1.5px;
+    background: rgba(255,255,255,0.06);
+  }
+  .c-rail i {
+    display: block; height: 100%; background: rgb(var(--signal-teal));
+    box-shadow: 0 0 8px rgba(var(--signal-teal),0.7);
+    animation: sweep 2.4s ease-in-out infinite;
+  }
+  .c-cap.working .c-rail i {
+    background: rgb(var(--lamp-amber)); box-shadow: 0 0 8px rgba(var(--lamp-amber),0.7);
+    animation: indeterminate 1.3s ease-in-out infinite;
+  }
+  .c-cap.done .c-rail i { background: rgb(var(--signal-teal)); width: 100% !important; animation: none; box-shadow: none; }
+  .c-cap.err .c-rail i { background: rgb(var(--hot-red)); width: 100% !important; animation: none; }
+  .c-cap.hint .c-rail i { background: rgba(255,255,255,0.2); width: 14% !important; animation: none; box-shadow: none; }
+
+  @keyframes sweep { 0%,100% { width: 22%; } 50% { width: 62%; } }
+  @keyframes indeterminate {
+    0% { margin-left: 0%; width: 24%; }
+    50% { margin-left: 60%; width: 34%; }
+    100% { margin-left: 0%; width: 24%; }
+  }
+
+  .c-deck {
+    height: 26px; border-radius: 7px;
+    display: flex; align-items: center; gap: 3px; padding: 3px 4px;
+  }
+  .c-key {
+    height: 20px; min-width: 34px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; padding: 0 8px;
+    font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.86);
+    background: rgba(255,255,255,0.07);
+    border-bottom: 1px solid rgba(0,0,0,0.5);
+  }
+  .c-key.mode {
+    font-size: 10px; color: #0b1416; background: rgb(var(--signal-teal)); border-bottom-color: rgba(0,0,0,0.35);
+  }
+  .c-key.gear { min-width: 22px; padding: 0; font-size: 10px; color: rgba(255,255,255,0.4); background: transparent; border: none; }
+
+  .c-top { width: 620px; border-radius: 10px; overflow: hidden; position: relative; }
+  .c-top-head {
+    height: 32px; display: flex; align-items: center; gap: 9px; padding: 0 12px;
+    background: rgba(0,0,0,0.25); border-bottom: 0.5px solid rgba(255,255,255,0.07);
+  }
+  .c-tag {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 6px; border-radius: 3px;
+    background: rgb(var(--signal-teal)); color: #0b1416;
+  }
+  .c-top-title { font-size: 11.5px; font-weight: 600; color: rgba(255,255,255,0.9); }
+  .c-top-body { padding: 11px 12px 13px; font-size: 13px; line-height: 1.62; color: rgba(255,255,255,0.93); }
+  .c-top-body .tail { color: rgba(255,255,255,0.4); }
+
+  .c-bottom { width: 132px; border-radius: 10px; padding: 12px; display: flex; flex-direction: column;
+              align-items: center; gap: 9px; position: relative; overflow: hidden; }
+  .c-bigmeter { display: flex; gap: 3px; align-items: flex-end; height: 30px; }
+  .c-bigmeter i { width: 3px; border-radius: 1.5px; background: rgb(var(--signal-teal)); animation: bounce 0.85s ease-in-out infinite; }
+
+  .c-toast { border-radius: 7px; padding: 9px 13px; display: flex; align-items: center; gap: 9px;
+             font-size: 11.5px; color: rgba(255,255,255,0.92); position: relative; overflow: hidden; }
+
+  .c-ask { width: 380px; border-radius: 10px; overflow: hidden; position: relative; }
+  .c-ask-head { padding: 8px 12px; background: rgba(0,0,0,0.25); display: flex; align-items: center; gap: 8px;
+                border-bottom: 0.5px solid rgba(255,255,255,0.07); }
+  .c-ask-body { padding: 11px 12px; font-size: 12.5px; line-height: 1.6; color: rgba(255,255,255,0.92); }
+  .c-ask-foot { padding: 0 12px 11px; display: flex; gap: 6px; }
+
+  /* ---- shared VU meter bridge (13pt scrolling tick strip) ---- */
+  .a-meterbridge, .b-meterbridge, .c-meterbridge {
+    height: 13px; display: flex; align-items: center; gap: 1.2px;
+    padding: 0 4px; background: rgba(0,0,0,0.22);
+    border-top: 0.5px solid rgba(255,255,255,0.08);
+    border-bottom: 0.5px solid rgba(255,255,255,0.08);
+    overflow: hidden;
+  }
+  .a-meterbridge span, .b-meterbridge span, .c-meterbridge span {
+    flex: 1; width: 1.8px; border-radius: 1px;
+    background: rgb(199,245,230);
+    animation: vu 1.1s ease-in-out infinite;
+  }
+  .a-meterbridge span:nth-child(2n)  { animation-delay: .13s; animation-duration: .8s; }
+  .a-meterbridge span:nth-child(3n)  { animation-delay: .27s; animation-duration: 1.4s; }
+  .a-meterbridge span:nth-child(5n)  { animation-delay: .41s; animation-duration: .95s; }
+  .b-meterbridge span:nth-child(2n)  { animation-delay: .13s; animation-duration: .8s; }
+  .b-meterbridge span:nth-child(3n)  { animation-delay: .27s; animation-duration: 1.4s; }
+  .b-meterbridge span:nth-child(5n)  { animation-delay: .41s; animation-duration: .95s; }
+  .c-meterbridge span:nth-child(2n)  { animation-delay: .13s; animation-duration: .8s; }
+  .c-meterbridge span:nth-child(3n)  { animation-delay: .27s; animation-duration: 1.4s; }
+  .c-meterbridge span:nth-child(5n)  { animation-delay: .41s; animation-duration: .95s; }
+  @keyframes vu {
+    0%,100% { height: 2px; opacity: 0.12; }
+    50%     { height: 11px; opacity: 0.78; }
+  }
+
+  /* ---- shared two-column body (RAW | EDIT), used by all three variants ---- */
+  .cols { display: flex; align-items: stretch; }
+  .col { display: flex; flex-direction: column; min-width: 0; }
+  .col.raw  { width: 45%; }
+  .col.edit { width: 55%; background: rgba(255,255,255,0.015); }
+  .coldiv { width: 1px; background: rgba(255,255,255,0.08); flex: none; }
+
+  .colhead {
+    height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+    border-bottom: 0.5px solid rgba(255,255,255,0.08); flex: none;
+  }
+  .colhead .t {
+    font-family: "SF Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 2.2px; color: rgba(255,255,255,0.34);
+  }
+  .colhead .m {
+    margin-left: auto; font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 8.5px; font-weight: 500; letter-spacing: 1px; color: rgba(255,255,255,0.34);
+  }
+  .led { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+  .led.ok   { background: rgb(var(--signal-teal)); box-shadow: 0 0 3px rgba(var(--signal-teal),0.8); }
+  .led.work { background: rgb(var(--lamp-amber));  box-shadow: 0 0 3px rgba(var(--lamp-amber),0.8);
+              animation: breathe 0.9s ease-in-out infinite; }
+  .coltext { padding: 6px 12px 9px; font-size: 13px; line-height: 1.62; }
+  .coltext.raw  { color: rgba(255,255,255,0.58); }
+  .coltext.edit { color: rgba(255,255,255,0.88); }
+  .coltext .tail { color: rgb(var(--lamp-amber)); opacity: 0.8; }
+
+  /* variant A repaints the shared columns in paper tones */
+  .a-top .colhead .t, .a-top .colhead .m { color: rgba(var(--paper),0.34); }
+  .a-top .coltext.raw  { color: rgba(var(--paper),0.60); }
+  .a-top .coltext.edit { color: rgba(var(--paper),0.88); }
+  .a-top .coldiv, .a-top .colhead { border-color: rgba(var(--paper),0.10); }
+  .a-top .coldiv { background: rgba(var(--paper),0.10); }
+
+  /* shared bits */
+  .teal { color: rgb(var(--signal-teal)); }
+  .amber { color: rgb(var(--lamp-amber)); }
+  .red { color: rgb(var(--hot-red)); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Type4Me 浮层重设计</h1>
+  <div class="tabs">
+    <button class="tab on" data-v="a">A · 墨玻璃</button>
+    <button class="tab" data-v="b">B · 静霜</button>
+    <button class="tab" data-v="c">C · 仪表</button>
+  </div>
+  <span class="hint">全部浮层同屏 · 无阴影 · 样式三固定 480 宽</span>
+</header>
+
+<div class="stage">
+<div class="wrap">
+
+  <!-- ============ 现状诊断 ============ -->
+  <div class="desk-note" style="border-color:rgba(255,109,92,0.3);background:rgba(255,109,92,0.05)">
+    <b style="color:rgb(255,140,125)">先看问题：现在同时跑着三套设计语言</b><br>
+    <span style="display:inline-block;margin-top:8px">
+      ① <b>墨玻璃</b>（顶部面板 / 底部灯）暖纸色文字 + 琥珀灯 ·
+      ② <b>霜面胶囊</b>（样式三 / 快捷条）纯白文字 + 青色 ·
+      ③ <b>浅色纸面</b>（划词问 860×760）不透明 <code>#F5F2ED</code>、圆角 28
+    </span>
+    <div style="display:flex;gap:14px;align-items:flex-end;margin-top:14px;flex-wrap:wrap">
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <span style="font-size:9px;text-transform:uppercase;letter-spacing:.4px;color:rgba(255,255,255,.3);font-weight:600">① 墨玻璃</span>
+        <div style="width:150px;height:34px;border-radius:13px;display:flex;align-items:center;gap:7px;padding:0 11px;
+                    background:linear-gradient(135deg,rgba(27,51,71,.82),rgba(13,26,36,.92),rgba(8,17,26,.96));
+                    border:1px solid rgba(235,228,212,.20)">
+          <span style="width:5px;height:5px;border-radius:50%;background:rgb(255,182,72)"></span>
+          <span style="font-family:'SF Mono',monospace;font-size:9px;letter-spacing:1.2px;color:rgba(242,236,223,.6)">REC 00:12</span>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <span style="font-size:9px;text-transform:uppercase;letter-spacing:.4px;color:rgba(255,255,255,.3);font-weight:600">② 霜面 + IME 绿</span>
+        <div style="width:150px;height:34px;border-radius:999px;display:flex;align-items:center;gap:7px;padding:0 12px;
+                    background:rgba(6,8,11,.44);backdrop-filter:blur(22px);
+                    border:.5px solid rgba(255,255,255,.16)">
+          <span style="width:6px;height:6px;border-radius:50%;background:rgb(97,217,194)"></span>
+          <span style="font-size:11px;color:rgb(126,242,20)">转写文字</span>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <span style="font-size:9px;text-transform:uppercase;letter-spacing:.4px;color:rgba(255,255,255,.3);font-weight:600">③ 浅色纸面</span>
+        <div style="width:150px;height:34px;border-radius:14px;display:flex;align-items:center;gap:7px;padding:0 12px;
+                    background:#F5F2ED">
+          <span style="font-size:12px;color:#141414">✦</span>
+          <span style="font-size:12px;font-weight:600;color:#141414">随便问</span>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:14px;font-size:11.5px;color:rgba(255,255,255,.48);line-height:1.7">
+      还有三个 teal 字面量（<code>#5FD3C0</code> / <code>#61D9C2</code>×2 / <code>#7EF214</code>）、两个 amber（<code>#FFB648</code> / <code>#FFBD57</code>）、
+      描边 1px 与 0.5px 各半、圆角 28/20/14/13/9/5 六种、顶部面板是深色家族里唯一带投影的。
+      <b>三版方案都先把这些收成一套。</b>
+    </div>
+  </div>
+
+  <!-- ============ VARIANT A ============ -->
+  <div class="variant on" id="v-a">
+
+    <div class="desk-note">
+      <b>A · 墨玻璃（Ink Glass）</b> — 把已有的 Signal Desk 墨青玻璃拉通到全部六个浮层。
+      深墨青底 <code>ink0–ink2</code> + 暖纸色文字 <code>paper #F2ECDF</code>，青色做活体、琥珀做处理中。
+      底部亮绿 IME 语言删除。<br>
+      <b>取舍</b>：最暖、最像一件成套的硬件；代价是比现在更"有色"，不如纯霜面那么隐形。
+      样式三保留两行（胶囊 + meta 条），但 meta 条改成与胶囊等宽的整合底栏，取消/完成钉在两端 —— 不再是三个漂浮物件。<br>
+      <span style="color:rgba(255,140,125,.9)">⚠ 划词问从 860×760 浅色纸面改成同族深色玻璃</span>，这是三版共同的最大改动。
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">样式三 · 悬浮胶囊</span><span class="d">480 × 55</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">录音中</span>
+          <div class="a-stack">
+            <div class="a-cap a-glass">
+              <span class="dot"></span>
+              <span class="a-text">这段是正在识别出来的文字，尾随打字机浮现</span>
+            </div>
+            <div class="a-meta a-glass">
+              <span class="a-pill"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5"/></svg>取消</span>
+              <span class="info">
+                <span>MacBook 麦克风</span><span class="sep">·</span><span>智能直出</span><span class="sep">·</span>
+                <span>24字</span><span class="sep">·</span><span>0:12</span><span class="sep">·</span><span>142字/分</span>
+              </span>
+              <span class="a-pill primary"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.2 4.2l2 2 3.6-4"/></svg>完成</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">待命</span>
+          <div class="a-stack">
+            <div class="a-cap a-glass hint">
+              <span class="dot"></span>
+              <span class="a-text dim">正在聆听…</span>
+            </div>
+            <div class="a-meta a-glass">
+              <span class="a-pill"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5"/></svg>取消</span>
+              <span class="info"><span>MacBook 麦克风</span><span class="sep">·</span><span>智能直出</span><span class="sep">·</span><span>0字</span></span>
+              <span class="a-pill primary"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.2 4.2l2 2 3.6-4"/></svg>完成</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">处理中（按钮消失）</span>
+          <div class="a-stack">
+            <div class="a-cap a-glass working">
+              <span class="dot"></span>
+              <span class="a-text frozen">这段是正在识别出来的文字，尾随打字机浮现</span>
+            </div>
+            <div class="a-meta a-glass">
+              <span class="info">
+                <span>MacBook 麦克风</span><span class="sep">·</span><span class="amber">润色中</span><span class="sep">·</span>
+                <span>24字</span><span class="sep">·</span><span>0:14</span><span class="sep">·</span><span>142字/分</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">失败</span>
+          <div class="a-stack">
+            <div class="a-cap a-glass err">
+              <span class="dot"></span>
+              <span class="a-text frozen">优化失败，已插入原始转写</span>
+            </div>
+            <div class="a-meta a-glass">
+              <span class="info"><span class="red">网络错误</span><span class="sep">·</span><span>24字</span><span class="sep">·</span><span>0:14</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">悬浮快捷横条</span><span class="d">h 26 · 键 20</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">默认</span>
+          <div class="a-deck a-glass">
+            <span class="a-key">↵</span><span class="a-key">fn</span>
+            <span class="a-key mode">智能直出</span><span class="a-key gear">⚙</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">满格</span>
+          <div class="a-deck a-glass">
+            <span class="a-key">↵</span><span class="a-key">fn</span><span class="a-key">Esc</span>
+            <span class="a-key">⌘V</span><span class="a-key mode">正式书面</span><span class="a-key gear">⚙</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">顶部转写面板</span><span class="d">展开 / 折叠</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">展开 · 录音中</span>
+          <div class="a-top a-glass" style="width:720px">
+            <div class="a-top-head">
+              <span class="dot"></span>
+              <span class="a-top-title">录音</span>
+              <span style="font-family:'SF Mono',monospace;font-size:10px;color:rgba(var(--paper),0.9)">00:12</span>
+              <span class="a-top-badge">智能直出</span>
+              <span style="font-family:'SF Mono',monospace;font-size:9.5px;color:rgba(var(--paper),0.34)">🎙 MacBook 麦克风</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:5px;font-family:'SF Mono',monospace;font-size:9.5px;color:rgba(var(--lamp-amber),0.9)">
+                <span class="led work"></span>deepseek / v3<span style="opacity:.6">1.24s</span>
+              </span>
+              <span class="a-pill" style="padding:0;width:22px;height:22px;justify-content:center;border-radius:5px">▾</span>
+            </div>
+            <div class="a-meterbridge">
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="cols">
+              <div class="col raw">
+                <div class="colhead"><span class="led work"></span><span class="t">原文</span><span class="m">累计稿 · 识别中 · R7</span></div>
+                <div class="coltext raw">这是一段较长的转写正文，展示双栏面板左侧原文的行高与文字色。<span class="tail">后面这段还在识别…</span></div>
+              </div>
+              <div class="coldiv"></div>
+              <div class="col edit">
+                <div class="colhead"><span class="led ok"></span><span class="t">优化稿</span><span class="m">已优化 · R6</span></div>
+                <div class="coltext edit">这是一段较长的转写正文，用于展示双栏面板右侧优化稿的行高与文字色。</div>
+              </div>
+            </div>
+            <div class="a-top-foot">
+              <span class="a-pill"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5"/></svg>取消</span>
+              <span class="a-pill primary"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.2 4.2l2 2 3.6-4"/></svg>完成并插入</span>
+            </div>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">折叠</span>
+          <div class="a-top a-glass" style="width:380px">
+            <div class="a-top-head" style="border:none">
+              <span class="dot"></span>
+              <span class="a-top-title" style="font-size:11px;font-weight:500;opacity:.85">正在聆听 · 24字</span>
+              <span class="a-top-meter" style="margin-left:auto"><i style="animation-delay:0s"></i><i style="animation-delay:.1s"></i><i style="animation-delay:.2s"></i><i style="animation-delay:.15s"></i><i style="animation-delay:.05s"></i></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">底部指示器 · toast · 划词问</span><span class="d">样式二 / 零散浮层</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">底部指示器 · 录音</span>
+          <div class="a-bottom a-glass">
+            <div class="a-lamp live"></div>
+            <div class="a-bars"><i style="animation-delay:0s"></i><i style="animation-delay:.1s"></i><i style="animation-delay:.2s"></i><i style="animation-delay:.15s"></i><i style="animation-delay:.05s"></i><i style="animation-delay:.22s"></i><i style="animation-delay:.08s"></i></div>
+            <span class="lbl">正在聆听</span>
+            <span class="tm">0:12 · 24字</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">底部指示器 · 处理</span>
+          <div class="a-bottom a-glass">
+            <div class="a-lamp"></div>
+            <div class="a-bars" style="opacity:.35"><i style="animation-delay:0s"></i><i style="animation-delay:.1s"></i><i style="animation-delay:.2s"></i><i style="animation-delay:.15s"></i><i style="animation-delay:.05s"></i><i style="animation-delay:.22s"></i><i style="animation-delay:.08s"></i></div>
+            <span class="lbl amber">润色中</span>
+            <span class="tm">0:14 · 24字</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">耳机键 toast</span>
+          <div class="a-toast a-glass">
+            <span class="dot"></span><span>耳机键已触发 · 开始录音</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">划词提问</span>
+          <div class="a-ask a-glass">
+            <div class="a-ask-head"><span class="teal">✦</span><span>划词提问</span>
+              <span style="margin-left:auto;font-weight:400;opacity:.45;font-size:10px">GPT-4o</span></div>
+            <div class="a-ask-body">这段代码的作用是把绝对坐标换算成相对屏幕的锚点，这样换显示器时位置能等比还原。</div>
+            <div class="a-ask-foot">
+              <span class="a-pill">复制</span><span class="a-pill">替换选区</span><span class="a-pill primary">追问</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ VARIANT B ============ -->
+  <div class="variant" id="v-b">
+
+    <div class="desk-note">
+      <b>B · 静霜（Quiet Frost）</b> — 走到极简：<b>样式三砍成一行</b>，meta 条默认不存在，鼠标悬停才浮现。
+      玻璃更透（黑罩 0.42 + 34px 模糊），壁纸颜色透上来，浮层几乎隐形。取消/完成收成两个 22pt 幽灵圆钮，
+      长年只显示一个计时器。<br>
+      <b>取舍</b>：最不打扰、最像系统原生；代价是 meta 信息（设备/模式/字数/语速）默认看不见 —— 如果你经常瞄那行数据，这版会难受。
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">样式三 · 悬浮胶囊</span><span class="d">460 × 40（单行）</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">录音中（悬停看 meta ↓）</span>
+          <div class="b-hoverwrap">
+            <div class="b-cap b-glass">
+              <span class="dot"></span>
+              <span class="b-text">这段是正在识别出来的文字，尾随打字机浮现</span>
+              <span class="b-time">0:12</span>
+              <span class="b-ghost"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5"/></svg></span>
+              <span class="b-ghost primary"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.2 4.2l2 2 3.6-4"/></svg></span>
+            </div>
+            <div class="b-meta"><span>MacBook 麦克风</span><span>·</span><span>智能直出</span><span>·</span><span>24字</span><span>·</span><span>142字/分</span></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">待命</span>
+          <div class="b-hoverwrap">
+            <div class="b-cap b-glass hint">
+              <span class="dot"></span>
+              <span class="b-text dim">正在聆听…</span>
+              <span class="b-time">0:00</span>
+              <span class="b-ghost"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5"/></svg></span>
+              <span class="b-ghost primary"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.2 4.2l2 2 3.6-4"/></svg></span>
+            </div>
+            <div class="b-meta"><span>MacBook 麦克风</span><span>·</span><span>智能直出</span></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">处理中</span>
+          <div class="b-hoverwrap">
+            <div class="b-cap b-glass working" style="padding-right:17px">
+              <span class="dot"></span>
+              <span class="b-text frozen">这段是正在识别出来的文字，尾随打字机浮现</span>
+              <span class="b-time amber">润色中</span>
+            </div>
+            <div class="b-meta forced"><span>24字</span><span>·</span><span>0:14</span><span>·</span><span>142字/分</span></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">失败</span>
+          <div class="b-hoverwrap">
+            <div class="b-cap b-glass err" style="padding-right:17px">
+              <span class="dot"></span>
+              <span class="b-text frozen">优化失败，已插入原始转写</span>
+              <span class="b-time red">重试</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">悬浮快捷横条</span><span class="d">h 26 · 无描边键</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">默认</span>
+          <div class="b-deck b-glass">
+            <span class="b-key">↵</span><span class="b-key">fn</span>
+            <span class="b-key mode">智能直出</span><span class="b-key gear">⚙</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">满格</span>
+          <div class="b-deck b-glass">
+            <span class="b-key">↵</span><span class="b-key">fn</span><span class="b-key">Esc</span>
+            <span class="b-key">⌘V</span><span class="b-key mode">正式书面</span><span class="b-key gear">⚙</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">顶部转写面板</span><span class="d">展开 / 折叠</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">展开 · 录音中</span>
+          <div class="b-top b-glass" style="width:720px">
+            <div class="b-top-head">
+              <span class="dot"></span>
+              <span style="font-size:11.5px;font-weight:600;color:rgba(255,255,255,.9)">录音</span>
+              <span style="font-family:'SF Mono',monospace;font-size:10.5px;color:rgba(255,255,255,.9)">00:12</span>
+              <span style="font-size:10px;color:rgba(255,255,255,.4)">智能直出</span>
+              <span style="font-family:'SF Mono',monospace;font-size:9.5px;color:rgba(255,255,255,.3)">MacBook 麦克风</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:5px;font-family:'SF Mono',monospace;font-size:9.5px;color:rgba(255,182,72,.85)">
+                <span class="led work"></span>deepseek / v3
+              </span>
+              <span class="b-ghost"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5"/></svg></span>
+              <span class="b-ghost primary"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.2 4.2l2 2 3.6-4"/></svg></span>
+            </div>
+            <div class="b-meterbridge">
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="cols">
+              <div class="col raw">
+                <div class="colhead"><span class="led work"></span><span class="t">原文</span><span class="m">识别中 · R7</span></div>
+                <div class="coltext raw">这是一段较长的转写正文，展示双栏面板左侧原文的行高与文字色。<span class="tail">还在识别…</span></div>
+              </div>
+              <div class="coldiv"></div>
+              <div class="col edit">
+                <div class="colhead"><span class="led ok"></span><span class="t">优化稿</span><span class="m">已优化 · R6</span></div>
+                <div class="coltext edit">这是一段较长的转写正文，用于展示双栏面板右侧优化稿的行高与文字色。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">折叠</span>
+          <div class="b-top b-glass" style="width:380px">
+            <div class="b-top-head">
+              <span class="dot"></span>
+              <span style="font-size:11px;color:rgba(255,255,255,.82)">正在聆听 · 24字</span>
+              <span style="margin-left:auto;font-family:'SF Mono',monospace;font-size:10px;color:rgba(255,255,255,.34)">0:12</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">底部指示器 · toast · 划词问</span><span class="d">统一成药丸</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">底部指示器 · 录音</span>
+          <div class="b-bottom b-glass">
+            <span class="dot"></span>
+            <span style="display:flex;gap:2.5px;align-items:flex-end;height:14px">
+              <i style="width:2.5px;border-radius:1.5px;background:rgba(255,255,255,.75);animation:bounce .85s ease-in-out infinite"></i>
+              <i style="width:2.5px;border-radius:1.5px;background:rgba(255,255,255,.75);animation:bounce .85s ease-in-out .1s infinite"></i>
+              <i style="width:2.5px;border-radius:1.5px;background:rgba(255,255,255,.75);animation:bounce .85s ease-in-out .2s infinite"></i>
+              <i style="width:2.5px;border-radius:1.5px;background:rgba(255,255,255,.75);animation:bounce .85s ease-in-out .15s infinite"></i>
+              <i style="width:2.5px;border-radius:1.5px;background:rgba(255,255,255,.75);animation:bounce .85s ease-in-out .05s infinite"></i>
+            </span>
+            <span style="font-size:11.5px;color:rgba(255,255,255,.88)">正在聆听</span>
+            <span style="font-family:'SF Mono',monospace;font-size:10px;color:rgba(255,255,255,.34)">0:12</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">底部指示器 · 处理</span>
+          <div class="b-bottom b-glass working">
+            <span class="dot"></span>
+            <span style="font-size:11.5px;color:rgba(255,255,255,.7)">润色中</span>
+            <span style="font-family:'SF Mono',monospace;font-size:10px;color:rgba(255,255,255,.34)">0:14 · 24字</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">耳机键 toast</span>
+          <div class="b-toast b-glass"><span class="dot"></span><span>耳机键已触发 · 开始录音</span></div>
+        </div>
+        <div class="specimen">
+          <span class="cap">划词提问</span>
+          <div class="b-ask b-glass">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px">
+              <span class="teal" style="font-size:11px">✦</span>
+              <span style="font-size:11px;font-weight:600">划词提问</span>
+              <span style="margin-left:auto;font-size:10px;color:rgba(255,255,255,.35)">GPT-4o</span>
+            </div>
+            <div style="font-size:12.5px;line-height:1.6;color:rgba(255,255,255,.9);margin-bottom:11px">
+              这段代码的作用是把绝对坐标换算成相对屏幕的锚点，这样换显示器时位置能等比还原。
+            </div>
+            <div style="display:flex;gap:6px">
+              <span class="b-key" style="font-size:10px;font-weight:500">复制</span>
+              <span class="b-key" style="font-size:10px;font-weight:500">替换选区</span>
+              <span class="b-key mode" style="font-size:10px;font-weight:500">追问</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ VARIANT C ============ -->
+  <div class="variant" id="v-c">
+
+    <div class="desk-note">
+      <b>C · 仪表（Instrument）</b> — 不装隐形，做成一件<b>实体设备</b>：不透明度拉到 0.93、圆角收到 9px（不再是全圆药丸）。
+      左侧固定一个<b>实时电平表</b>当锚点（呼吸点升级成会跳的表），底边一条 1.5px <b>状态轨</b>取代所有状态文案 ——
+      青色扫动=聆听、琥珀不定式=处理、满格=完成、红=错误。meta 收进第二行，不再是独立浮块。<br>
+      <b>取舍</b>：最有存在感、状态一眼可辨、电平表让"它在听"有物理反馈；代价是最"重"，壁纸完全被挡住，也最不 macOS 原生。
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">样式三 · 悬浮胶囊</span><span class="d">470 × 52（单块）</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">录音中</span>
+          <div class="c-cap c-body">
+            <div class="c-meter">
+              <i style="height:6px;animation-delay:0s"></i><i style="height:12px;animation-delay:.1s"></i>
+              <i style="height:8px;animation-delay:.2s"></i><i style="height:14px;animation-delay:.05s"></i>
+              <i style="height:7px;animation-delay:.15s"></i>
+            </div>
+            <div class="c-main">
+              <div class="c-line1">
+                <span class="c-text">这段是正在识别出来的文字，尾随打字机浮现</span>
+                <span class="c-btn">取消</span><span class="c-btn primary">完成</span>
+              </div>
+              <div class="c-line2">
+                <span>MacBook 麦克风</span><span class="sep">·</span><span>智能直出</span>
+                <span class="spacer"></span>
+                <span>24字</span><span class="sep">·</span><span>142字/分</span><span class="sep">·</span><span>0:12</span>
+              </div>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">待命</span>
+          <div class="c-cap c-body hint">
+            <div class="c-meter">
+              <i style="height:4px"></i><i style="height:4px"></i><i style="height:4px"></i><i style="height:4px"></i><i style="height:4px"></i>
+            </div>
+            <div class="c-main">
+              <div class="c-line1">
+                <span class="c-text dim">正在聆听…</span>
+                <span class="c-btn">取消</span><span class="c-btn primary">完成</span>
+              </div>
+              <div class="c-line2">
+                <span>MacBook 麦克风</span><span class="sep">·</span><span>智能直出</span>
+                <span class="spacer"></span><span>0字</span><span class="sep">·</span><span>0:00</span>
+              </div>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">处理中（轨道跑不定式）</span>
+          <div class="c-cap c-body working">
+            <div class="c-meter">
+              <i style="height:5px;animation-delay:0s"></i><i style="height:8px;animation-delay:.2s"></i>
+              <i style="height:6px;animation-delay:.4s"></i><i style="height:9px;animation-delay:.1s"></i>
+              <i style="height:5px;animation-delay:.3s"></i>
+            </div>
+            <div class="c-main">
+              <div class="c-line1"><span class="c-text frozen">这段是正在识别出来的文字，尾随打字机浮现</span></div>
+              <div class="c-line2">
+                <span class="amber">润色中</span><span class="sep">·</span><span>智能直出</span>
+                <span class="spacer"></span><span>24字</span><span class="sep">·</span><span>0:14</span>
+              </div>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">失败</span>
+          <div class="c-cap c-body err">
+            <div class="c-meter"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="c-main">
+              <div class="c-line1">
+                <span class="c-text frozen">优化失败，已插入原始转写</span>
+                <span class="c-btn">重试</span>
+              </div>
+              <div class="c-line2"><span class="red">网络错误</span><span class="spacer"></span><span>24字 · 0:14</span></div>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+
+        <div class="specimen">
+          <span class="cap">完成（轨道满格）</span>
+          <div class="c-cap c-body done">
+            <div class="c-meter"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="c-main">
+              <div class="c-line1"><span class="c-text">已插入 · 这段是正在识别出来的文字</span></div>
+              <div class="c-line2"><span class="teal">已完成</span><span class="spacer"></span><span>24字 · 0:14</span></div>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">悬浮快捷横条</span><span class="d">h 26 · 键帽有下沿</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">默认</span>
+          <div class="c-deck c-body">
+            <span class="c-key">↵</span><span class="c-key">fn</span>
+            <span class="c-key mode">智能直出</span><span class="c-key gear">⚙</span>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">满格</span>
+          <div class="c-deck c-body">
+            <span class="c-key">↵</span><span class="c-key">fn</span><span class="c-key">Esc</span>
+            <span class="c-key">⌘V</span><span class="c-key mode">正式书面</span><span class="c-key gear">⚙</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">顶部转写面板</span><span class="d">展开 / 折叠</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">展开 · 录音中</span>
+          <div class="c-top c-body" style="width:720px">
+            <div class="c-top-head">
+              <span class="c-tag">REC</span>
+              <span style="font-family:'SF Mono',monospace;font-size:10.5px;font-weight:600;color:rgba(255,255,255,.92)">00:12</span>
+              <span class="c-top-title" style="font-size:10.5px;font-weight:500;opacity:.75">智能直出</span>
+              <span style="font-family:'SF Mono',monospace;font-size:9.5px;color:rgba(255,255,255,.32)">MacBook 麦克风</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:5px;font-family:'SF Mono',monospace;font-size:9.5px;color:rgba(255,182,72,.9)">
+                <span class="led work"></span>deepseek / v3<span style="opacity:.6">1.24s</span>
+              </span>
+              <span class="c-btn">取消</span><span class="c-btn primary">完成并插入</span>
+            </div>
+            <div class="c-meterbridge">
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="cols">
+              <div class="col raw">
+                <div class="colhead"><span class="led work"></span><span class="t">原文</span><span class="m">识别中 · R7</span></div>
+                <div class="coltext raw">这是一段较长的转写正文，展示双栏面板左侧原文的行高与文字色。<span class="tail">还在识别…</span></div>
+              </div>
+              <div class="coldiv"></div>
+              <div class="col edit">
+                <div class="colhead"><span class="led ok"></span><span class="t">优化稿</span><span class="m">已优化 · R6</span></div>
+                <div class="coltext edit">这是一段较长的转写正文，用于展示双栏面板右侧优化稿的行高与文字色。</div>
+              </div>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">折叠</span>
+          <div class="c-top c-body" style="width:380px">
+            <div class="c-top-head" style="border:none">
+              <span class="c-tag">REC</span>
+              <span style="font-size:11px;color:rgba(255,255,255,.85)">正在聆听 · 24字</span>
+              <span style="margin-left:auto;font-family:'SF Mono',monospace;font-size:10px;color:rgba(255,255,255,.36)">0:12</span>
+            </div>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span class="n">底部指示器 · toast · 划词问</span><span class="d">同一块材质 + 状态轨</span></div>
+      <div class="specimens">
+        <div class="specimen">
+          <span class="cap">底部指示器 · 录音</span>
+          <div class="c-bottom c-body">
+            <div class="c-bigmeter">
+              <i style="height:10px;animation-delay:0s"></i><i style="height:22px;animation-delay:.1s"></i>
+              <i style="height:14px;animation-delay:.2s"></i><i style="height:28px;animation-delay:.05s"></i>
+              <i style="height:16px;animation-delay:.15s"></i><i style="height:24px;animation-delay:.25s"></i>
+              <i style="height:11px;animation-delay:.08s"></i>
+            </div>
+            <span style="font-size:10.5px;font-weight:700;letter-spacing:.4px;color:rgba(255,255,255,.86)">正在聆听</span>
+            <span style="font-family:'SF Mono',monospace;font-size:9px;color:rgba(255,255,255,.36)">0:12 · 24字</span>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">底部指示器 · 处理</span>
+          <div class="c-bottom c-body working">
+            <div class="c-bigmeter" style="opacity:.5">
+              <i style="height:8px;background:rgb(255,182,72);animation-delay:0s"></i><i style="height:12px;background:rgb(255,182,72);animation-delay:.2s"></i>
+              <i style="height:9px;background:rgb(255,182,72);animation-delay:.4s"></i><i style="height:14px;background:rgb(255,182,72);animation-delay:.1s"></i>
+              <i style="height:10px;background:rgb(255,182,72);animation-delay:.3s"></i><i style="height:12px;background:rgb(255,182,72);animation-delay:.15s"></i>
+              <i style="height:8px;background:rgb(255,182,72);animation-delay:.35s"></i>
+            </div>
+            <span class="amber" style="font-size:10.5px;font-weight:700;letter-spacing:.4px">润色中</span>
+            <span style="font-family:'SF Mono',monospace;font-size:9px;color:rgba(255,255,255,.36)">0:14 · 24字</span>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">耳机键 toast</span>
+          <div class="c-toast c-body">
+            <span class="c-tag">REC</span><span>耳机键已触发 · 开始录音</span>
+            <div class="c-rail"><i></i></div>
+          </div>
+        </div>
+        <div class="specimen">
+          <span class="cap">划词提问</span>
+          <div class="c-ask c-body">
+            <div class="c-ask-head">
+              <span class="c-tag" style="background:rgb(255,182,72)">ASK</span>
+              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,.9)">划词提问</span>
+              <span style="margin-left:auto;font-size:10px;color:rgba(255,255,255,.35)">GPT-4o</span>
+            </div>
+            <div class="c-ask-body">这段代码的作用是把绝对坐标换算成相对屏幕的锚点，这样换显示器时位置能等比还原。</div>
+            <div class="c-ask-foot">
+              <span class="c-btn">复制</span><span class="c-btn">替换选区</span><span class="c-btn primary">追问</span>
+            </div>
+            <div class="c-rail"><i style="width:100%;animation:none;background:rgb(255,182,72);box-shadow:none"></i></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+  document.querySelectorAll('.tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('on'); });
+      document.querySelectorAll('.variant').forEach(function (v) { v.classList.remove('on'); });
+      tab.classList.add('on');
+      document.getElementById('v-' + tab.dataset.v).classList.add('on');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+</script>
+
+</body>
+</html>

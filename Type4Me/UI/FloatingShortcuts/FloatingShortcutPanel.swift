@@ -248,9 +248,15 @@ private final class FloatingShortcutPanel: NSPanel {
 // MARK: - Style
 
 private enum FloatingShortcutDeckStyle {
-  static let accent = Color(red: 0.38, green: 0.85, blue: 0.76)
-  static let latch = Color(red: 1.00, green: 0.74, blue: 0.34)
+  /// Forwards into the shared palette. Both used to be hand-written literals
+  /// (#61D9C2 / #FFBD57) a hair off the tokens, which read as two slightly
+  /// different greens once the deck and the capsule were onscreen together.
+  static var accent: Color { TF.signalTeal }
+  static var latch: Color { TF.lampAmber }
   static let keyHeight: CGFloat = 20
+  /// Deliberately off the shared radius ramp. The deck is 26pt tall, so
+  /// `TF.frostPanel` (12) would round it into a near-pill; 9/5 are the
+  /// settled proportions for a control strip rather than a text surface.
   static let deckCornerRadius: CGFloat = 9
   static let keyCornerRadius: CGFloat = 5
   static let settingsCellWidth: CGFloat = 24
@@ -337,8 +343,8 @@ private struct FloatingShortcutPanelView: View {
         .frame(width: 5, height: 5)
         .shadow(color: FloatingShortcutDeckStyle.accent.opacity(0.8), radius: 3)
       Text(state.currentMode.name)
-        .font(.system(size: 10, weight: .semibold, design: .rounded))
-        .foregroundStyle(.white.opacity(0.88))
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(TF.frostText)
         .lineLimit(1)
         .truncationMode(.tail)
     }
@@ -375,7 +381,7 @@ private struct FloatingShortcutPanelView: View {
   private var settingsCell: some View {
     Image(systemName: "gearshape.fill")
       .font(.system(size: 10, weight: .semibold))
-      .foregroundStyle(.white.opacity(0.55))
+      .foregroundStyle(TF.frostTextDim)
       .frame(
         width: FloatingShortcutDeckStyle.settingsCellWidth,
         height: FloatingShortcutDeckStyle.keyHeight
@@ -384,13 +390,13 @@ private struct FloatingShortcutPanelView: View {
         RoundedRectangle(
           cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
         )
-        .fill(.white.opacity(0.06))
+        .fill(TF.frostWell)
       )
       .overlay(
         RoundedRectangle(
           cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
         )
-        .strokeBorder(.white.opacity(0.10), lineWidth: 0.5)
+        .strokeBorder(TF.frostBorder, lineWidth: TF.frostBorderWidth)
       )
       .overlay {
         DeckClickButton(
@@ -406,41 +412,10 @@ private struct FloatingShortcutPanelView: View {
     @ViewBuilder content: () -> Content
   ) -> some View {
     content()
-      .background {
+      .frostSurface(
         RoundedRectangle(
           cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
           style: .continuous
-        )
-        .fill(.ultraThinMaterial)
-        .overlay(
-          // Same frosted-glass + dark-tint recipe as the transcript capsule:
-          // lighter than the old near-black plate, and the two floating
-          // surfaces now share one material language.
-          RoundedRectangle(
-            cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
-            style: .continuous
-          )
-          .fill(
-            LinearGradient(
-              colors: [.black.opacity(0.38), .black.opacity(0.50)],
-              startPoint: .top,
-              endPoint: .bottom
-            )
-          )
-        )
-      }
-      .overlay(
-        RoundedRectangle(
-          cornerRadius: FloatingShortcutDeckStyle.deckCornerRadius,
-          style: .continuous
-        )
-        .strokeBorder(
-          LinearGradient(
-            colors: [.white.opacity(0.16), .white.opacity(0.05)],
-            startPoint: .top,
-            endPoint: .bottom
-          ),
-          lineWidth: 0.5
         )
       )
   }
@@ -486,21 +461,24 @@ private struct FloatingShortcutKeyButton: View {
     if pressState.isActive { return accent.opacity(0.16) }
     // Keys sit on a frosted-glass plate now (lighter than the old near-black
     // one), so the idle fill gets a bit more body to stay defined.
-    return .white.opacity(isHovered ? 0.12 : 0.08)
+    return isHovered ? Color.white.opacity(0.12) : TF.frostWellRaised
   }
 
   private var glyphColor: Color {
     if pressState.isActive { return accent }
-    return .white.opacity(isHovered ? 0.95 : 0.80)
+    return TF.frostText
   }
 
-  private var edgeGradient: LinearGradient {
-    LinearGradient(
-      colors: pressState.isActive
-        ? [accent.opacity(0.55), accent.opacity(0.22)]
-        : [.white.opacity(0.14), .white.opacity(0.05)],
-      startPoint: .top,
-      endPoint: .bottom
+  /// Pressed keys keep the accent-lit bevel; idle keys share the one hairline
+  /// every other frost surface draws.
+  private var edgeStyle: AnyShapeStyle {
+    guard pressState.isActive else { return AnyShapeStyle(TF.frostBorder) }
+    return AnyShapeStyle(
+      LinearGradient(
+        colors: [accent.opacity(0.55), accent.opacity(0.22)],
+        startPoint: .top,
+        endPoint: .bottom
+      )
     )
   }
 
@@ -509,8 +487,7 @@ private struct FloatingShortcutKeyButton: View {
       .font(
         .system(
           size: button.compactKeyLabel.count > 3 ? 9 : 11,
-          weight: .semibold,
-          design: .rounded
+          weight: .semibold
         )
       )
       .foregroundStyle(glyphColor)
@@ -530,7 +507,7 @@ private struct FloatingShortcutKeyButton: View {
           cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius,
           style: .continuous
         )
-        .strokeBorder(edgeGradient, lineWidth: 0.5)
+        .strokeBorder(edgeStyle, lineWidth: TF.frostBorderWidth)
       )
       .shadow(color: pressState.isActive ? accent.opacity(0.35) : .clear, radius: 8)
       .scaleEffect(pressState.isActive ? 0.94 : 1)

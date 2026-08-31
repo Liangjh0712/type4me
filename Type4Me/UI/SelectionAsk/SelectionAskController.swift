@@ -138,6 +138,10 @@ final class SelectionAskPanel: NSPanel {
         hidesOnDeactivate = false
         animationBehavior = .utilityWindow
         isMovableByWindowBackground = true
+        // Quiet Frost: the sheet is dark frosted glass now, like the other
+        // five overlays. It used to stay in the system appearance because it
+        // was the one light warm-paper surface.
+        appearance = NSAppearance(named: .darkAqua)
     }
 
     override var canBecomeKey: Bool { true }
@@ -154,7 +158,7 @@ final class SelectionAskController {
 
     init(onFollowUp: @escaping (String) -> Bool = { _ in false }) {
         self.onFollowUp = onFollowUp
-        let size = NSSize(width: 860, height: 760)
+        let size = NSSize(width: 720, height: 620)
         panel = SelectionAskPanel(contentRect: NSRect(origin: .zero, size: size))
 
         let view = SelectionAskView(state: state) { [weak self] in

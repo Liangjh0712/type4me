@@ -3,22 +3,22 @@ import SwiftUI
 /// Layout constants (module-level: generic types can't have static stored properties).
 enum CursorOverlayMetrics {
   /// Fixed text-capsule width. Never grows with the transcript (a moving
-  /// frame edge makes the reader's gaze drift); 480 leaves ~30 CJK chars
+  /// frame edge makes the reader's gaze drift); 460 leaves ~28 CJK chars
   /// visible before head-truncation.
-  static let capsuleWidth: CGFloat = 480
-  /// Whole panel == capsule width: the action pills live in the meta row,
-  /// pinned to its left/right edges, so nothing sticks out sideways.
+  static let capsuleWidth: CGFloat = 460
+  /// Whole panel == capsule width: the hover meta strip is narrower and
+  /// centered underneath, so nothing ever sticks out sideways.
   static var panelWidth: CGFloat { capsuleWidth }
-  /// Text cap inside the capsule (padding + dot + slack).
-  static let textMaxWidth: CGFloat = 436
+  /// Text cap inside the capsule (padding + dot + timer + two ghost buttons).
+  static let textMaxWidth: CGFloat = 320
   /// Per-item cap for the secondary cluster (device / mode names).
   static let secondaryItemMaxWidth: CGFloat = 90
   /// Item separator in the secondary cluster.
   static let secondarySeparator = "·"
-  /// Backlit accent for live state, shared with the shortcut deck.
-  static let liveTeal = Color(red: 0.38, green: 0.85, blue: 0.76)
+  /// Backlit accent for live state, shared with every other overlay.
+  static var liveTeal: Color { TF.signalTeal }
 
-  /// Cancel / done orbs only exist while capturing; processing and later
+  /// Cancel / done buttons only exist while capturing; processing and later
   /// phases are display-only.
   static func showsActionButtons(_ phase: FloatingBarPhase) -> Bool {
     phase == .preparing || phase == .recording
@@ -26,7 +26,7 @@ enum CursorOverlayMetrics {
 }
 
 /// Font the transcript text renders with; used to detect head-truncation.
-private let cursorTranscriptFont = NSFont.systemFont(ofSize: 13, weight: .medium)
+private let cursorTranscriptFont = NSFont.systemFont(ofSize: 13.5, weight: .regular)
 
 /// Shared copy for the capsule, used by both the view and the controller.
 @MainActor
@@ -70,22 +70,25 @@ enum CursorOverlayCopy {
   }
 }
 
-/// Three-island transcript overlay (style 3 · 悬浮胶囊): the text capsule
-/// sits center stage, flanked by two detached action orbs (× cancel left,
-/// ✓ done right) that exist only while capturing. Detaching the buttons is
-/// what finally killed the perennial "gap" complaint: inside the capsule
-/// there is only dot + text, so short text leaves quiet capacity instead of
-/// a visible void between text and ✓. The capsule width is FIXED — a moving
-/// frame edge makes the reader's gaze drift — and overflow head-truncates
-/// with a leading fade. The breathing dot's halo bleeds into the capsule as
-/// a backlight (teal while listening, amber while working). Presses outside
-/// the orbs drag the panel; double-click re-centers it.
+/// Single-row transcript overlay (style 3 · 悬浮胶囊). Everything lives on one
+/// line: breathing dot, transcript, frozen timer, and two ghost buttons
+/// (✕ cancel, ✓ done) that exist only while capturing. The meta strip
+/// (device · mode · length · speed) is NOT always-on — it fades in under the
+/// capsule on hover, because during dictation the eye is on the text and a
+/// permanently visible second row of 9pt monospace was just noise.
+///
+/// The capsule width is FIXED — a moving frame edge makes the reader's gaze
+/// drift — and overflow head-truncates with a leading fade. The breathing
+/// dot's halo bleeds into the capsule as a backlight (teal while listening,
+/// amber while working). Presses outside the buttons drag the panel;
+/// double-click re-centers it.
 struct CursorOverlayView<S: FloatingBarState>: View {
   var state: S
-  /// Done orb: forwards to `state.requestPanelStop()` (stop & insert).
+  /// Done button: forwards to `state.requestPanelStop()` (stop & insert).
   let onSend: () -> Void
 
   @State private var pulsing = false
+  @State private var metaVisible = false
   /// Trailing typewriter buffer. ASR partials arrive in bursts of several
   /// characters, and rendering the raw string makes them pop in as chunks.
   /// Pure appends (the common case for cumulative partials) are revealed one
@@ -125,59 +128,17 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     VStack(alignment: .center, spacing: 4) {
       mainCapsule
 
-      // Second row: cancel pill pinned to the LEFT edge, meta strip dead
-      // center, done pill pinned RIGHT. All three hold fixed positions —
-      // the strip grows/shrinks around its own center without moving the
-      // pills, and the pills' show/hide never shifts the strip.
-      ZStack {
-        // Meta strip: hugs its content, centered under the capsule.
-        secondaryCluster
-          .padding(.horizontal, 12)
-          .padding(.vertical, 2)
-          .background(
-            Capsule()
-              .fill(.ultraThinMaterial)
-              .overlay(Capsule().fill(.black.opacity(0.32)))
-          )
-          .overlay(
-            Capsule()
-              .strokeBorder(.white.opacity(0.09), lineWidth: 0.5)
-          )
-
-        HStack(spacing: 0) {
-          if buttonsVisible {
-            ActionPill(
-              symbol: "xmark",
-              label: L("取消", "Cancel"),
-              primary: false,
-              help: L("取消并丢弃本次录音", "Cancel and discard this recording"),
-              accessibilityLabel: L("取消", "Cancel")
-            ) {
-              state.requestPanelCancel()
-            }
-            .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .leading)))
-          }
-          Spacer(minLength: 0)
-          if buttonsVisible {
-            ActionPill(
-              symbol: "checkmark",
-              label: L("完成", "Done"),
-              primary: true,
-              help: L("停止并插入", "Stop and insert"),
-              accessibilityLabel: L("完成", "Done")
-            ) {
-              onSend()
-            }
-            .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .trailing)))
-          }
-        }
-      }
-      .frame(width: CursorOverlayMetrics.capsuleWidth)
+      // Hover-revealed meta. Always occupies its row so the capsule never
+      // shifts when it appears — only its opacity changes.
+      secondaryCluster
+        .opacity(metaVisible ? 1 : 0)
+        .animation(.easeOut(duration: 0.18), value: metaVisible)
     }
     .padding(2)
     // Pin to the panel's top edge so resize animations stay anchored.
     .frame(maxHeight: .infinity, alignment: .top)
     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: buttonsVisible)
+    .onHover { metaVisible = $0 }
     .onAppear {
       revealedText = displayText
       withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
@@ -213,61 +174,71 @@ struct CursorOverlayView<S: FloatingBarState>: View {
 
   // MARK: - Center capsule
 
-  /// Dot + transcript, left-aligned. The empty region to the right of short
-  /// text is deliberate capacity, exactly like a half-filled text field.
+  /// Everything on one line: dot, transcript, frozen timer, ghost actions.
+  /// The empty region to the right of short text is deliberate capacity,
+  /// exactly like a half-filled text field.
   private var mainCapsule: some View {
-    HStack(spacing: 6) {
+    HStack(spacing: 8) {
       Circle()
         .fill(dotColor)
         .frame(width: 6, height: 6)
         .shadow(color: dotColor.opacity(0.9), radius: 4)
         .opacity(pulsing ? 0.35 : 1.0)
       transcriptText
-      Spacer(minLength: 0)
+      Spacer(minLength: 4)
+      inlineStatus
+      if buttonsVisible {
+        GhostButton(
+          symbol: "xmark",
+          primary: false,
+          help: L("取消并丢弃本次录音", "Cancel and discard this recording"),
+          accessibilityLabel: L("取消", "Cancel")
+        ) {
+          state.requestPanelCancel()
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+        GhostButton(
+          symbol: "checkmark",
+          primary: true,
+          help: L("停止并插入", "Stop and insert"),
+          accessibilityLabel: L("完成", "Done")
+        ) {
+          onSend()
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+      }
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 6)
+    .padding(.leading, 16)
+    // Tighter on the right: the ghost buttons carry their own visual inset.
+    .padding(.trailing, buttonsVisible ? 8 : 16)
+    .padding(.vertical, 8)
     .frame(width: CursorOverlayMetrics.capsuleWidth)
-    .background(
-      Capsule()
-        .fill(.ultraThinMaterial)
-        .overlay(
-          // Dark tint over frosted glass: the wallpaper's hue bleeds through
-          // while text contrast stays stable over busy backgrounds.
-          Capsule()
-            .fill(
-              LinearGradient(
-                colors: [.black.opacity(0.38), .black.opacity(0.50)],
-                startPoint: .top,
-                endPoint: .bottom
-              )
-            )
-        )
-        .overlay(
-          // Backlight: the status dot's halo bleeds into the capsule body,
-          // carrying the state color (teal listening / amber working).
-          Capsule()
-            .fill(
-              RadialGradient(
-                colors: [dotColor.opacity(0.12), .clear],
-                center: .leading,
-                startRadius: 0,
-                endRadius: 140
-              )
-            )
-        )
-    )
-    .overlay(
-      Capsule()
-        .strokeBorder(
-          LinearGradient(
-            colors: [.white.opacity(0.16), .white.opacity(0.05)],
-            startPoint: .top,
-            endPoint: .bottom
-          ),
-          lineWidth: 0.5
-        )
-    )
+    .frostSurface(Capsule(), backlight: dotColor)
+  }
+
+  /// Right-hand inline readout: the elapsed clock while capturing, or the
+  /// phase label once it ends. The one piece of metadata worth a permanent
+  /// slot — everything else is hover-only.
+  @ViewBuilder private var inlineStatus: some View {
+    Group {
+      switch state.barPhase {
+      case .processing, .recovering:
+        Text(state.effectiveProcessingLabel)
+          .foregroundStyle(TF.lampAmber.opacity(0.85))
+          .lineLimit(1)
+      default:
+        if let start = state.recordingStartDate {
+          RecordingTimer(
+            startDate: start,
+            endDate: state.barPhase == .recording || state.barPhase == .preparing
+              ? nil : state.recordingStopDate
+          )
+          .foregroundStyle(TF.frostTextFaint)
+        }
+      }
+    }
+    .font(.system(size: 10, weight: .medium, design: .monospaced))
+    .fixedSize()
   }
 
   /// Transcript tail. The leading-edge fade is only applied once the text
@@ -277,7 +248,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
   /// it communicated nothing; liveness is the dot's job now.)
   @ViewBuilder private var transcriptText: some View {
     let base = Text(revealedText)
-      .font(.system(size: 13, weight: .medium))
+      .font(.system(size: 13.5, weight: .regular))
       .foregroundStyle(textColor)
       .lineLimit(1)
       .truncationMode(.head)
@@ -305,7 +276,11 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     ) > CursorOverlayMetrics.textMaxWidth
   }
 
-  /// Meta row: input device · mode · char count · timer · average speed.
+  /// Meta row: input device · mode · char count · average speed. Hover-only,
+  /// and free-floating — no capsule of its own. A second chromed pill under
+  /// the first read as two competing objects; bare 9pt monospace over the
+  /// desktop reads as an annotation, which is what it is. The timer moved
+  /// inline into the capsule, so it is not repeated here.
   private var secondaryCluster: some View {
     let secondary = CursorOverlayCopy.secondary(for: state)
     return HStack(spacing: 5) {
@@ -322,29 +297,19 @@ struct CursorOverlayView<S: FloatingBarState>: View {
         .frame(maxWidth: CursorOverlayMetrics.secondaryItemMaxWidth)
       Text(CursorOverlayMetrics.secondarySeparator)
       Text(secondary.charCount)
-      if let start = state.recordingStartDate {
-        Text(CursorOverlayMetrics.secondarySeparator)
-        // Freeze the clock once capture ends — the strip is always visible,
-        // so a timer that keeps counting through processing reads as a bug.
-        RecordingTimer(
-          startDate: start,
-          endDate: state.barPhase == .recording || state.barPhase == .preparing
-            ? nil : state.recordingStopDate
-        )
-      }
       if let speed = secondary.speed {
         Text(CursorOverlayMetrics.secondarySeparator)
         Text(speed)
       }
     }
     .font(.system(size: 9, weight: .medium, design: .monospaced))
-    .foregroundStyle(.white.opacity(0.42))
+    .foregroundStyle(TF.frostTextFaint)
     .fixedSize()
   }
 
   private var dotColor: Color {
     switch tone {
-    case .live: return CursorOverlayMetrics.liveTeal
+    case .live: return TF.signalTeal
     case .working: return TF.lampAmber
     case .hint: return .white.opacity(0.4)
     }
@@ -352,24 +317,24 @@ struct CursorOverlayView<S: FloatingBarState>: View {
 
   private var textColor: Color {
     switch tone {
-    // Warm white body text; the teal is reserved for accents (dot, ✓ orb,
+    // Warm white body text; the teal is reserved for accents (dot, ✓ button,
     // backlight). A full run of teal read like IME candidate text.
-    case .live: return .white.opacity(0.92)
-    case .working: return .white.opacity(0.7)
+    case .live: return TF.frostText
+    case .working: return TF.frostTextDim
     case .hint: return .white.opacity(0.45)
     }
   }
 }
 
-// MARK: - Action Pill
+// MARK: - Ghost Button
 
-/// Small text pill in the meta row (✕ 取消 / ✓ 完成). Deliberately
-/// understated — the 30pt orbs flanking the capsule felt too loud — while
-/// the teal tint preserves the done action's primacy. Real NSButton overlay
-/// so the panel's hit-test treats it as clickable.
-private struct ActionPill: View {
+/// Icon-only circular action inside the capsule (✕ cancel / ✓ done).
+/// Deliberately understated — labels alongside the transcript competed with
+/// it for the same reading line, and the 30pt flanking orbs before that were
+/// louder still. Real NSButton overlay so the panel's hit-test treats it as
+/// clickable rather than as drag surface.
+private struct GhostButton: View {
   let symbol: String
-  let label: String
   let primary: Bool
   let help: String
   let accessibilityLabel: String
@@ -378,42 +343,30 @@ private struct ActionPill: View {
   @State private var isHovered = false
 
   private var tint: Color {
-    primary ? CursorOverlayMetrics.liveTeal : .white
+    primary ? TF.signalTeal : .white
   }
 
   var body: some View {
-    HStack(spacing: 3) {
-      Image(systemName: symbol)
-        .font(.system(size: 7, weight: .bold))
-      Text(label)
-        .font(.system(size: 9, weight: .semibold))
-    }
-    .foregroundStyle(tint.opacity(isHovered ? 1.0 : primary ? 0.9 : 0.6))
-    .padding(.horizontal, 8)
-    .padding(.vertical, 3)
-    .background(
-      Capsule()
-        .fill(.ultraThinMaterial)
-        .overlay(Capsule().fill(.black.opacity(isHovered ? 0.45 : 0.32)))
-    )
-    .overlay(
-      Capsule()
-        .strokeBorder(
+    Image(systemName: symbol)
+      .font(.system(size: 9, weight: .bold))
+      .foregroundStyle(tint.opacity(isHovered ? 1.0 : primary ? 0.85 : 0.45))
+      .frame(width: 22, height: 22)
+      .background {
+        Circle().fill(
           primary
-            ? CursorOverlayMetrics.liveTeal.opacity(isHovered ? 0.45 : 0.30)
-            : .white.opacity(isHovered ? 0.20 : 0.12),
-          lineWidth: 0.5
+            ? TF.signalTeal.opacity(isHovered ? 0.22 : 0.11)
+            : Color.white.opacity(isHovered ? 0.14 : 0.06)
         )
-    )
-    .overlay {
-      CapsuleClickButton(
-        toolTip: help,
-        accessibilityLabel: accessibilityLabel,
-        onHoverChanged: { isHovered = $0 },
-        action: action
-      )
-    }
-    .animation(.easeOut(duration: 0.12), value: isHovered)
+      }
+      .overlay {
+        CapsuleClickButton(
+          toolTip: help,
+          accessibilityLabel: accessibilityLabel,
+          onHoverChanged: { isHovered = $0 },
+          action: action
+        )
+      }
+      .animation(.easeOut(duration: 0.12), value: isHovered)
   }
 }
 

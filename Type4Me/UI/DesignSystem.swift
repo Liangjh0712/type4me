@@ -63,32 +63,60 @@ enum TF {
   static let settingsAccentRed = Color(red: 0.80, green: 0.28, blue: 0.22)
   static let settingsAccentBlue = Color(red: 0.20, green: 0.45, blue: 0.75)
 
-  // MARK: Signal Desk Palette (floating deck + tally lamp)
+  // MARK: Quiet Frost — the single overlay design language
+  //
+  // Every floating surface (style-3 capsule, shortcut deck, top transcript
+  // panel, bottom indicator, headset toast, selection-ask) renders with the
+  // same recipe: `.ultraThinMaterial` under `frostTint`, hairline
+  // `frostBorder`, and NEVER a drop shadow. Before this consolidation there
+  // were three competing languages — warm ink glass, frosted capsule, and an
+  // opaque light-paper sheet — which is what made the overlays feel unrelated
+  // when two happened to be onscreen at once.
 
-  /// Deep teal-ink glass tones lifted from the app icon.
+  /// Dark tint over the frosted material. Deliberately light: the wallpaper's
+  /// hue bleeds through so overlays read as glass, not as painted panels.
+  static let frostTint = Color.black.opacity(0.42)
+  /// Hairline edge. One value, one width — the old 1px/0.5px split along the
+  /// "deck vs capsule" line was the most visible seam between the languages.
+  static let frostBorder = Color.white.opacity(0.13)
+  static let frostBorderWidth: CGFloat = 0.5
+  /// Recessed wells inside a frost surface (meter bridge, key caps, columns).
+  static let frostWell = Color.white.opacity(0.05)
+  static let frostWellRaised = Color.white.opacity(0.08)
+
+  /// Text ramp. Pure white, not paper — warm text over a neutral frost read
+  /// as a color cast rather than as warmth.
+  static let frostText = Color.white.opacity(0.93)
+  /// Frozen / secondary body text (post-capture, unoptimized column).
+  static let frostTextDim = Color.white.opacity(0.66)
+  /// Metadata, column headers, placeholder copy.
+  static let frostTextFaint = Color.white.opacity(0.34)
+
+  /// Deep teal-ink glass tones lifted from the app icon. Retained for the
+  /// tally lamp's dial plate and bezel, which are a physical object rather
+  /// than a glass surface; no flat panel should use these any more.
   static let ink0 = Color(red: 0.031, green: 0.067, blue: 0.102)
   static let ink1 = Color(red: 0.051, green: 0.102, blue: 0.141)
   static let ink2 = Color(red: 0.078, green: 0.153, blue: 0.212)
   static let ink3 = Color(red: 0.106, green: 0.200, blue: 0.278)
 
-  /// Warm paper text tones.
+  /// Warm paper text tones, kept for the light Settings surfaces only.
   static let paper = Color(red: 0.949, green: 0.925, blue: 0.875)
   static let paperDim = Color(red: 0.949, green: 0.925, blue: 0.875).opacity(0.60)
   static let paperFaint = Color(red: 0.949, green: 0.925, blue: 0.875).opacity(0.34)
 
-  /// Style-2 bottom card text, IME-candidate-bar inspired: vivid green for
-  /// recognized content ("this is what would be inserted"), dimmed paper for
-  /// status hints, red for errors.
-  static let bottomCardLive = Color(red: 0.494, green: 0.949, blue: 0.078)  // #7EF214
-
-  /// Warm hairline borders on ink glass.
+  /// Warm hairline borders on ink glass (tally lamp only).
   static let deckLine = Color(red: 0.922, green: 0.894, blue: 0.831).opacity(0.11)
   static let deckLineStrong = Color(red: 0.922, green: 0.894, blue: 0.831).opacity(0.20)
 
-  /// Teal signal color: meter bridge, processing ring, live LEDs.
+  /// The one accent. Live capture, primary actions, healthy LEDs, meter
+  /// bridge. Replaces three near-identical literals (#5FD3C0, #61D9C2 twice)
+  /// plus the style-2 card's IME-candidate green #7EF214, which was the
+  /// loudest color in the app and belonged to no other surface.
   static let signalTeal = Color(red: 0.373, green: 0.827, blue: 0.753)
 
-  /// Hot filament amber for the tally lamp core and active LEDs.
+  /// The one warning/working color. Replaces the deck's near-duplicate
+  /// #FFBD57 latch amber.
   static let lampAmber = Color(red: 1.0, green: 0.714, blue: 0.282)
   static let lampAmberHot = Color(red: 1.0, green: 0.890, blue: 0.690)
 
@@ -101,6 +129,13 @@ enum TF {
   static let spacingXL: CGFloat = 24
 
   // MARK: Corner Radius
+
+  /// Overlay corner ramp, collapsed from six ad-hoc values (28/20/14/13/9/5).
+  /// `frostKey` for key caps and inline chips, `frostPanel` for any surface
+  /// that holds body text, `frostSheet` for the selection-ask sheet.
+  static let frostKey: CGFloat = 6
+  static let frostPanel: CGFloat = 12
+  static let frostSheet: CGFloat = 18
 
   static let cornerSM: CGFloat = 6
   static let cornerMD: CGFloat = 10
@@ -142,4 +177,60 @@ enum TF {
   static let springBouncy = Animation.spring(response: 0.4, dampingFraction: 0.65)
   static let easeQuick = Animation.easeOut(duration: 0.2)
   static let glassTint = Animation.easeInOut(duration: 0.5)
+}
+
+// MARK: - Frost Surface
+
+/// The one background recipe every floating overlay uses: frosted material,
+/// dark tint, hairline border, no shadow. Taking a `Shape` rather than a
+/// radius lets the capsule surfaces share it without special-casing.
+///
+/// Deliberately shadowless. Shadows were rejected twice — they stack when
+/// overlays overlap, and they defeat the point of a surface that is supposed
+/// to sit *in* the desktop rather than hover above it.
+struct FrostSurface<S: InsettableShape>: ViewModifier {
+  let shape: S
+  /// Optional state backlight bleeding in from the leading edge.
+  var backlight: Color?
+
+  func body(content: Content) -> some View {
+    content
+      .background {
+        shape
+          .fill(.ultraThinMaterial)
+          .overlay { shape.fill(TF.frostTint) }
+          .overlay {
+            if let backlight {
+              shape.fill(
+                RadialGradient(
+                  colors: [backlight.opacity(0.12), .clear],
+                  center: .leading,
+                  startRadius: 0,
+                  endRadius: 180
+                )
+              )
+            }
+          }
+      }
+      .overlay {
+        shape.strokeBorder(TF.frostBorder, lineWidth: TF.frostBorderWidth)
+      }
+  }
+}
+
+extension View {
+  /// Applies the shared frost surface with an arbitrary shape.
+  func frostSurface<S: InsettableShape>(_ shape: S, backlight: Color? = nil) -> some View {
+    modifier(FrostSurface(shape: shape, backlight: backlight))
+  }
+
+  /// Applies the shared frost surface with a continuous rounded rectangle.
+  func frostSurface(cornerRadius: CGFloat, backlight: Color? = nil) -> some View {
+    modifier(
+      FrostSurface(
+        shape: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous),
+        backlight: backlight
+      )
+    )
+  }
 }

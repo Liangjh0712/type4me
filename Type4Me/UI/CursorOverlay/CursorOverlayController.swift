@@ -320,7 +320,10 @@ final class CursorOverlayController {
   /// read — at a stable screen position. Text overflow is handled view-side
   /// by head-truncation.
   private func measuredSize() -> NSSize {
-    // 30pt capsule + 4pt gap + 17pt action/meta row + 2×2pt safety padding.
-    NSSize(width: CursorOverlayMetrics.panelWidth, height: 55)
+    // 38pt capsule (13.5pt text + 8pt vertical padding, floored by the 22pt
+    // ghost buttons) + 4pt gap + 12pt hover meta row + 2×2pt safety padding.
+    // The meta row keeps its slot even while hidden so revealing it on hover
+    // never resizes the panel — only its opacity changes.
+    NSSize(width: CursorOverlayMetrics.panelWidth, height: 58)
   }
 }

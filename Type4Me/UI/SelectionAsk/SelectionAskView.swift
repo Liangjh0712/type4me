@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+/// Quiet Frost. This sheet used to be the odd one out — an opaque warm-paper
+/// card at 860×760 with document-window typography, while the other five
+/// overlays were dark frosted glass. It now shares the same recipe: one
+/// `frostSurface` for the sheet, `frostWell` for the turn cards nested inside
+/// it (nested glass reads muddy), the `frostText` ramp, and no drop shadows.
 struct SelectionAskView: View {
     let state: SelectionAskState
     let onClose: () -> Void
@@ -8,79 +13,82 @@ struct SelectionAskView: View {
     private let bottomAnchorID = "selectionAskBottomAnchor"
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 28)
-                .fill(Color(red: 0.96, green: 0.95, blue: 0.93))
-
-            VStack(spacing: 0) {
-                header
-                Divider().opacity(0.5)
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 22) {
-                            questionSection
-                            ForEach(state.turns) { turn in
-                                turnView(turn)
-                                    .transition(.asymmetric(
-                                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                                        removal: .opacity
-                                    ))
-                            }
-                            if state.turns.isEmpty {
-                                answerSection
-                            }
-                            Color.clear
-                                .frame(height: 1)
-                                .id(bottomAnchorID)
+        VStack(spacing: 0) {
+            header
+            hairline
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        questionSection
+                        ForEach(state.turns) { turn in
+                            turnView(turn)
+                                .transition(.asymmetric(
+                                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                                    removal: .opacity
+                                ))
                         }
-                        .padding(.horizontal, 34)
-                        .padding(.vertical, 26)
-                        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.turns)
+                        if state.turns.isEmpty {
+                            answerSection
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchorID)
                     }
-                    .onChange(of: state.turns) { _, _ in
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-                        }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.turns)
+                }
+                .onChange(of: state.turns) { _, _ in
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
                     }
                 }
-                followUpBar
             }
+            followUpBar
         }
+        .clipShape(RoundedRectangle(cornerRadius: TF.frostSheet, style: .continuous))
+        .frostSurface(cornerRadius: TF.frostSheet)
         .padding(10)
+    }
+
+    private var hairline: some View {
+        Rectangle()
+            .fill(TF.frostBorder)
+            .frame(height: 0.5)
     }
 
     private var header: some View {
         HStack {
             Spacer()
-            HStack(spacing: 10) {
+            HStack(spacing: 7) {
                 Image(systemName: "sparkle.magnifyingglass")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Text(L("随便问", "Ask Anything"))
-                    .font(.system(size: 24, weight: .bold))
+                    .font(.system(size: 15, weight: .semibold))
             }
-            .foregroundStyle(Color(red: 0.08, green: 0.08, blue: 0.08))
+            .foregroundStyle(TF.frostText)
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(Color(red: 0.45, green: 0.45, blue: 0.45))
-                    .frame(width: 34, height: 34)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(TF.frostTextFaint)
+                    .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 24)
-        .frame(height: 74)
+        .padding(.horizontal, 14)
+        .frame(height: 44)
     }
 
     private var questionSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "questionmark.bubble")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color(red: 0.45, green: 0.45, blue: 0.45))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(TF.frostTextFaint)
                 Text(state.question.isEmpty ? L("正在识别问题...", "Recognizing question...") : state.question)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.18, green: 0.18, blue: 0.18))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(TF.frostText)
                 Spacer()
                 if hasSelectedText {
                     copyButton(text: state.selectedText, systemImage: "doc.on.doc")
@@ -88,19 +96,19 @@ struct SelectionAskView: View {
             }
 
             if hasSelectedText {
-                HStack(alignment: .top, spacing: 14) {
+                HStack(alignment: .top, spacing: 10) {
                     Rectangle()
-                        .fill(Color(red: 0.78, green: 0.76, blue: 0.72))
+                        .fill(TF.frostBorder)
                         .frame(width: 2)
                     Text(state.selectedText)
-                        .font(.system(size: 18))
-                        .foregroundStyle(Color(red: 0.48, green: 0.48, blue: 0.48))
-                        .lineSpacing(5)
+                        .font(.system(size: 12))
+                        .foregroundStyle(TF.frostTextDim)
+                        .lineSpacing(3)
                         .lineLimit(3)
                         .truncationMode(.tail)
                         .textSelection(.enabled)
                 }
-                .padding(.leading, 34)
+                .padding(.leading, 22)
             }
         }
     }
@@ -116,37 +124,38 @@ struct SelectionAskView: View {
 
     private func turnView(_ turn: SelectionAskState.Turn) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "person.crop.circle")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.38, green: 0.40, blue: 0.44))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(TF.frostTextFaint)
                 Text(turn.question.isEmpty ? L("正在识别问题...", "Recognizing question...") : turn.question)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.18, green: 0.20, blue: 0.24))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(TF.frostText)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 20)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
-            Divider()
+            hairline
 
-            HStack(spacing: 10) {
+            HStack(spacing: 7) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 18, weight: .semibold))
-                Text(L("回答", "Answer"))
-                    .font(.system(size: 22, weight: .bold))
+                    .font(.system(size: 10, weight: .semibold))
+                Text(L("回答", "Answer").uppercased())
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
                 Spacer()
                 if !turn.answer.isEmpty {
                     copyButton(text: turn.answer, systemImage: "doc.on.doc")
                 }
             }
-            .foregroundStyle(Color(red: 0.12, green: 0.12, blue: 0.12))
-            .padding(.horizontal, 24)
-            .frame(height: 52)
+            .foregroundStyle(TF.frostTextFaint)
+            .padding(.horizontal, 14)
+            .frame(height: 28)
 
-            Divider()
+            hairline
 
             Group {
                 if let message = turn.errorMessage {
@@ -157,14 +166,18 @@ struct SelectionAskView: View {
                     markdownView(turn.answer)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 24)
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color.white)
+            RoundedRectangle(cornerRadius: TF.frostPanel, style: .continuous)
+                .fill(TF.frostWell)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: TF.frostPanel, style: .continuous)
+                .strokeBorder(TF.frostBorder, lineWidth: TF.frostBorderWidth)
         )
     }
 
@@ -172,52 +185,55 @@ struct SelectionAskView: View {
         HStack(spacing: 12) {
             Spacer()
             Button(action: onFollowUp) {
-                HStack(spacing: 10) {
+                // Recording uses TF.recording, not the error red: an active
+                // capture is a live state, not a failure, and reusing the
+                // error color here would collide with the error view below.
+                let tint = state.isRecordingFollowUp ? TF.recording : TF.signalTeal
+                HStack(spacing: 7) {
                     Image(systemName: state.isRecordingFollowUp ? "stop.fill" : "mic.fill")
-                        .font(.system(size: 16, weight: .bold))
-                        .frame(width: 18, height: 18)
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 13, height: 13)
                     Text(state.isRecordingFollowUp ? L("停止追问", "Stop follow-up") : L("继续追问", "Ask follow-up"))
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                     if state.isRecordingFollowUp {
-                        VoiceBars()
+                        VoiceBars(tint: tint)
                     }
                 }
-                .foregroundStyle(Color.white)
-                .padding(.horizontal, 18)
-                .frame(height: 46)
+                .foregroundStyle(tint)
+                .padding(.horizontal, 14)
+                .frame(height: 30)
                 .background(
-                    Capsule()
-                        .fill(state.isRecordingFollowUp
-                              ? Color(red: 0.82, green: 0.22, blue: 0.18)
-                              : Color(red: 0.10, green: 0.12, blue: 0.16))
+                    Capsule().fill(tint.opacity(state.isRecordingFollowUp ? 0.18 : 0.14))
                 )
-                .shadow(color: Color.black.opacity(0.12), radius: 10, y: 4)
+                .overlay(
+                    Capsule().strokeBorder(tint.opacity(0.3), lineWidth: 0.5)
+                )
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 34)
-        .padding(.bottom, 24)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 14)
     }
 
     private var loadingView: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             ProgressView()
                 .controlSize(.small)
             Text(L("正在思考...", "Thinking..."))
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(Color(red: 0.42, green: 0.42, blue: 0.42))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(TF.frostTextDim)
         }
-        .frame(minHeight: 220, alignment: .center)
+        .frame(minHeight: 140, alignment: .center)
         .frame(maxWidth: .infinity)
     }
 
     private func markdownView(_ markdown: String) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(MarkdownRenderer.displayBlocks(from: markdown).enumerated()), id: \.offset) { _, block in
                 Text(MarkdownRenderer.attributedString(from: block))
-                    .font(.system(size: 19))
-                    .foregroundStyle(Color(red: 0.08, green: 0.10, blue: 0.16))
-                    .lineSpacing(8)
+                    .font(.system(size: TF.topTranscriptPanelBodyFontSize))
+                    .foregroundStyle(TF.frostText)
+                    .lineSpacing(4)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -226,15 +242,16 @@ struct SelectionAskView: View {
     }
 
     private func errorView(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
                 .foregroundStyle(TF.settingsAccentRed)
             Text(message)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(Color(red: 0.42, green: 0.18, blue: 0.15))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(TF.frostText)
                 .textSelection(.enabled)
         }
-        .frame(minHeight: 180, alignment: .topLeading)
+        .frame(minHeight: 110, alignment: .topLeading)
     }
 
     private var answerText: String? {
@@ -261,23 +278,24 @@ struct SelectionAskView: View {
             NSPasteboard.general.setString(text, forType: .string)
         } label: {
             Image(systemName: systemImage)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Color(red: 0.46, green: 0.46, blue: 0.46))
-                .frame(width: 32, height: 32)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(TF.frostTextFaint)
+                .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
     }
 }
 
 private struct VoiceBars: View {
+    var tint: Color = TF.frostText
     @State private var active = false
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 2.5) {
             ForEach(0..<4, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.white.opacity(0.82))
-                    .frame(width: 3, height: index.isMultiple(of: 2) ? 12 : 18)
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(tint.opacity(0.82))
+                    .frame(width: 2.5, height: index.isMultiple(of: 2) ? 8 : 12)
                     .scaleEffect(y: active == index.isMultiple(of: 2) ? 1.35 : 0.72, anchor: .center)
                     .animation(
                         .easeInOut(duration: 0.45 + Double(index) * 0.08)
@@ -286,7 +304,7 @@ private struct VoiceBars: View {
                     )
             }
         }
-        .frame(width: 24)
+        .frame(width: 18)
         .onAppear { active = true }
     }
 }

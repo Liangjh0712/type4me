@@ -70,7 +70,7 @@ enum DeckMetaTone {
     case .live, .ok: return TF.signalTeal
     case .working: return TF.lampAmber
     case .failed: return TF.settingsAccentRed
-    case .idle: return TF.paper.opacity(0.25)
+    case .idle: return TF.frostTextFaint.opacity(0.7)
     }
   }
 
@@ -80,7 +80,7 @@ enum DeckMetaTone {
     switch self {
     case .working: return TF.lampAmber.opacity(0.85)
     case .failed: return TF.settingsAccentRed.opacity(0.9)
-    default: return TF.paperFaint
+    default: return TF.frostTextFaint
     }
   }
 }
@@ -343,7 +343,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
         capsuleBackground
           .clipShape(Capsule())
       }
-      .shadow(color: .black.opacity(0.22), radius: 10, x: 0, y: 3)
+      // The phase border used to be computed and then never applied — the
+      // capsule shipped strokeless while a whole state machine sat unused
+      // below. Wired up, and the shadow that stood in for it is gone.
+      .overlay { Capsule().strokeBorder(borderColor, lineWidth: TF.frostBorderWidth) }
       .animation(TF.springSnappy, value: state.barPhase)
   }
 
@@ -518,11 +521,11 @@ struct FloatingBarView<S: FloatingBarState>: View {
     case .standard:
       return nil
     case .macActionSuccess:
-      return ("checkmark.circle.fill", TF.success)
+      return ("checkmark.circle.fill", TF.signalTeal)
     case .macActionFailure:
       return ("xmark.circle.fill", TF.settingsAccentRed)
     case .macActionUnsure:
-      return ("questionmark.circle.fill", TF.amber)
+      return ("questionmark.circle.fill", TF.lampAmber)
     }
   }
 
@@ -542,14 +545,13 @@ struct FloatingBarView<S: FloatingBarState>: View {
       }
     }
     .frame(width: width)
-    .background(deckGlassBackground)
-    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 13, style: .continuous)
-        .stroke(TF.deckLineStrong, lineWidth: 1)
-    }
-    .shadow(color: .black.opacity(0.30), radius: 22, y: 9)
-    .shadow(color: .black.opacity(0.20), radius: 5, y: 2)
+    // Clip first: the header's tint and the column wells run edge to edge
+    // and would otherwise square off the corners.
+    .clipShape(RoundedRectangle(cornerRadius: TF.frostPanel, style: .continuous))
+    // Frost, not ink. This panel was the only surface in the dark family
+    // carrying drop shadows; both are gone — overlapping overlays stacked
+    // them, and they fought the "sits in the desktop" read.
+    .frostSurface(cornerRadius: TF.frostPanel)
   }
 
   // MARK: - Meter Bridge
@@ -559,8 +561,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
     MeterBridge(meter: state.audioLevel, active: state.barPhase == .recording)
       .frame(height: TF.topTranscriptPanelMeterBridgeHeight)
       .background(Color.black.opacity(0.22))
-      .overlay(alignment: .top) { Rectangle().fill(TF.deckLine).frame(height: 1) }
-      .overlay(alignment: .bottom) { Rectangle().fill(TF.deckLine).frame(height: 1) }
+      .overlay(alignment: .top) { Rectangle().fill(TF.frostBorder).frame(height: 1) }
+      .overlay(alignment: .bottom) { Rectangle().fill(TF.frostBorder).frame(height: 1) }
   }
 
   private var topPanelHeader: some View {
@@ -636,7 +638,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
       case .done:
         Image(systemName: "checkmark.circle.fill")
           .font(.system(size: 11))
-          .foregroundStyle(TF.success)
+          .foregroundStyle(TF.signalTeal)
         tallyLabel(L("完成", "DONE"))
       case .error:
         Image(systemName: "exclamationmark.circle.fill")
@@ -670,19 +672,19 @@ struct FloatingBarView<S: FloatingBarState>: View {
           endDate: state.barPhase == .recording || state.barPhase == .preparing
             ? nil : state.recordingStopDate
         )
-        .foregroundStyle(TF.paper)
+        .foregroundStyle(TF.frostText)
       }
     }
     .font(.system(size: 10, weight: .semibold, design: .monospaced))
     .tracking(1.2)
-    .foregroundStyle(TF.paperDim)
+    .foregroundStyle(TF.frostTextDim)
     .lineLimit(1)
     .fixedSize()
   }
 
   private var headerHairline: some View {
     Rectangle()
-      .fill(TF.deckLine)
+      .fill(TF.frostBorder)
       .frame(width: 1, height: 14)
   }
 
@@ -697,7 +699,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
     }
     .font(.system(size: 9.5, weight: .medium, design: .monospaced))
     .tracking(0.5)
-    .foregroundStyle(TF.paperFaint)
+    .foregroundStyle(TF.frostTextFaint)
     .frame(maxWidth: 150)
     .help(state.inputDeviceName)
   }
@@ -730,24 +732,18 @@ struct FloatingBarView<S: FloatingBarState>: View {
           .font(.system(size: 7, weight: .bold))
           .opacity(state.canSelectPanelMode ? 0.6 : 0.25)
       }
-      .foregroundStyle(TF.paper.opacity(state.canSelectPanelMode ? 1 : 0.55))
+      .foregroundStyle(TF.frostText.opacity(state.canSelectPanelMode ? 1 : 0.55))
       .padding(.horizontal, 9)
       .frame(height: 22)
       .background {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-          .fill(
-            LinearGradient(
-              colors: [TF.ink2, TF.ink1],
-              startPoint: .top,
-              endPoint: .bottom
-            )
-          )
+        RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
+          .fill(TF.frostWellRaised)
       }
       .overlay {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-          .stroke(TF.deckLine, lineWidth: 1)
+        RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
+          .stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
       }
-      .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+      .contentShape(RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous))
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
@@ -781,11 +777,11 @@ struct FloatingBarView<S: FloatingBarState>: View {
       }
     } else if let status = emptyPreviewStatusLabel {
       deckStatus(
-        led: TF.paper.opacity(0.25),
+        led: TF.frostTextFaint.opacity(0.7),
         ledOpacity: 1,
         text: status,
         trailing: nil,
-        tone: TF.paperFaint
+        tone: TF.frostTextFaint
       )
     } else if let attempt = state.llmCallAttempts.last {
       deckStatus(
@@ -794,15 +790,15 @@ struct FloatingBarView<S: FloatingBarState>: View {
         text: state.isTranscriptPanelCollapsed
           ? attempt.model : "\(attempt.provider) / \(attempt.model)",
         trailing: String(format: "%.2fs", attempt.durationSeconds),
-        tone: attempt.succeeded ? TF.paperDim : TF.settingsAccentRed
+        tone: attempt.succeeded ? TF.frostTextDim : TF.settingsAccentRed
       )
     } else {
       deckStatus(
-        led: TF.paper.opacity(0.25),
+        led: TF.frostTextFaint.opacity(0.7),
         ledOpacity: 1,
         text: state.effectiveProcessingLabel,
         trailing: nil,
-        tone: TF.paperFaint
+        tone: TF.frostTextFaint
       )
     }
   }
@@ -849,7 +845,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
       )
 
       Rectangle()
-        .fill(TF.deckLine)
+        .fill(TF.frostBorder)
         .frame(width: dividerWidth)
         .frame(maxHeight: .infinity)
 
@@ -871,7 +867,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
       return Text(fullText.isEmpty ? L("等待语音…", "Waiting for speech…") : fullText)
     }
     let stable = String(fullText.dropLast(pending.count))
-    return Text(stable) + Text(pending).foregroundColor(TF.amber)
+    return Text(stable) + Text(pending).foregroundColor(TF.lampAmber)
   }
 
   private var rawMetaTone: DeckMetaTone {
@@ -896,7 +892,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
         Text(title.uppercased())
           .font(.system(size: 9, weight: .semibold, design: .monospaced))
           .tracking(2.2)
-          .foregroundStyle(TF.paperFaint)
+          .foregroundStyle(TF.frostTextFaint)
         Spacer()
         StatusLED(color: tone.ledColor, pulsing: tone.pulsing)
         Text(metadata)
@@ -907,12 +903,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
       .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
       .frame(height: TF.topTranscriptPanelColumnHeaderHeight)
       .overlay(alignment: .bottom) {
-        Rectangle().fill(TF.deckLine).frame(height: 1)
+        Rectangle().fill(TF.frostBorder).frame(height: 1)
       }
 
       content
         .font(.system(size: TF.topTranscriptPanelBodyFontSize, weight: .regular))
-        .foregroundStyle(isOptimized ? TF.paper.opacity(0.85) : TF.paperDim)
+        .foregroundStyle(isOptimized ? TF.frostText : TF.frostTextDim)
         .lineSpacing(TF.topTranscriptPanelBodyLineSpacing)
         .textSelection(.disabled)
         .fixedSize(horizontal: false, vertical: true)
@@ -937,10 +933,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
         VStack(alignment: .leading, spacing: 2) {
           Text(L("优化失败，原文仍已保留", "Optimization failed; raw text is retained"))
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(TF.paper)
+            .foregroundStyle(TF.frostText)
           Text(message)
             .font(.system(size: 9))
-            .foregroundStyle(TF.paperFaint)
+            .foregroundStyle(TF.frostTextFaint)
         }
       }
 
@@ -952,7 +948,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
             .monospacedDigit()
         }
         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-        .foregroundStyle(TF.paper.opacity(0.30))
+        .foregroundStyle(TF.frostTextFaint)
       }
 
       HStack(spacing: 8) {
@@ -961,32 +957,32 @@ struct FloatingBarView<S: FloatingBarState>: View {
         }
         .buttonStyle(.plain)
         .font(.system(size: 10.5, weight: .semibold))
-        .foregroundStyle(TF.ink0.opacity(0.9))
+        .foregroundStyle(Color.black.opacity(0.82))
         .padding(.horizontal, 12)
         .frame(height: 26)
-        .background(RoundedRectangle(cornerRadius: 6).fill(TF.lampAmber))
+        .background(RoundedRectangle(cornerRadius: TF.frostKey).fill(TF.lampAmber))
 
         Button(L("插入原文", "Insert raw text")) {
           state.insertRawAfterOptimizationFailure()
         }
         .buttonStyle(.plain)
         .font(.system(size: 10.5, weight: .medium))
-        .foregroundStyle(TF.paperDim)
+        .foregroundStyle(TF.frostTextDim)
         .padding(.horizontal, 12)
         .frame(height: 26)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.04)))
+        .background(RoundedRectangle(cornerRadius: TF.frostKey).fill(TF.frostWell))
         .overlay {
-          RoundedRectangle(cornerRadius: 6).stroke(TF.deckLineStrong, lineWidth: 1)
+          RoundedRectangle(cornerRadius: TF.frostKey).stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
         }
       }
     }
     .padding(10)
     .background(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
+      RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
         .fill(TF.settingsAccentRed.opacity(0.05))
     )
     .overlay {
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
+      RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
         .stroke(TF.settingsAccentRed.opacity(0.22), lineWidth: 1)
     }
     .padding(.horizontal, 12)
@@ -996,7 +992,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
   private func topPanelButton(
     systemName: String,
     accessibilityLabel: String,
-    tint: Color = TF.paperFaint,
+    tint: Color = TF.frostTextFaint,
     action: @escaping () -> Void
   ) -> some View {
     Button(action: action) {
@@ -1005,20 +1001,15 @@ struct FloatingBarView<S: FloatingBarState>: View {
         .foregroundStyle(tint)
         .frame(width: 22, height: 22)
         .background(
-          RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.white.opacity(0.05))
+          RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous).fill(TF.frostWell)
         )
         .overlay {
-          RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .stroke(TF.deckLine, lineWidth: 1)
+          RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
+            .stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
         }
     }
     .buttonStyle(.plain)
     .accessibilityLabel(accessibilityLabel)
-  }
-
-  /// Signal Desk glass: teal-ink gradient over frosted material with a top sheen.
-  private var deckGlassBackground: some View {
-    DeckGlassBackground()
   }
 
   // MARK: - Background & Border
@@ -1028,19 +1019,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
   private var glassBackground: some View {
     ZStack {
       Rectangle().fill(.ultraThinMaterial)
-      LinearGradient(
-        colors: [
-          Color(red: 0.08, green: 0.10, blue: 0.12).opacity(0.22),
-          Color(red: 0.025, green: 0.03, blue: 0.04).opacity(0.36),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      )
-      LinearGradient(
-        colors: [.white.opacity(0.07), .clear],
-        startPoint: .top,
-        endPoint: .center
-      )
+      Rectangle().fill(TF.frostTint)
     }
   }
 
@@ -1068,30 +1047,28 @@ struct FloatingBarView<S: FloatingBarState>: View {
     }
   }
 
-  private var capsuleBorder: some View {
-    Capsule()
-      .stroke(borderColor, lineWidth: 1)
-  }
-
+  /// Phase-tinted hairline. Sits at the shared frost weight except while
+  /// recording, where it breathes, and in the terminal phases, where it
+  /// carries the outcome color.
   private var borderColor: Color {
     switch state.barPhase {
     case .preparing:
-      .white.opacity(0.08)
+      TF.frostBorder
     case .recording:
-      .white.opacity(breathe ? 0.20 : 0.10)
+      .white.opacity(breathe ? 0.22 : 0.11)
     case .processing:
-      .white.opacity(0.12)
+      TF.frostBorder
     case .recovering:
       .white.opacity(0.16)
     case .done:
       switch state.feedbackKind {
       case .macActionUnsure:
-        TF.amber.opacity(0.30)
+        TF.lampAmber.opacity(0.30)
       case .macActionSuccess, .macActionFailure, .standard:
-        TF.success.opacity(doneGlow ? 0.3 : 0.08)
+        TF.signalTeal.opacity(doneGlow ? 0.35 : 0.10)
       }
     case .error:
-      TF.settingsAccentRed.opacity(0.22)
+      TF.settingsAccentRed.opacity(0.30)
     case .hidden:
       .clear
     }
@@ -1160,9 +1137,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
     }
     .frame(width: TF.barWidth)
     .frame(maxHeight: TF.transcriptPopupMaxHeight)
-    .background(glassBackground)
-    .clipShape(RoundedRectangle(cornerRadius: TF.transcriptPopupCorner, style: .continuous))
-    .shadow(color: Color.black.opacity(0.3), radius: 8, y: -2)
+    .frostSurface(cornerRadius: TF.frostPanel)
   }
 }
 
@@ -1345,29 +1320,9 @@ struct RecordingDot: View {
 
 /// Signal Desk tally lamp shown independently at screen bottom.
 /// A machined dial with a VU tick ring around a breathing filament core.
-/// Signal Desk glass: teal-ink gradient over frosted material with a top sheen.
-/// Shared by the top deck card and the style-2 bottom transcript card.
-private struct DeckGlassBackground: View {
-  var body: some View {
-    ZStack {
-      Rectangle().fill(.ultraThinMaterial)
-      LinearGradient(
-        colors: [
-          TF.ink3.opacity(0.82),
-          TF.ink1.opacity(0.92),
-          TF.ink0.opacity(0.96),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      )
-      LinearGradient(
-        colors: [.white.opacity(0.05), .clear],
-        startPoint: .top,
-        endPoint: UnitPoint(x: 0.5, y: 0.4)
-      )
-    }
-  }
-}
+/// The lamp keeps the teal-ink palette deliberately: it reads as a physical
+/// object sitting on the desktop, not as a glass surface, and the ink tones
+/// are what make it look machined. Every flat panel now uses `frostSurface`.
 
 /// Screen-bottom recording surface. In every style it renders the tally lamp
 /// orb + mode capsule; in style 2 (.bottom) it additionally floats an
@@ -1428,7 +1383,7 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
           Text("· \(state.inputDeviceName)")
             .font(.system(size: 8.5, weight: .medium, design: .monospaced))
             .tracking(1)
-            .foregroundStyle(TF.paperFaint)
+            .foregroundStyle(TF.frostTextFaint)
             .lineLimit(1)
             .truncationMode(.tail)
         }
@@ -1442,12 +1397,7 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
     }
     .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
     .padding(.vertical, 9)
-    .background(DeckGlassBackground())
-    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 13, style: .continuous)
-        .stroke(TF.deckLineStrong, lineWidth: 1)
-    }
+    .frostSurface(cornerRadius: TF.frostPanel)
     .padding(.horizontal, 2)
   }
 
@@ -1485,7 +1435,7 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
       }
       .font(.system(size: 8.5, weight: .medium, design: .monospaced))
       .tracking(1)
-      .foregroundStyle(TF.paperFaint.opacity(state.canSelectPanelMode ? 1 : 0.6))
+      .foregroundStyle(TF.frostTextFaint.opacity(state.canSelectPanelMode ? 1 : 0.6))
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
@@ -1496,11 +1446,12 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
 
   /// Errors are red; status hints ("等待语音…", "此模式将直接插入原文") are
   /// dimmed so they can't be mistaken for recognized content; real content
-  /// stays IME-candidate green.
+  /// is the plain body ramp. It used to be an IME-candidate green (#7EF214),
+  /// which was the loudest color in the app and belonged to no other surface.
   private var cardForeground: Color {
     if state.barPhase == .error { return TF.settingsAccentRed }
-    if OptimizedPanelCopy.bottomCardIsPlaceholder(for: state) { return TF.paperDim }
-    return TF.bottomCardLive
+    if OptimizedPanelCopy.bottomCardIsPlaceholder(for: state) { return TF.frostTextFaint }
+    return TF.frostText
   }
 
   // MARK: - Mode Capsule (lamp-only styles)
@@ -1511,25 +1462,19 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
       Text(state.currentMode.name)
         .font(.system(size: 9, weight: .semibold, design: .monospaced))
         .tracking(2)
-        .foregroundStyle(TF.paperDim)
+        .foregroundStyle(TF.frostTextDim)
         .lineLimit(1)
         .truncationMode(.tail)
     }
     .padding(.horizontal, 10)
     .frame(height: 19)
     .background {
-      RoundedRectangle(cornerRadius: 4, style: .continuous)
-        .fill(
-          LinearGradient(
-            colors: [TF.ink2, TF.ink1],
-            startPoint: .top,
-            endPoint: .bottom
-          )
-        )
+      RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
+        .fill(TF.frostWellRaised)
     }
     .overlay {
-      RoundedRectangle(cornerRadius: 4, style: .continuous)
-        .stroke(TF.deckLine, lineWidth: 1)
+      RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
+        .stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
     }
     .frame(maxWidth: TF.screenBottomIndicatorWidth - 24)
   }
@@ -1588,7 +1533,7 @@ private struct TallyLampOrb: View {
           )
       }
       .overlay {
-        Circle().stroke(TF.deckLineStrong, lineWidth: 1)
+        Circle().stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
       }
       .padding(3)
   }
@@ -1667,7 +1612,7 @@ private struct TallyLampOrb: View {
           )
       }
       .overlay {
-        Circle().stroke(TF.deckLineStrong, lineWidth: 1)
+        Circle().stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
       }
       .overlay {
         Circle()

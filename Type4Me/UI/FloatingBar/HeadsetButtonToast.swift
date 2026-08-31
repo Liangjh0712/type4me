@@ -60,24 +60,23 @@ private struct HeadsetButtonToastView: View {
         .frame(width: 6, height: 6)
       Image(systemName: icon)
         .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(TF.paperDim)
+        .foregroundStyle(TF.frostTextDim)
       Text(label)
         .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(TF.paper)
+        .foregroundStyle(TF.frostText)
         .lineLimit(1)
     }
     .padding(.horizontal, 12)
     .frame(height: 32)
-    .background(.ultraThinMaterial, in: Capsule())
-    .background(TF.ink1.opacity(0.86), in: Capsule())
-    .overlay(Capsule().stroke(TF.deckLineStrong, lineWidth: 1))
-    .shadow(color: .black.opacity(0.18), radius: 7, x: 0, y: 2)
+    .frostSurface(Capsule())
   }
 }
 
 @MainActor
 final class HeadsetButtonToastController {
-  private let size = NSSize(width: 172, height: 36)
+  /// The panel hugs the capsule exactly — the old 36pt height carried a 4pt
+  /// allowance for a drop shadow that no longer exists.
+  private let size = NSSize(width: 172, height: 32)
   private let panel: HeadsetButtonToastPanel
   private var hosting: NSHostingView<HeadsetButtonToastView>
   private var hideTask: DispatchWorkItem?

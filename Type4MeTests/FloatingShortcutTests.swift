@@ -19,11 +19,22 @@ final class FloatingShortcutTests: XCTestCase {
 
     FloatingShortcutPreferences.saveButtons(buttons, userDefaults: defaults)
     FloatingShortcutPreferences.setEnabled(true, userDefaults: defaults)
-    FloatingShortcutPreferences.setCollapsed(true, userDefaults: defaults)
 
     XCTAssertEqual(FloatingShortcutPreferences.loadButtons(userDefaults: defaults), buttons)
     XCTAssertTrue(FloatingShortcutPreferences.isEnabled(userDefaults: defaults))
-    XCTAssertTrue(FloatingShortcutPreferences.isCollapsed(userDefaults: defaults))
+  }
+
+  func testPreferencesRoundTripPosition() {
+    let suiteName = "FloatingShortcutPreferencesPositionTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    XCTAssertNil(FloatingShortcutPreferences.loadPosition(userDefaults: defaults))
+    FloatingShortcutPreferences.savePosition(NSPoint(x: 320, y: 480), userDefaults: defaults)
+    XCTAssertEqual(
+      FloatingShortcutPreferences.loadPosition(userDefaults: defaults),
+      NSPoint(x: 320, y: 480)
+    )
   }
 
   func testPreferencesUseReturnAndFnWhenNoConfigurationExists() {

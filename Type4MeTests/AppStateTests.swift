@@ -5,6 +5,22 @@ import XCTest
 @MainActor
 final class AppStateTests: XCTestCase {
 
+  /// Feed the state machine a non-empty transcript, the way a live ASR stream
+  /// would. `stopRecording()` cancels outright on an empty transcript (an
+  /// accidental hotkey press), so any test that means "the user actually said
+  /// something, then stopped" has to record something first.
+  private func recognize(_ text: String, on appState: AppState, revision: Int = 1) {
+    appState.setLiveTranscript(
+      RecognitionTranscript(
+        confirmedSegments: [text],
+        partialText: "",
+        authoritativeText: text,
+        isFinal: false,
+        revision: revision
+      )
+    )
+  }
+
   func testStartRecordingTransitionsToPreparing() {
     let appState = AppState()
     appState.startRecording()
@@ -36,10 +52,36 @@ final class AppStateTests: XCTestCase {
     appState.currentMode = .smartDirect
     appState.startRecording()
     appState.markRecordingReady()
+    recognize("识别到的文字", on: appState)
 
     appState.stopRecording()
 
     XCTAssertEqual(appState.barPhase, .processing)
+  }
+
+  /// The counterpart to the above: nothing was recognized, so the bar vanishes
+  /// instead of parking in "校准中" for a predictably empty result.
+  func testStopRecordingCancelsWhenNothingWasRecognized() {
+    let appState = AppState()
+    appState.currentMode = .smartDirect
+    appState.startRecording()
+    appState.markRecordingReady()
+
+    appState.stopRecording()
+
+    XCTAssertEqual(appState.barPhase, .hidden)
+  }
+
+  func testStopRecordingCancelsWhenTranscriptIsOnlyWhitespace() {
+    let appState = AppState()
+    appState.currentMode = .smartDirect
+    appState.startRecording()
+    appState.markRecordingReady()
+    recognize("   \n  ", on: appState)
+
+    appState.stopRecording()
+
+    XCTAssertEqual(appState.barPhase, .hidden)
   }
 
   func testStopRecordingTransitionsDirectModeToProcessing() {
@@ -47,6 +89,7 @@ final class AppStateTests: XCTestCase {
     appState.currentMode = .direct
     appState.startRecording()
     appState.markRecordingReady()
+    recognize("识别到的文字", on: appState)
 
     appState.stopRecording()
 
@@ -108,6 +151,7 @@ final class AppStateTests: XCTestCase {
       XCTAssertEqual(showCount, 0)
       XCTAssertEqual(hideCount, 1)
 
+      recognize("识别到的文字", on: appState)
       appState.stopRecording()
 
       XCTAssertEqual(appState.barPhase, .processing)
@@ -566,6 +610,7 @@ final class AppStateTests: XCTestCase {
     appState.currentMode = .formalWriting
     appState.startRecording()
     appState.markRecordingReady()
+    recognize("识别到的文字", on: appState)
     appState.stopRecording()
 
     appState.selectPanelMode(.direct)

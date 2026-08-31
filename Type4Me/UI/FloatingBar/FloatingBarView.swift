@@ -538,8 +538,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
       : expandedPanelWidth
 
     return VStack(spacing: 0) {
-      topPanelHeader
-      if !state.isTranscriptPanelCollapsed {
+      if state.isTranscriptPanelCollapsed {
+        collapsedPanelHeader
+      } else {
+        topPanelHeader
         meterBridge
         topPanelColumns
       }
@@ -561,35 +563,54 @@ struct FloatingBarView<S: FloatingBarState>: View {
     MeterBridge(meter: state.audioLevel, active: state.barPhase == .recording)
       .frame(height: TF.topTranscriptPanelMeterBridgeHeight)
       .background(Color.black.opacity(0.22))
-      .overlay(alignment: .top) { Rectangle().fill(TF.frostBorder).frame(height: 1) }
-      .overlay(alignment: .bottom) { Rectangle().fill(TF.frostBorder).frame(height: 1) }
+      .overlay(alignment: .top) { Rectangle().fill(TF.frostRule).frame(height: 0.5) }
+      .overlay(alignment: .bottom) { Rectangle().fill(TF.frostRule).frame(height: 0.5) }
   }
 
-  private var topPanelHeader: some View {
-    HStack(spacing: 10) {
+  /// Collapsed: dot + one summary line + clock, on 380pt. Cramming the full
+  /// expanded header into that width overflowed it — the device chip and LLM
+  /// status had nowhere to go and got clipped mid-glyph.
+  private var collapsedPanelHeader: some View {
+    HStack(spacing: 9) {
       deckTally
 
-      headerHairline
-
-      panelModeMenu
-
-      if !state.inputDeviceName.isEmpty {
-        headerHairline
-
-        inputDeviceIndicator
+      if !state.transcriptionText.isEmpty {
+        Text(L("\(state.transcriptionText.count)字", "\(state.transcriptionText.count) ch"))
+          .font(.system(size: 10, weight: .medium, design: .monospaced))
+          .foregroundStyle(TF.frostTextFaint)
+          .fixedSize()
       }
-
-      headerHairline
-
-      llmTimingStatus
 
       Spacer(minLength: 4)
 
       topPanelButton(
-        systemName: state.isTranscriptPanelCollapsed ? "chevron.down" : "chevron.up",
-        accessibilityLabel: state.isTranscriptPanelCollapsed
-          ? L("展开面板", "Expand panel")
-          : L("收缩面板", "Collapse panel")
+        systemName: "chevron.down",
+        accessibilityLabel: L("展开面板", "Expand panel")
+      ) {
+        state.toggleTranscriptPanelCollapsed()
+      }
+    }
+    .padding(.horizontal, 12)
+    .frame(height: TF.topTranscriptPanelCollapsedHeaderHeight)
+  }
+
+  private var topPanelHeader: some View {
+    HStack(spacing: 9) {
+      deckTally
+
+      panelModeMenu
+
+      if !state.inputDeviceName.isEmpty {
+        inputDeviceIndicator
+      }
+
+      Spacer(minLength: 8)
+
+      llmTimingStatus
+
+      topPanelButton(
+        systemName: "chevron.up",
+        accessibilityLabel: L("收缩面板", "Collapse panel")
       ) {
         state.toggleTranscriptPanelCollapsed()
       }
@@ -603,27 +624,16 @@ struct FloatingBarView<S: FloatingBarState>: View {
         }
 
         topPanelButton(
-          systemName: "stop.fill",
+          systemName: "checkmark",
           accessibilityLabel: L("停止并插入", "Stop and insert"),
-          tint: TF.recording
+          tint: TF.signalTeal
         ) {
           state.requestPanelStop()
         }
       }
     }
     .padding(.horizontal, 12)
-    .frame(
-      height: state.isTranscriptPanelCollapsed
-        ? TF.topTranscriptPanelCollapsedHeaderHeight
-        : TF.topTranscriptPanelHeaderHeight
-    )
-    .background(
-      LinearGradient(
-        colors: [.white.opacity(0.035), .black.opacity(0.10)],
-        startPoint: .top,
-        endPoint: .bottom
-      )
-    )
+    .frame(height: TF.topTranscriptPanelHeaderHeight)
   }
 
   /// Phase status cluster at the left of the channel strip:
@@ -682,12 +692,6 @@ struct FloatingBarView<S: FloatingBarState>: View {
     .fixedSize()
   }
 
-  private var headerHairline: some View {
-    Rectangle()
-      .fill(TF.frostBorder)
-      .frame(width: 1, height: 14)
-  }
-
   /// Capture-device chip in the channel strip, styled like the LLM deck status.
   private var inputDeviceIndicator: some View {
     HStack(spacing: 5) {
@@ -723,27 +727,19 @@ struct FloatingBarView<S: FloatingBarState>: View {
         }
       }
     } label: {
-      HStack(spacing: 6) {
+      // Plain text, no chip. Boxing it made the header read as a toolbar of
+      // controls competing with the tally; the chevron is enough affordance.
+      HStack(spacing: 4) {
         Text(state.currentMode.name)
-          .font(.system(size: 10, weight: .semibold, design: .monospaced))
-          .tracking(1.2)
+          .font(.system(size: 10, weight: .medium, design: .monospaced))
+          .tracking(1)
           .lineLimit(1)
         Image(systemName: "chevron.down")
-          .font(.system(size: 7, weight: .bold))
+          .font(.system(size: 6, weight: .bold))
           .opacity(state.canSelectPanelMode ? 0.6 : 0.25)
       }
-      .foregroundStyle(TF.frostText.opacity(state.canSelectPanelMode ? 1 : 0.55))
-      .padding(.horizontal, 9)
-      .frame(height: 22)
-      .background {
-        RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
-          .fill(TF.frostWellRaised)
-      }
-      .overlay {
-        RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
-          .stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
-      }
-      .contentShape(RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous))
+      .foregroundStyle(TF.frostTextDim.opacity(state.canSelectPanelMode ? 1 : 0.55))
+      .contentShape(Rectangle())
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
@@ -845,7 +841,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
       )
 
       Rectangle()
-        .fill(TF.frostBorder)
+        .fill(TF.frostRule)
         .frame(width: dividerWidth)
         .frame(maxHeight: .infinity)
 
@@ -888,13 +884,15 @@ struct FloatingBarView<S: FloatingBarState>: View {
     isOptimized: Bool
   ) -> some View {
     VStack(alignment: .leading, spacing: 0) {
+      // LED leads the row: it's the column's state light, so it reads with
+      // the title rather than with the trailing metadata.
       HStack(spacing: 8) {
+        StatusLED(color: tone.ledColor, pulsing: tone.pulsing)
         Text(title.uppercased())
           .font(.system(size: 9, weight: .semibold, design: .monospaced))
           .tracking(2.2)
           .foregroundStyle(TF.frostTextFaint)
         Spacer()
-        StatusLED(color: tone.ledColor, pulsing: tone.pulsing)
         Text(metadata)
           .font(.system(size: 8.5, weight: .medium, design: .monospaced))
           .tracking(1)
@@ -903,12 +901,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
       .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
       .frame(height: TF.topTranscriptPanelColumnHeaderHeight)
       .overlay(alignment: .bottom) {
-        Rectangle().fill(TF.frostBorder).frame(height: 1)
+        Rectangle().fill(TF.frostRule).frame(height: 0.5)
       }
 
       content
         .font(.system(size: TF.topTranscriptPanelBodyFontSize, weight: .regular))
-        .foregroundStyle(isOptimized ? TF.frostText : TF.frostTextDim)
+        .foregroundStyle(isOptimized ? TF.frostText.opacity(0.95) : TF.frostTextDim.opacity(0.88))
         .lineSpacing(TF.topTranscriptPanelBodyLineSpacing)
         .textSelection(.disabled)
         .fixedSize(horizontal: false, vertical: true)
@@ -989,27 +987,21 @@ struct FloatingBarView<S: FloatingBarState>: View {
     .padding(.bottom, 12)
   }
 
+  /// Circular ghost action, matching the style-3 capsule's cancel/done pair.
+  /// Borderless by default; the fill only appears under the pointer, so a
+  /// header of four controls reads as one cluster instead of four boxes.
   private func topPanelButton(
     systemName: String,
     accessibilityLabel: String,
     tint: Color = TF.frostTextFaint,
     action: @escaping () -> Void
   ) -> some View {
-    Button(action: action) {
-      Image(systemName: systemName)
-        .font(.system(size: 8.5, weight: .semibold))
-        .foregroundStyle(tint)
-        .frame(width: 22, height: 22)
-        .background(
-          RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous).fill(TF.frostWell)
-        )
-        .overlay {
-          RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
-            .stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
-        }
-    }
-    .buttonStyle(.plain)
-    .accessibilityLabel(accessibilityLabel)
+    TopPanelGhostButton(
+      systemName: systemName,
+      accessibilityLabel: accessibilityLabel,
+      tint: tint,
+      action: action
+    )
   }
 
   // MARK: - Background & Border
@@ -1208,12 +1200,24 @@ struct StatusLED: View {
       .fill(color.opacity(pulsing && !lit ? 0.35 : 1))
       .frame(width: 5, height: 5)
       .shadow(color: color.opacity(0.8), radius: 3)
-      .onAppear {
-        guard pulsing else { return }
-        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-          lit = true
-        }
-      }
+      .onAppear { syncPulse() }
+      // The view's identity is stable across tone changes, so onAppear fires
+      // exactly once — a column going idle → working never started breathing
+      // without this.
+      .onChange(of: pulsing) { _, _ in syncPulse() }
+  }
+
+  private func syncPulse() {
+    guard pulsing else {
+      // Drop the repeating animation, otherwise it keeps running against a
+      // now-static opacity and the LED flickers at the wrong tone.
+      withAnimation(.easeOut(duration: 0.15)) { lit = false }
+      return
+    }
+    lit = false
+    withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+      lit = true
+    }
   }
 }
 
@@ -1335,6 +1339,8 @@ struct RecordingDot: View {
 struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
   let state: S
 
+  @State private var pulsing = false
+
   @AppStorage(TranscriptPanelStyle.storageKey) private var panelStyle =
     TranscriptPanelStyle.top.rawValue
 
@@ -1351,19 +1357,90 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
       if showsOptimizedCard {
         optimizedCard
       }
-      TallyLampOrb(meter: state.audioLevel)
-        .frame(width: 96, height: 96)
-      // Style 2 folds the capsule's info into the card's status row, so the
-      // lamp-only styles are the only ones still rendering it.
-      if style != .bottom {
-        modeCapsule
-      }
+      statusPill
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     .accessibilityElement(children: .contain)
     .accessibilityLabel(
       L("正在使用\(state.currentMode.name)录音", "Recording in \(state.currentMode.name)")
     )
+  }
+
+  // MARK: - Status Pill
+
+  /// Breathing dot + live level meter + phase label + frozen clock, on one
+  /// frosted pill. Replaces the 96×96 machined tally lamp: the dial was a
+  /// beautiful object but it belonged to a different design language, took
+  /// a 96pt square of screen to say what a 32pt strip says, and its VU ring
+  /// duplicated the meter that now sits inline.
+  private var statusPill: some View {
+    HStack(spacing: 9) {
+      Circle()
+        .fill(pillTone)
+        .frame(width: 6, height: 6)
+        .shadow(color: pillTone.opacity(0.9), radius: 4)
+        .opacity(pulsing ? 0.35 : 1.0)
+
+      LevelMeter(meter: state.audioLevel, active: state.barPhase == .recording)
+        .frame(width: 26, height: 14)
+
+      Text(pillLabel)
+        .font(.system(size: 11.5, weight: .medium))
+        .foregroundStyle(TF.frostText)
+        .lineLimit(1)
+
+      if let start = state.recordingStartDate {
+        RecordingTimer(
+          startDate: start,
+          endDate: state.barPhase == .recording || state.barPhase == .preparing
+            ? nil : state.recordingStopDate
+        )
+        .font(.system(size: 10, weight: .medium, design: .monospaced))
+        .foregroundStyle(TF.frostTextFaint)
+      }
+
+      // Style 2 folds the mode into the card's status row; the lamp-only
+      // styles have no card, so the pill carries it.
+      if style != .bottom {
+        Text(CursorOverlayMetrics.secondarySeparator)
+          .font(.system(size: 10, design: .monospaced))
+          .foregroundStyle(TF.frostTextFaint)
+        Text(state.currentMode.name)
+          .font(.system(size: 10, weight: .medium, design: .monospaced))
+          .foregroundStyle(TF.frostTextFaint)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
+    }
+    .padding(.horizontal, 16)
+    .frame(height: TF.screenBottomIndicatorHeight)
+    .fixedSize(horizontal: true, vertical: false)
+    .frostSurface(Capsule(), backlight: pillTone)
+    .onAppear {
+      withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+        pulsing = true
+      }
+    }
+  }
+
+  private var pillTone: Color {
+    switch state.barPhase {
+    case .processing, .recovering: return TF.lampAmber
+    case .error: return TF.settingsAccentRed
+    case .done: return TF.signalTeal
+    default: return TF.signalTeal
+    }
+  }
+
+  private var pillLabel: String {
+    switch state.barPhase {
+    case .preparing: return L("准备中", "Preparing")
+    case .recording: return L("正在聆听", "Listening")
+    case .processing, .recovering: return state.effectiveProcessingLabel
+    case .done: return L("已完成", "Done")
+    case .error: return L("失败", "Failed")
+    case .hidden: return ""
+    }
   }
 
   // MARK: - Optimized Transcript Card (style 2)
@@ -1453,219 +1530,78 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
     if OptimizedPanelCopy.bottomCardIsPlaceholder(for: state) { return TF.frostTextFaint }
     return TF.frostText
   }
+}
 
-  // MARK: - Mode Capsule (lamp-only styles)
+/// Borderless circular header action. Idle is glyph-only; hover brings in a
+/// faint fill. Mirrors the style-3 capsule's cancel/done buttons.
+private struct TopPanelGhostButton: View {
+  let systemName: String
+  let accessibilityLabel: String
+  let tint: Color
+  let action: () -> Void
 
-  private var modeCapsule: some View {
-    HStack(spacing: 6) {
-      StatusLED(color: TF.lampAmber, pulsing: true)
-      Text(state.currentMode.name)
-        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-        .tracking(2)
-        .foregroundStyle(TF.frostTextDim)
-        .lineLimit(1)
-        .truncationMode(.tail)
+  @State private var isHovered = false
+
+  var body: some View {
+    Button(action: action) {
+      Image(systemName: systemName)
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(isHovered ? TF.frostText : tint)
+        .frame(width: 22, height: 22)
+        .background {
+          Circle().fill(Color.white.opacity(isHovered ? 0.12 : 0))
+        }
     }
-    .padding(.horizontal, 10)
-    .frame(height: 19)
-    .background {
-      RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
-        .fill(TF.frostWellRaised)
-    }
-    .overlay {
-      RoundedRectangle(cornerRadius: TF.frostKey, style: .continuous)
-        .stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
-    }
-    .frame(maxWidth: TF.screenBottomIndicatorWidth - 24)
+    .buttonStyle(.plain)
+    .onHover { isHovered = $0 }
+    .animation(.easeOut(duration: 0.12), value: isHovered)
+    .accessibilityLabel(accessibilityLabel)
   }
 }
 
-/// Machined dial + VU tick ring + incandescent filament core.
-private struct TallyLampOrb: View {
+/// Compact live level meter: five bars driven by the smoothed input level,
+/// sized for the bottom status pill. The tally lamp's 64-tick VU ring used
+/// to do this job in a 96pt circle.
+private struct LevelMeter: View {
   let meter: AudioLevelMeter
+  var active: Bool
   @State private var smoother = LevelSmoother(timeConstant: 0.11)
-  @State private var peakTracker = LevelPeak()
+
+  private static let barCount = 5
+  /// Per-bar response curve, so the bars don't move as one block.
+  private static let weights: [CGFloat] = [0.55, 0.85, 1.0, 0.78, 0.48]
 
   var body: some View {
     TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-      lampFace(time: timeline.date.timeIntervalSinceReferenceDate)
+      bars(time: timeline.date.timeIntervalSinceReferenceDate)
     }
   }
 
-  private func lampFace(time: Double) -> some View {
+  private func bars(time: Double) -> some View {
     smoother.target = CGFloat(max(0, min(1, meter.current)))
-    let level = smoother.update(time: time)
-    let peak = peakTracker.update(time: time, level: level)
-    let breath = CGFloat(sin(time * (.pi * 2 / 3.6)) * 0.5 + 0.5)
-    let energy = CGFloat(pow(max(0, (level - 0.02) / 0.6), 0.6))
-    let glow = min(1.25, 0.30 + 0.22 * breath + 0.75 * energy)
+    let level = active ? smoother.update(time: time) : 0
+    let energy = pow(max(0, (level - 0.02) / 0.6), 0.6)
 
-    return ZStack {
-      dialPlate
-      tickRing(peak: peak)
-      bezelRing
-      filamentCore(glow: glow, breath: breath, time: time)
-    }
-  }
-
-  // MARK: Layers
-
-  /// Dark instrument face so the tick ring reads on any wallpaper.
-  private var dialPlate: some View {
-    Circle()
-      .fill(
-        RadialGradient(
-          colors: [TF.ink3, TF.ink1, TF.ink0],
-          center: .center,
-          startRadius: 2,
-          endRadius: 45
-        )
-      )
-      .overlay {
-        Circle()
-          .fill(
-            RadialGradient(
-              colors: [.white.opacity(0.06), .clear],
-              center: UnitPoint(x: 0.34, y: 0.24),
-              startRadius: 1,
-              endRadius: 40
-            )
-          )
-      }
-      .overlay {
-        Circle().stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
-      }
-      .padding(3)
-  }
-
-  /// 64 engraved ticks; the lit arc follows the peak-held voice level.
-  private func tickRing(peak: CGFloat) -> some View {
-    Canvas { context, size in
-      let center = CGPoint(x: size.width / 2, y: size.height / 2)
-      let tickCount = 64
-      let lit = peak * CGFloat(tickCount) * 0.78  // never pegs full, like a VU
-      for i in 0..<tickCount {
-        let angle = Double(i) / Double(tickCount) * 2 * .pi - .pi / 2
-        let on = CGFloat(i) < lit
-        let head = on ? min(1, max(0.12, (CGFloat(i) - (lit - 10)) / 10 + 0.25)) : 0
-        let inner: CGFloat = 39.5
-        let outer: CGFloat = on ? 43.0 : 41.8
-        var path = Path()
-        path.move(
-          to: CGPoint(
-          x: center.x + CGFloat(cos(angle)) * inner,
-          y: center.y + CGFloat(sin(angle)) * inner
-        ))
-        path.addLine(
-          to: CGPoint(
-          x: center.x + CGFloat(cos(angle)) * outer,
-          y: center.y + CGFloat(sin(angle)) * outer
-        ))
-        if on {
-          let color = Color(
-            red: 1.0,
-            green: Double(0.73 + 0.16 * head),
-            blue: Double(0.31 + 0.35 * head)
-          )
-          context.stroke(
-            path,
-            with: .color(color.opacity(Double(0.22 * head))),
-            style: StrokeStyle(lineWidth: 4.5, lineCap: .round)
-          )
-          context.stroke(
-            path,
-            with: .color(color.opacity(Double(0.42 + 0.5 * head))),
-            style: StrokeStyle(lineWidth: 1.9, lineCap: .round)
-          )
-        } else {
-          context.stroke(
-            path,
-            with: .color(TF.paper.opacity(0.16)),
-            style: StrokeStyle(lineWidth: 1)
-          )
+    return GeometryReader { geo in
+      let height = geo.size.height
+      let spacing: CGFloat = 2
+      let width = (geo.size.width - spacing * CGFloat(Self.barCount - 1))
+        / CGFloat(Self.barCount)
+      HStack(alignment: .center, spacing: spacing) {
+        ForEach(0..<Self.barCount, id: \.self) { index in
+          let weight = Self.weights[index]
+          // Idle bars keep a visible floor so the meter still reads as a
+          // meter when nothing is being said.
+          let filled = max(0.14, min(1, energy * weight))
+          // White, not teal: the pill's dot already carries the state color,
+          // and a second teal element made the strip read as two accents.
+          Capsule()
+            .fill(Color.white.opacity(active ? 0.35 + 0.45 * filled : 0.18))
+            .frame(width: width, height: max(2, height * filled))
         }
       }
+      .frame(width: geo.size.width, height: height, alignment: .center)
     }
-  }
-
-  /// Machined conic bezel between the tick ring and the core.
-  private var bezelRing: some View {
-    Circle()
-      .fill(
-        AngularGradient(
-          colors: [TF.ink3, TF.ink1, TF.ink2, TF.ink0, TF.ink3],
-          center: .center,
-          startAngle: .degrees(210),
-          endAngle: .degrees(570)
-        )
-      )
-      .overlay {
-        // recessed inner edge
-        Circle()
-          .fill(
-            RadialGradient(
-              colors: [.clear, .black.opacity(0.5)],
-              center: .center,
-              startRadius: 22,
-              endRadius: 34
-            )
-          )
-      }
-      .overlay {
-        Circle().stroke(TF.frostBorder, lineWidth: TF.frostBorderWidth)
-      }
-      .overlay {
-        Circle()
-          .fill(
-            RadialGradient(
-              colors: [.white.opacity(0.09), .clear],
-              center: UnitPoint(x: 0.32, y: 0.26),
-              startRadius: 1,
-              endRadius: 26
-            )
-          )
-      }
-      .padding(14)
-  }
-
-  /// Warm incandescent core; brightness = slow breath + speech energy.
-  private func filamentCore(glow: CGFloat, breath: CGFloat, time: Double) -> some View {
-    let g = Double(glow)
-    return ZStack {
-      Circle()
-        .fill(
-          RadialGradient(
-            colors: [
-              Color(red: 1.0, green: 0.96, blue: 0.86).opacity(0.28 + 0.66 * g),
-              Color(red: 1.0, green: 0.80, blue: 0.47).opacity(0.24 + 0.58 * g),
-              Color(red: 0.91, green: 0.52, blue: 0.18).opacity(0.20 + 0.48 * g),
-              Color(red: 0.47, green: 0.20, blue: 0.07).opacity(0.30 + 0.30 * g),
-              Color(red: 0.16, green: 0.07, blue: 0.03).opacity(0.92),
-            ],
-            center: UnitPoint(x: 0.42, y: 0.38),
-            startRadius: 1,
-            endRadius: 27
-          )
-        )
-      // drifting filament hot-spot
-      Circle()
-        .fill(
-          RadialGradient(
-            colors: [.white.opacity(0.75 * g), .clear],
-            center: UnitPoint(
-              x: 0.58 + 0.05 * sin(time * 0.7),
-              y: 0.30 + 0.04 * cos(time * 0.9)
-            ),
-            startRadius: 0,
-            endRadius: 14
-          )
-        )
-      Circle()
-        .stroke(TF.lampAmberHot.opacity(0.18 + 0.3 * g), lineWidth: 1)
-    }
-    .padding(21)
-    .shadow(color: TF.lampAmber.opacity(0.20 + 0.28 * g), radius: 5 + 9 * glow)
-    .scaleEffect(0.97 + 0.045 * breath + 0.05 * glow)
   }
 }
 

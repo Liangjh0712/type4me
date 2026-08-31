@@ -22,7 +22,7 @@ final class FloatingBarPanelTests: XCTestCase {
     defer { panel.orderOut(nil) }
     let screen = try XCTUnwrap(panel.preferredScreen())
 
-    XCTAssertEqual(TF.topTranscriptPanelMaxWidth, 1120)
+    XCTAssertEqual(TF.topTranscriptPanelMaxWidth, 860)
     XCTAssertLessThanOrEqual(
       panel.frame.width, TF.topTranscriptPanelMaxWidth + TF.topTranscriptPanelOuterInset)
     XCTAssertEqual(
@@ -89,10 +89,11 @@ final class FloatingBarPanelTests: XCTestCase {
 
     let screen = try XCTUnwrap(topPanel.preferredScreen())
     XCTAssertTrue(indicator.isVisible)
-    XCTAssertEqual(
-      indicator.frame.size,
-      NSSize(width: TF.screenBottomIndicatorWidth, height: TF.screenBottomIndicatorHeight)
-    )
+    XCTAssertEqual(indicator.frame.height, TF.screenBottomIndicatorHeight)
+    // The pill hugs its content (dot + meter + label + clock + mode), so the
+    // panel has to be measured, not fixed — a hard 132pt clipped the text.
+    // The token is a floor, not the width.
+    XCTAssertGreaterThan(indicator.frame.width, TF.screenBottomIndicatorWidth)
     XCTAssertEqual(indicator.frame.midX, screen.visibleFrame.midX, accuracy: 0.5)
     XCTAssertEqual(
       indicator.frame.minY,

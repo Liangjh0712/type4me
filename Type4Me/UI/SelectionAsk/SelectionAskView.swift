@@ -58,15 +58,13 @@ struct SelectionAskView: View {
     }
 
     private var header: some View {
-        HStack {
-            Spacer()
-            HStack(spacing: 7) {
-                Image(systemName: "sparkle.magnifyingglass")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(L("随便问", "Ask Anything"))
-                    .font(.system(size: 15, weight: .semibold))
-            }
-            .foregroundStyle(TF.frostText)
+        HStack(spacing: 7) {
+            Image(systemName: "sparkle.magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(TF.signalTeal)
+            Text(L("划词提问", "Ask Selection"))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(TF.frostText)
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark")

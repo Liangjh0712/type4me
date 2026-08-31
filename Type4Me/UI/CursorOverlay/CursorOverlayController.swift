@@ -313,12 +313,12 @@ final class CursorOverlayController {
     }
   }
 
-  /// FIXED panel size (capsule width; the action pills live INSIDE the meta
-  /// row at its edges, so nothing sticks out sideways). The capsule never
-  /// grows with the transcript: a moving frame edge makes the reader's gaze
-  /// drift, while a fixed layout keeps the text tail — the one thing being
-  /// read — at a stable screen position. Text overflow is handled view-side
-  /// by head-truncation.
+  /// FIXED panel size (capsule width; the ghost buttons sit INSIDE the
+  /// capsule row, so nothing sticks out sideways). The capsule never grows
+  /// with the transcript: a moving frame edge makes the reader's gaze drift,
+  /// while a fixed layout keeps the text tail — the one thing being read —
+  /// at a stable screen position. Text overflow is handled view-side by
+  /// head-truncation.
   private func measuredSize() -> NSSize {
     // 38pt capsule (13.5pt text + 8pt vertical padding, floored by the 22pt
     // ghost buttons) + 4pt gap + 12pt hover meta row + 2×2pt safety padding.

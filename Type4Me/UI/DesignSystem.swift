@@ -80,6 +80,11 @@ enum TF {
   /// "deck vs capsule" line was the most visible seam between the languages.
   static let frostBorder = Color.white.opacity(0.13)
   static let frostBorderWidth: CGFloat = 0.5
+  /// Internal rules (column dividers, meter-bridge edges, header underlines).
+  /// Lighter than the outer `frostBorder`: at the outer weight a panel with
+  /// four internal rules reads as a wireframe grid rather than one surface.
+  static let frostRule = Color.white.opacity(0.08)
+
   /// Recessed wells inside a frost surface (meter bridge, key caps, columns).
   static let frostWell = Color.white.opacity(0.05)
   static let frostWellRaised = Color.white.opacity(0.08)
@@ -132,10 +137,12 @@ enum TF {
 
   /// Overlay corner ramp, collapsed from six ad-hoc values (28/20/14/13/9/5).
   /// `frostKey` for key caps and inline chips, `frostPanel` for any surface
-  /// that holds body text, `frostSheet` for the selection-ask sheet.
+  /// that holds body text, `frostSheet` for the selection-ask sheet. The
+  /// latter two are equal by design — a bigger sheet does not get a rounder
+  /// corner, or the family stops looking cut from one material.
   static let frostKey: CGFloat = 6
-  static let frostPanel: CGFloat = 12
-  static let frostSheet: CGFloat = 18
+  static let frostPanel: CGFloat = 14
+  static let frostSheet: CGFloat = 14
 
   static let cornerSM: CGFloat = 6
   static let cornerMD: CGFloat = 10
@@ -147,15 +154,22 @@ enum TF {
   static let barWidthCompact: CGFloat = 200
   static let barHeight: CGFloat = 40
   static let barBottomOffset: CGFloat = 32
+  /// Style-2 status pill. Width is a floor — the pill hugs its content and
+  /// the panel grows to fit. Height is the pill itself, down from the 130pt
+  /// square the machined tally lamp needed.
   static let screenBottomIndicatorWidth: CGFloat = 132
-  static let screenBottomIndicatorHeight: CGFloat = 130
+  static let screenBottomIndicatorHeight: CGFloat = 32
 
   // MARK: Transcript Popup (hover preview above bar)
 
   static let transcriptPopupMaxHeight: CGFloat = 400
   static let transcriptPopupCorner: CGFloat = 14
   static let transcriptPopupGap: CGFloat = 8
-  static let topTranscriptPanelMaxWidth: CGFloat = 1120
+  /// Expanded transcript panel cap. 1120 ran nearly edge to edge on a laptop,
+  /// which read as a system banner rather than as a card sitting on the
+  /// desktop; 860 keeps two comfortable columns and leaves the wallpaper
+  /// visible on both sides.
+  static let topTranscriptPanelMaxWidth: CGFloat = 860
   static let topTranscriptPanelCollapsedWidth: CGFloat = 380
   static let topTranscriptPanelOuterInset: CGFloat = 10
   static let topTranscriptPanelHeaderHeight: CGFloat = 34
@@ -166,7 +180,8 @@ enum TF {
   static let topTranscriptPanelBodyTopPadding: CGFloat = 6
   static let topTranscriptPanelBodyBottomPadding: CGFloat = 8
   static let topTranscriptPanelBodyFontSize: CGFloat = 13
-  static let topTranscriptPanelBodyLineSpacing: CGFloat = 3
+  /// 13pt body at 1.62 line-height, matching the mockup's airier columns.
+  static let topTranscriptPanelBodyLineSpacing: CGFloat = 5
   static let topTranscriptPanelTopOffset: CGFloat = 10
   static let topTranscriptPanelBottomMargin: CGFloat = 12
 

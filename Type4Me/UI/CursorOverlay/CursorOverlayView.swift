@@ -103,6 +103,8 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     case live
     /// Post-processing under way — amber dot, frozen text.
     case working
+    /// Something failed — red dot, no pulse.
+    case failed
   }
 
   private var tone: Tone {
@@ -110,7 +112,11 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     case .recording:
       return state.transcriptionText.isEmpty ? .hint : .live
     case .processing, .recovering:
-      return .working
+      // A pending final-optimization failure keeps the panel up in these
+      // phases, so the dot has to be able to say "failed" here too.
+      return state.finalOptimizationFailureMessage == nil ? .working : .failed
+    case .error:
+      return .failed
     default:
       return state.transcriptionText.isEmpty ? .hint : .live
     }
@@ -178,12 +184,14 @@ struct CursorOverlayView<S: FloatingBarState>: View {
   /// The empty region to the right of short text is deliberate capacity,
   /// exactly like a half-filled text field.
   private var mainCapsule: some View {
-    HStack(spacing: 8) {
+    HStack(spacing: 10) {
       Circle()
         .fill(dotColor)
         .frame(width: 6, height: 6)
         .shadow(color: dotColor.opacity(0.9), radius: 4)
-        .opacity(pulsing ? 0.35 : 1.0)
+        // A failed state holds steady — a breathing red dot reads as "still
+        // working on it" when the opposite is true.
+        .opacity(pulsing && tone != .failed ? 0.35 : 1.0)
       transcriptText
       Spacer(minLength: 4)
       inlineStatus
@@ -208,7 +216,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
         .transition(.opacity.combined(with: .scale(scale: 0.6)))
       }
     }
-    .padding(.leading, 16)
+    .padding(.leading, 17)
     // Tighter on the right: the ghost buttons carry their own visual inset.
     .padding(.trailing, buttonsVisible ? 8 : 16)
     .padding(.vertical, 8)
@@ -311,6 +319,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     switch tone {
     case .live: return TF.signalTeal
     case .working: return TF.lampAmber
+    case .failed: return TF.settingsAccentRed
     case .hint: return .white.opacity(0.4)
     }
   }
@@ -320,7 +329,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     // Warm white body text; the teal is reserved for accents (dot, ✓ button,
     // backlight). A full run of teal read like IME candidate text.
     case .live: return TF.frostText
-    case .working: return TF.frostTextDim
+    case .working, .failed: return TF.frostTextDim
     case .hint: return .white.opacity(0.45)
     }
   }

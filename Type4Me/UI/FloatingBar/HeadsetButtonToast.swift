@@ -37,7 +37,7 @@ private final class HeadsetButtonToastPanel: NSPanel {
 private struct HeadsetButtonToastView: View {
   let keyType: Int
 
-  private var label: String {
+  static func label(for keyType: Int) -> String {
     switch keyType {
     case 0: return L("耳机音量 + 已识别", "Headset Volume + detected")
     case 1: return L("耳机音量 − 已识别", "Headset Volume − detected")
@@ -45,22 +45,13 @@ private struct HeadsetButtonToastView: View {
     }
   }
 
-  private var icon: String {
-    switch keyType {
-    case 0: return "speaker.plus.fill"
-    case 1: return "speaker.minus.fill"
-    default: return "headphones"
-    }
-  }
+  private var label: String { Self.label(for: keyType) }
 
   var body: some View {
     HStack(spacing: 7) {
       Circle()
         .fill(TF.signalTeal)
         .frame(width: 6, height: 6)
-      Image(systemName: icon)
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(TF.frostTextDim)
       Text(label)
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(TF.frostText)
@@ -76,13 +67,25 @@ private struct HeadsetButtonToastView: View {
 final class HeadsetButtonToastController {
   /// The panel hugs the capsule exactly — the old 36pt height carried a 4pt
   /// allowance for a drop shadow that no longer exists.
-  private let size = NSSize(width: 172, height: 32)
+  private static let height: CGFloat = 32
+  /// Width is measured per label, not fixed. The capsule hugs its content, so
+  /// a hard 172pt truncated the longer English strings ("Headset Volume +
+  /// detected" needs ~202pt) while Chinese happened to fit.
+  private static func size(for keyType: Int) -> NSSize {
+    let label = HeadsetButtonToastView.label(for: keyType)
+    let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    let textWidth = ceil((label as NSString).size(withAttributes: [.font: font]).width)
+    // 12pt padding ×2 + dot(6) + gap(7).
+    return NSSize(width: max(132, 12 * 2 + 6 + 7 + textWidth), height: height)
+  }
+  private var size: NSSize
   private let panel: HeadsetButtonToastPanel
   private var hosting: NSHostingView<HeadsetButtonToastView>
   private var hideTask: DispatchWorkItem?
   private var generation = 0
 
   init() {
+    size = Self.size(for: 16)
     panel = HeadsetButtonToastPanel(size: size)
     hosting = NSHostingView(rootView: HeadsetButtonToastView(keyType: 16))
     hosting.sizingOptions = []
@@ -98,8 +101,10 @@ final class HeadsetButtonToastController {
     generation &+= 1
     let currentGeneration = generation
     hideTask?.cancel()
+    size = Self.size(for: keyType)
     hosting.rootView = HeadsetButtonToastView(keyType: keyType)
     hosting.frame = NSRect(origin: .zero, size: size)
+    panel.setContentSize(size)
 
     let mouseLocation = NSEvent.mouseLocation
     let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })

@@ -254,6 +254,8 @@ private enum FloatingShortcutDeckStyle {
   static var accent: Color { TF.signalTeal }
   static var latch: Color { TF.lampAmber }
   static let keyHeight: CGFloat = 20
+  /// Gap between deck cells. Shared by the view and the panel-size math.
+  static let cellSpacing: CGFloat = 4
   /// Deliberately off the shared radius ramp. The deck is 26pt tall, so
   /// `TF.frostPanel` (12) would round it into a near-pill; 9/5 are the
   /// settled proportions for a control strip rather than a text surface.
@@ -315,7 +317,7 @@ private struct FloatingShortcutPanelView: View {
 
   var body: some View {
     deckChrome {
-      HStack(spacing: 6) {
+      HStack(spacing: FloatingShortcutDeckStyle.cellSpacing) {
         ForEach(buttons) { button in
           if button.action == .modeSwitch {
             modeCell
@@ -337,43 +339,33 @@ private struct FloatingShortcutPanelView: View {
 
   /// Mode cell: shows the current mode name, click pops the mode list.
   private var modeCell: some View {
-    HStack(spacing: 5) {
-      Circle()
-        .fill(FloatingShortcutDeckStyle.accent)
-        .frame(width: 5, height: 5)
-        .shadow(color: FloatingShortcutDeckStyle.accent.opacity(0.8), radius: 3)
-      Text(state.currentMode.name)
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundStyle(TF.frostText)
-        .lineLimit(1)
-        .truncationMode(.tail)
-    }
-    .padding(.horizontal, 10)
-    .frame(
-      width: FloatingShortcutDeckStyle.modeCellWidth(state.currentMode.name),
-      height: FloatingShortcutDeckStyle.keyHeight
-    )
-    .background(
-      RoundedRectangle(
-        cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+    // Fill-only, no border and no LED. The dot duplicated the deck's one
+    // accent while the border made this the only outlined cell on the strip.
+    Text(state.currentMode.name)
+      .font(.system(size: 10, weight: .semibold))
+      .foregroundStyle(FloatingShortcutDeckStyle.accent)
+      .lineLimit(1)
+      .truncationMode(.tail)
+      .padding(.horizontal, 10)
+      .frame(
+        width: FloatingShortcutDeckStyle.modeCellWidth(state.currentMode.name),
+        height: FloatingShortcutDeckStyle.keyHeight
       )
-      .fill(FloatingShortcutDeckStyle.accent.opacity(0.10))
-    )
-    .overlay(
-      RoundedRectangle(
-        cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+      .background(
+        RoundedRectangle(
+          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
+        )
+        .fill(FloatingShortcutDeckStyle.accent.opacity(0.13))
       )
-      .strokeBorder(FloatingShortcutDeckStyle.accent.opacity(0.28), lineWidth: 0.5)
-    )
-    .overlay {
-      DeckClickButton(
-        help: L("切换处理模式", "Switch processing mode"),
-        onHoverChanged: nil
-      ) { view in
-        onShowModes(view)
+      .overlay {
+        DeckClickButton(
+          help: L("切换处理模式", "Switch processing mode"),
+          onHoverChanged: nil
+        ) { view in
+          onShowModes(view)
+        }
       }
-    }
-    .accessibilityLabel(L("模式切换", "Mode switch"))
+      .accessibilityLabel(L("模式切换", "Mode switch"))
   }
 
   /// Trailing gear cell: the ONLY on-deck management entry. Add/remove live
@@ -381,23 +373,14 @@ private struct FloatingShortcutPanelView: View {
   private var settingsCell: some View {
     Image(systemName: "gearshape.fill")
       .font(.system(size: 10, weight: .semibold))
-      .foregroundStyle(TF.frostTextDim)
+      .foregroundStyle(TF.frostTextFaint)
       .frame(
         width: FloatingShortcutDeckStyle.settingsCellWidth,
         height: FloatingShortcutDeckStyle.keyHeight
       )
-      .background(
-        RoundedRectangle(
-          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
-        )
-        .fill(TF.frostWell)
-      )
-      .overlay(
-        RoundedRectangle(
-          cornerRadius: FloatingShortcutDeckStyle.keyCornerRadius, style: .continuous
-        )
-        .strokeBorder(TF.frostBorder, lineWidth: TF.frostBorderWidth)
-      )
+      // No well: the gear is a menu affordance, not a key. Filling it made
+      // the strip look like it had one more shortcut than it does.
+      .contentShape(Rectangle())
       .overlay {
         DeckClickButton(
           help: L("管理格子（添加 / 移除）", "Manage cells (add / remove)"),
@@ -469,10 +452,11 @@ private struct FloatingShortcutKeyButton: View {
     return TF.frostText
   }
 
-  /// Pressed keys keep the accent-lit bevel; idle keys share the one hairline
-  /// every other frost surface draws.
+  /// Pressed keys get an accent-lit bevel; idle keys draw no edge at all.
+  /// Six bordered cells in a 26pt strip read as a grid of boxes — the fill
+  /// alone is enough to separate them from the deck behind.
   private var edgeStyle: AnyShapeStyle {
-    guard pressState.isActive else { return AnyShapeStyle(TF.frostBorder) }
+    guard pressState.isActive else { return AnyShapeStyle(Color.clear) }
     return AnyShapeStyle(
       LinearGradient(
         colors: [accent.opacity(0.55), accent.opacity(0.22)],
@@ -945,7 +929,9 @@ final class FloatingShortcutPanelController: NSObject, NSWindowDelegate {
   ) -> NSSize {
     // The panel hugs the deck exactly — no shadow padding, no transparent
     // drag margin (that dead ring around the deck was pure overhead).
-    let spacing: CGFloat = 6
+    // Must stay in sync with the view's HStack spacing, or the panel is
+    // sized for a layout the deck isn't using.
+    let spacing = FloatingShortcutDeckStyle.cellSpacing
     let horizontalPadding: CGFloat = 4 + 5  // leading + trailing
 
     let modeName = state.currentMode.name

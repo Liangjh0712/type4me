@@ -59,20 +59,30 @@ final class CursorOverlayPanel: NSPanel {
 /// post-processing, hides on completion.
 ///
 /// Placement is FIXED, not pointer-anchored: the capsule appears at a
-/// persisted position every time (bottom-center of the active screen on
-/// first run). Dragging it stores the new origin in UserDefaults; the
-/// pointer-follow anchoring was dropped because a moving target made the
-/// status harder, not easier, to glance at. Until the first drag, the
-/// capsule re-centers as its width grows with the transcript; afterwards the
-/// user's origin wins and only the size tracks the text.
+/// persisted position every time (bottom-center on first run). Dragging it
+/// stores the new position in UserDefaults; the pointer-follow anchoring was
+/// dropped because a moving target made the status harder, not easier, to
+/// glance at. Until the first drag, the capsule re-centers as its width grows
+/// with the transcript; afterwards the user's position wins and only the size
+/// tracks the text.
+///
+/// The parked position is stored as a display-independent anchor (a fraction
+/// of the screen's free space), not a global point, so on every cold show the
+/// capsule resolves onto whichever display the user is working on — same
+/// screen resolution the top deck uses (focused window, then pointer). A
+/// global point would have pinned it to whichever display it was last dragged
+/// on, which is wrong on a multi-monitor desk.
 ///
 /// Subscribes to AppState via Swift Observation (withObservationTracking) so
 /// the existing single-assignment panel closures stay owned by
 /// FloatingBarController.
 @MainActor
 final class CursorOverlayController {
+  /// Legacy absolute-point keys, migrated to the relative anchor on first read.
   private static let positionXKey = "tf_cursorOverlayPosition3X"
   private static let positionYKey = "tf_cursorOverlayPosition3Y"
+  private static let anchorXKey = "tf_cursorOverlayAnchor3X"
+  private static let anchorYKey = "tf_cursorOverlayAnchor3Y"
 
   private let state: AppState
   private let userDefaults: UserDefaults
@@ -183,25 +193,63 @@ final class CursorOverlayController {
 
   // MARK: - Position persistence
 
-  private func loadPosition() -> NSPoint? {
+  /// Parked position as a display-independent anchor. Migrates the legacy
+  /// absolute point (written before multi-monitor support) by reinterpreting
+  /// it against the screen it was saved on, then dropping the old keys.
+  private func loadAnchor() -> CursorOverlayPlacement.RelativeAnchor? {
+    if userDefaults.object(forKey: Self.anchorXKey) != nil,
+      userDefaults.object(forKey: Self.anchorYKey) != nil
+    {
+      return CursorOverlayPlacement.RelativeAnchor(
+        x: userDefaults.double(forKey: Self.anchorXKey),
+        y: userDefaults.double(forKey: Self.anchorYKey)
+      )
+    }
+    return migrateLegacyPosition()
+  }
+
+  private func migrateLegacyPosition() -> CursorOverlayPlacement.RelativeAnchor? {
     guard userDefaults.object(forKey: Self.positionXKey) != nil,
       userDefaults.object(forKey: Self.positionYKey) != nil
     else { return nil }
-    return NSPoint(
+    let legacy = NSPoint(
       x: userDefaults.double(forKey: Self.positionXKey),
       y: userDefaults.double(forKey: Self.positionYKey)
     )
+    userDefaults.removeObject(forKey: Self.positionXKey)
+    userDefaults.removeObject(forKey: Self.positionYKey)
+    guard let screen = CursorOverlayPlacement.screen(containing: legacy) else { return nil }
+    let anchor = CursorOverlayPlacement.relativeAnchor(
+      origin: legacy, size: measuredSize(), visibleFrame: screen.visibleFrame
+    )
+    saveAnchor(anchor)
+    return anchor
   }
 
+  private func saveAnchor(_ anchor: CursorOverlayPlacement.RelativeAnchor) {
+    userDefaults.set(anchor.x, forKey: Self.anchorXKey)
+    userDefaults.set(anchor.y, forKey: Self.anchorYKey)
+  }
+
+  /// Drag finished: record where the capsule landed, relative to the screen it
+  /// was dropped on — so the same spot is reused on every other display too.
   private func savePosition() {
-    let origin = panel.frame.origin
-    userDefaults.set(origin.x, forKey: Self.positionXKey)
-    userDefaults.set(origin.y, forKey: Self.positionYKey)
+    let frame = panel.frame
+    guard let screen = CursorOverlayPlacement.screen(
+      containing: NSPoint(x: frame.midX, y: frame.midY)
+    ) else { return }
+    saveAnchor(
+      CursorOverlayPlacement.relativeAnchor(
+        origin: frame.origin, size: frame.size, visibleFrame: screen.visibleFrame
+      )
+    )
   }
 
   /// Double-click gesture: forget the parked position and glide back to the
   /// default (bottom-center of the current screen).
   private func recenter() {
+    userDefaults.removeObject(forKey: Self.anchorXKey)
+    userDefaults.removeObject(forKey: Self.anchorYKey)
     userDefaults.removeObject(forKey: Self.positionXKey)
     userDefaults.removeObject(forKey: Self.positionYKey)
     guard let screen = CursorOverlayPlacement.screen(
@@ -223,30 +271,31 @@ final class CursorOverlayController {
   private func updateFrame() {
     let size = measuredSize()
     let origin: NSPoint
-    if let saved = loadPosition() {
+
+    if panel.isVisible {
+      // Resize in place: left and top edges anchored to the current frame, so
+      // bucket crossings glide around a stable anchor. Never re-resolve the
+      // screen mid-utterance — that would teleport the capsule if the user
+      // moved the pointer while dictating.
+      let proposed = NSPoint(x: panel.frame.origin.x, y: panel.frame.maxY - size.height)
       let screen = CursorOverlayPlacement.screen(
-        containing: panel.isVisible ? panel.frame.origin : saved
+        containing: NSPoint(x: panel.frame.midX, y: panel.frame.midY)
       )
-      let proposed: NSPoint
-      if panel.isVisible {
-        // Resize in place: left and top edges anchored to the current frame,
-        // so bucket crossings glide around a stable anchor.
-        proposed = NSPoint(x: panel.frame.origin.x, y: panel.frame.maxY - size.height)
-      } else {
-        // User-parked position wins on first show. A stale position (e.g.
-        // disconnected display) clamps onto the primary screen via
-        // screen(containing:)'s fallback.
-        proposed = saved
-      }
       origin = screen.map {
         CursorOverlayPlacement.clamped(proposed, size: size, visibleFrame: $0.visibleFrame)
       } ?? proposed
     } else {
-      // Never dragged: keep the bottom-center default, re-centering as the
-      // capsule grows.
-      guard let screen = CursorOverlayPlacement.screen(containing: NSEvent.mouseLocation)
-      else { return }
-      origin = CursorOverlayPlacement.defaultOrigin(size: size, visibleFrame: screen.visibleFrame)
+      // Cold show: land on the display the user is actually working on.
+      guard let screen = ActiveScreenResolver.preferredScreen() else { return }
+      if let anchor = loadAnchor() {
+        origin = CursorOverlayPlacement.origin(
+          anchor: anchor, size: size, visibleFrame: screen.visibleFrame
+        )
+      } else {
+        origin = CursorOverlayPlacement.defaultOrigin(
+          size: size, visibleFrame: screen.visibleFrame
+        )
+      }
     }
 
     let target = NSRect(origin: origin, size: size)

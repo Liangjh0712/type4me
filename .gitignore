@@ -48,3 +48,6 @@ windows/
 # Test artifacts
 test-audio/
 test*.txt
+
+# Locally captured meeting transcripts (personal content, not project data)
+minutes/

@@ -263,12 +263,23 @@ private enum FloatingShortcutDeckStyle {
   static let keyCornerRadius: CGFloat = 5
   static let settingsCellWidth: CGFloat = 24
 
-  /// Fixed mode-cell width shared by the view and the panel-size math —
-  /// derived from a per-character estimate (never measured at render time),
-  /// so SwiftUI and the controller always agree exactly.
+  /// Font the mode cell renders its label with; measured, not estimated.
+  static let modeCellFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+  /// Horizontal padding inside the mode cell. The width formula has to
+  /// include this — the old per-character estimate budgeted only for glyphs,
+  /// so every realistic mode name ("润色", "Translate", "智能直出") truncated
+  /// by 4-29pt.
+  static let modeCellPadding: CGFloat = 10
+
+  /// Fixed mode-cell width shared by the view and the panel-size math, so
+  /// SwiftUI and the controller always agree exactly. Measured with the real
+  /// font rather than a per-character guess: the guess undercounted both CJK
+  /// and ASCII, and there is no reason to estimate something AppKit will tell
+  /// us precisely.
   static func modeCellWidth(_ name: String) -> CGFloat {
-    let units = name.prefix(5).reduce(CGFloat(0)) { $0 + ($1.isASCII ? 5.5 : 10) }
-    return min(72, max(36, 16 + units))
+    let text = String(name.prefix(6))
+    let glyphs = ceil((text as NSString).size(withAttributes: [.font: modeCellFont]).width)
+    return min(96, max(36, glyphs + modeCellPadding * 2))
   }
 }
 
@@ -346,7 +357,8 @@ private struct FloatingShortcutPanelView: View {
       .foregroundStyle(FloatingShortcutDeckStyle.accent)
       .lineLimit(1)
       .truncationMode(.tail)
-      .padding(.horizontal, 10)
+      .minimumScaleFactor(0.85)
+      .padding(.horizontal, FloatingShortcutDeckStyle.modeCellPadding)
       .frame(
         width: FloatingShortcutDeckStyle.modeCellWidth(state.currentMode.name),
         height: FloatingShortcutDeckStyle.keyHeight

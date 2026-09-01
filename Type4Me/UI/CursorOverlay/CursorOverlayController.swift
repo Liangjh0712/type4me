@@ -90,6 +90,8 @@ final class CursorOverlayController {
   private let hosting: NSHostingView<CursorOverlayView<AppState>>
 
   private var lastPhase: FloatingBarPhase = .hidden
+  /// Dwell timer for the .error state, so a failure is actually seen.
+  private var pendingErrorDismiss: DispatchWorkItem?
 
   init(state: AppState, userDefaults: UserDefaults = .standard) {
     self.state = state
@@ -122,6 +124,9 @@ final class CursorOverlayController {
     withObservationTracking {
       _ = state.barPhase
       _ = state.transcriptionText
+      // The capsule renders this on .error; without it the message can land
+      // after the phase change and never trigger a redraw.
+      _ = state.feedbackMessage
     } onChange: { [weak self] in
       // onChange fires from willSet — hop a runloop tick for fresh values.
       DispatchQueue.main.async { [weak self] in
@@ -149,12 +154,36 @@ final class CursorOverlayController {
     }
 
     switch phase {
-    case .hidden, .done, .error:
+    case .hidden, .done:
       hide()
+    case .error:
+      // Hold the failure on screen instead of vanishing. Styles 1/2/4 all
+      // linger on .error; the capsule used to hide, so a failed dictation
+      // looked exactly like a successful one — the user's speech disappeared
+      // with nothing but a sound to explain it.
+      if panel.isVisible {
+        updateFrame()
+        scheduleErrorDismiss()
+      }
     default:
+      pendingErrorDismiss?.cancel()
+      pendingErrorDismiss = nil
       // Re-fit the capsule as the transcript grows.
       if panel.isVisible { updateFrame() }
     }
+  }
+
+  /// Errors linger, then fade — matching the other styles' dwell.
+  private func scheduleErrorDismiss() {
+    pendingErrorDismiss?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self, self.state.barPhase == .error else { return }
+        self.hide()
+      }
+    }
+    pendingErrorDismiss = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
   }
 
   // MARK: - Done button
@@ -321,9 +350,10 @@ final class CursorOverlayController {
   /// head-truncation.
   private func measuredSize() -> NSSize {
     // 38pt capsule (13.5pt text + 8pt vertical padding, floored by the 22pt
-    // ghost buttons) + 4pt gap + 12pt hover meta row + 2×2pt safety padding.
+    // ghost buttons) + 4pt gap + 18pt hover meta row (9pt text + 3pt padding
+    // ×2, plus room for the scrim's 6pt blur to fade out) + 2×2pt padding.
     // The meta row keeps its slot even while hidden so revealing it on hover
     // never resizes the panel — only its opacity changes.
-    NSSize(width: CursorOverlayMetrics.panelWidth, height: 58)
+    NSSize(width: CursorOverlayMetrics.panelWidth, height: 68)
   }
 }

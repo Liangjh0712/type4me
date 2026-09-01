@@ -80,16 +80,20 @@ struct SelectionAskView: View {
 
     private var questionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "questionmark.bubble")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(TF.frostTextFaint)
-                Text(state.question.isEmpty ? L("正在识别问题...", "Recognizing question...") : state.question)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(TF.frostText)
-                Spacer()
-                if hasSelectedText {
-                    copyButton(text: state.selectedText, systemImage: "doc.on.doc")
+            // The question itself is NOT repeated here: `begin()` always
+            // seeds turns[0] with the same string, so this line and the first
+            // turn's header showed identical text ~10pt apart and read as a
+            // rendering bug. This section is now only the unique context —
+            // what was selected — plus the placeholder while ASR runs.
+            if state.question.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "questionmark.bubble")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(TF.frostTextFaint)
+                    Text(L("正在识别问题...", "Recognizing question..."))
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(TF.frostTextDim)
+                    Spacer()
                 }
             }
 
@@ -105,8 +109,9 @@ struct SelectionAskView: View {
                         .lineLimit(3)
                         .truncationMode(.tail)
                         .textSelection(.enabled)
+                    Spacer(minLength: 0)
+                    copyButton(text: state.selectedText, systemImage: "doc.on.doc")
                 }
-                .padding(.leading, 22)
             }
         }
     }

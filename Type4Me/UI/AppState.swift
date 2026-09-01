@@ -15,11 +15,11 @@ enum FloatingBarPhase: Equatable {
 /// How the transcript deck is presented while recording.
 ///
 /// - top: dual-column deck pinned to the top of the screen (raw + optimized)
-/// - bottom: optimized text only, attached to the screen-bottom tally lamp
+/// - bottom: optimized text only, attached to the screen-bottom status pill
 /// - cursor: draggable borderless capsule placed next to the mouse pointer
 ///   at recording start (static thereafter), showing the live transcript
 ///   tail and a secondary info cluster
-/// - hidden: minimal mode — tally lamp only while recording; a compact top
+/// - hidden: minimal mode — status pill only while recording; a compact top
 ///   capsule still appears once processing starts
 ///
 /// Replaces the retired boolean `tf_showsRecordingPanel` (and before it the
@@ -1083,30 +1083,29 @@ final class AppState {
   var effectiveProcessingLabel: String {
     processingLabelOverride ?? currentMode.processingLabel
   }
+  /// RAW column status. Revision numbers are deliberately absent — they are
+  /// pipeline bookkeeping, and the churning digits competed with the
+  /// transcript for attention. Revisions still appear in the logs.
   var asrPanelStatusLabel: String {
-    let currentRevision = asrRevision > 0 ? " · R\(asrRevision)" : ""
     switch asrPanelPhase {
     case .connecting:
       return L("连接中", "CONNECTING")
     case .temporary:
-      return L("临时稿", "TEMPORARY") + currentRevision
+      return L("临时稿", "TEMPORARY")
     case .recognizing:
-      let label =
-        asrTextSource == .cumulative
+      return asrTextSource == .cumulative
         ? L("累计稿 · 识别中", "CUMULATIVE · LIVE")
         : L("临时稿", "TEMPORARY")
-      return label + currentRevision
     case .stable:
-      return L("累计稿 · 暂稳", "CUMULATIVE · STABLE") + currentRevision
+      return L("累计稿 · 暂稳", "CUMULATIVE · STABLE")
     case .finishing:
-      return L("收尾中", "FINALIZING") + currentRevision
+      return L("收尾中", "FINALIZING")
     case .locked:
-      let revision = lockedOptimizationRevision ?? asrRevision
-      return L("已锁定", "LOCKED") + (revision > 0 ? " · R\(revision)" : "")
+      return L("已锁定", "LOCKED")
     case .recovering:
-      return L("恢复中", "RECOVERING") + currentRevision
+      return L("恢复中", "RECOVERING")
     case .failed:
-      return L("识别失败", "FAILED") + currentRevision
+      return L("识别失败", "FAILED")
     }
   }
 

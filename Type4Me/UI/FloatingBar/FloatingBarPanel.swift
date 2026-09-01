@@ -260,7 +260,7 @@ final class FloatingBarController {
     if state.isTranscriptPanelCollapsed {
       return CGSize(
         width: TF.topTranscriptPanelCollapsedWidth + outerInset,
-        height: TF.topTranscriptPanelCollapsedHeaderHeight + outerInset
+        height: TF.topTranscriptPanelHeaderHeight + outerInset
       )
     }
 
@@ -376,7 +376,7 @@ final class FloatingBarController {
     case .cursor:
       // Style 3 is minimal by design: the mouse-anchored capsule is the only
       // recording UI (its status dot carries the live/processing state), so
-      // the tally lamp stays hidden.
+      // the status pill stays hidden.
       return false
     case .bottom:
       switch state.barPhase {
@@ -604,7 +604,7 @@ final class FloatingBarController {
       state.isTranscriptPanelCollapsed
       ? NSSize(
         width: TF.topTranscriptPanelCollapsedWidth + TF.topTranscriptPanelOuterInset,
-        height: TF.topTranscriptPanelCollapsedHeaderHeight + TF.topTranscriptPanelOuterInset
+        height: TF.topTranscriptPanelHeaderHeight + TF.topTranscriptPanelOuterInset
       )
       : maximumSize
     hosting.frame = NSRect(origin: .zero, size: initialSize)

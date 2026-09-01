@@ -3,6 +3,9 @@ import SwiftUI
 /// Cached font for text measurement (module-level to avoid generic-type static restriction).
 private let floatingBarFont = NSFont.systemFont(ofSize: 14, weight: .medium)
 
+/// Scroll anchor for the transcript columns' tail-following behaviour.
+private let transcriptTailAnchor = "transcript-tail"
+
 // MARK: - FloatingBarState Protocol
 
 @MainActor
@@ -140,45 +143,35 @@ enum OptimizedPanelCopy {
   }
 
   /// Terse optimization status for deck headers / the style-2 status row
-  /// ("等待停顿", "优化中 · R2", "已优化 · R3", "提交中 · R3", "优化失败", "原文"…).
+  /// ("等待停顿", "优化中", "已优化", "提交中", "优化失败", "原文"…).
+  ///
+  /// Revision numbers were dropped: `R3`, `R2→R3` are internal pipeline
+  /// bookkeeping. No user acts on them, and the digits churned in the corner
+  /// of the eye while the transcript — the thing being read — sat still.
   static func status<S: FloatingBarState>(for state: S) -> String {
     if state.finalOptimizationFailureMessage != nil {
       return L("优化失败", "FAILED")
     }
-    if state.barPhase == .processing, let locked = state.lockedOptimizationRevision {
-      return L("提交中", "COMMITTING") + " · R\(locked)"
+    if state.barPhase == .processing, state.lockedOptimizationRevision != nil {
+      return L("提交中", "COMMITTING")
     }
 
-    let base: String
     switch state.liveOptimizationPhase {
     case .waiting:
-      base = L("等待停顿", "WAITING")
+      return L("等待停顿", "WAITING")
     case .stale:
-      base = L("待更新", "UPDATE PENDING")
+      return L("待更新", "UPDATE PENDING")
     case .updating:
-      base = L("优化中", "UPDATING")
+      return L("优化中", "UPDATING")
     case .ready:
-      base = L("已优化", "READY")
+      return L("已优化", "READY")
     case .unavailable:
-      base = L("不可用", "UNAVAILABLE")
+      return L("不可用", "UNAVAILABLE")
     case .failed:
-      base = L("优化失败", "FAILED")
+      return L("优化失败", "FAILED")
     case .inactive:
-      base = L("原文", "RAW")
+      return L("原文", "RAW")
     }
-
-    if state.liveOptimizationPhase == .stale,
-      let optimizedRevision = state.liveOptimizationRevision,
-      state.asrRevision > 0
-    {
-      return base + " · R\(optimizedRevision)→R\(state.asrRevision)"
-    }
-    let revision =
-      state.liveOptimizationPhase == .ready
-      ? state.liveOptimizationRevision
-      : (state.asrRevision > 0 ? state.asrRevision : nil)
-    if let revision { return base + " · R\(revision)" }
-    return base
   }
 
   /// LED tone matching `status(for:)`.
@@ -591,7 +584,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
       }
     }
     .padding(.horizontal, 12)
-    .frame(height: TF.topTranscriptPanelCollapsedHeaderHeight)
+    .frame(height: TF.topTranscriptPanelHeaderHeight)
   }
 
   private var topPanelHeader: some View {
@@ -616,9 +609,18 @@ struct FloatingBarView<S: FloatingBarState>: View {
       }
 
       if state.barPhase == .recording || state.barPhase == .preparing {
+        // Separated from the chevron: ✕ discards the whole recording, and
+        // sitting flush against a harmless collapse toggle at the same tint
+        // made the destructive action the easiest one to hit by accident.
+        Rectangle()
+          .fill(TF.frostRule)
+          .frame(width: 0.5, height: 14)
+          .padding(.horizontal, 3)
+
         topPanelButton(
           systemName: "xmark",
-          accessibilityLabel: L("撤销并丢弃本次录音", "Cancel and discard this recording")
+          accessibilityLabel: L("撤销并丢弃本次录音", "Cancel and discard this recording"),
+          tint: TF.frostTextDim
         ) {
           state.requestPanelCancel()
         }
@@ -637,7 +639,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
   }
 
   /// Phase status cluster at the left of the channel strip:
-  /// tally lamp + mono label + recording clock.
+  /// state dot + mono label + recording clock.
   @ViewBuilder
   private var deckTally: some View {
     HStack(spacing: 7) {
@@ -750,9 +752,10 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
   private var emptyPreviewStatusLabel: String? {
     guard state.optimizedPanelText.isEmpty else { return nil }
-    if state.transcriptionText.isEmpty {
-      return L("等待语音", "WAITING FOR SPEECH")
-    }
+    // Deliberately silent before the first word: the tally already says REC
+    // and the RAW column already shows "等待语音…". Saying it a third time
+    // here made "nothing has happened yet" the loudest thing on the panel.
+    if state.transcriptionText.isEmpty { return nil }
     return state.liveOptimizationPhase.statusLabel
   }
 
@@ -765,9 +768,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
           led: TF.lampAmber,
           ledOpacity: 0.55 + 0.45
             * (0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 4)),
-          text: state.isTranscriptPanelCollapsed
-            ? active.model : "\(active.provider) / \(active.model)",
-          trailing: String(format: "%.2fs", elapsed),
+          text: active.model,
+          trailing: String(format: "%.1fs", elapsed),
           tone: TF.lampAmber.opacity(0.9)
         )
       }
@@ -783,9 +785,8 @@ struct FloatingBarView<S: FloatingBarState>: View {
       deckStatus(
         led: attempt.succeeded ? TF.signalTeal : TF.settingsAccentRed,
         ledOpacity: 1,
-        text: state.isTranscriptPanelCollapsed
-          ? attempt.model : "\(attempt.provider) / \(attempt.model)",
-        trailing: String(format: "%.2fs", attempt.durationSeconds),
+        text: attempt.model,
+        trailing: String(format: "%.1fs", attempt.durationSeconds),
         tone: attempt.succeeded ? TF.frostTextDim : TF.settingsAccentRed
       )
     } else {
@@ -904,16 +905,38 @@ struct FloatingBarView<S: FloatingBarState>: View {
         Rectangle().fill(TF.frostRule).frame(height: 0.5)
       }
 
-      content
-        .font(.system(size: TF.topTranscriptPanelBodyFontSize, weight: .regular))
-        .foregroundStyle(isOptimized ? TF.frostText.opacity(0.95) : TF.frostTextDim.opacity(0.88))
-        .lineSpacing(TF.topTranscriptPanelBodyLineSpacing)
-        .textSelection(.disabled)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
-        .padding(.top, TF.topTranscriptPanelBodyTopPadding)
-        .padding(.bottom, TF.topTranscriptPanelBodyBottomPadding)
+      // Tail-following scroll. The panel height is capped at the screen, and
+      // a dictation longer than that used to be cut mid-line by the card's
+      // clipShape — no scrollbar, no fade, just a severed glyph that read as
+      // a rendering failure. Long transcripts are the whole point of this
+      // panel, so the tail has to stay visible.
+      ScrollViewReader { proxy in
+        ScrollView(.vertical, showsIndicators: false) {
+          content
+            .font(.system(size: TF.topTranscriptPanelBodyFontSize, weight: .regular))
+            .foregroundStyle(
+              isOptimized ? TF.frostText.opacity(0.95) : TF.frostTextDim.opacity(0.88)
+            )
+            .lineSpacing(TF.topTranscriptPanelBodyLineSpacing)
+            .textSelection(.disabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(.horizontal, TF.topTranscriptPanelHorizontalPadding)
+            .padding(.top, TF.topTranscriptPanelBodyTopPadding)
+            .padding(.bottom, TF.topTranscriptPanelBodyBottomPadding)
+            .id(transcriptTailAnchor)
+        }
+        .onChange(of: state.transcriptionText) { _, _ in
+          withAnimation(.easeOut(duration: 0.18)) {
+            proxy.scrollTo(transcriptTailAnchor, anchor: .bottom)
+          }
+        }
+        .onChange(of: state.optimizedPanelText) { _, _ in
+          withAnimation(.easeOut(duration: 0.18)) {
+            proxy.scrollTo(transcriptTailAnchor, anchor: .bottom)
+          }
+        }
+      }
 
       if isOptimized, let failure = state.finalOptimizationFailureMessage {
         finalOptimizationFailureActions(message: failure)
@@ -1260,7 +1283,7 @@ struct MeterBridge: View {
           )
           context.fill(
             Path(rect),
-            with: .color(Color(red: 0.78, green: 0.96, blue: 0.90).opacity(Double(alpha)))
+            with: .color(TF.signalTeal.opacity(Double(alpha)))
           )
         }
       }
@@ -1322,19 +1345,13 @@ struct RecordingDot: View {
 
 // MARK: - Screen Bottom Recording Indicator
 
-/// Signal Desk tally lamp shown independently at screen bottom.
-/// A machined dial with a VU tick ring around a breathing filament core.
-/// The lamp keeps the teal-ink palette deliberately: it reads as a physical
-/// object sitting on the desktop, not as a glass surface, and the ink tones
-/// are what make it look machined. Every flat panel now uses `frostSurface`.
-
-/// Screen-bottom recording surface. In every style it renders the tally lamp
-/// orb + mode capsule; in style 2 (.bottom) it additionally floats an
-/// optimized-transcript card above the orb. Reads state directly so the
-/// controller never has to rebuild the root view.
+/// Screen-bottom recording surface. In every style it renders the status
+/// pill; in style 2 (.bottom) it additionally floats an optimized-transcript
+/// card above it. Reads state directly so the controller never has to
+/// rebuild the root view.
 ///
 /// Content is anchored to the bottom of the panel frame: when the controller
-/// grows the frame upward for the card, the orb stays exactly where the user
+/// grows the frame upward for the card, the pill stays exactly where the user
 /// dragged it.
 struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
   let state: S

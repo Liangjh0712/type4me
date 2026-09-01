@@ -9,8 +9,10 @@ enum CursorOverlayMetrics {
   /// Whole panel == capsule width: the hover meta strip is narrower and
   /// centered underneath, so nothing ever sticks out sideways.
   static var panelWidth: CGFloat { capsuleWidth }
-  /// Text cap inside the capsule (padding + dot + timer + two ghost buttons).
-  static let textMaxWidth: CGFloat = 320
+  /// Text cap inside the capsule: 460 − 2×17 padding − 6 dot − 10 gap.
+  /// The clock and action buttons moved to the hover row, so the transcript
+  /// gets the whole line instead of the 66% it had while sharing it.
+  static let textMaxWidth: CGFloat = 410
   /// Per-item cap for the secondary cluster (device / mode names).
   static let secondaryItemMaxWidth: CGFloat = 90
   /// Item separator in the secondary cluster.
@@ -32,6 +34,12 @@ private let cursorTranscriptFont = NSFont.systemFont(ofSize: 13.5, weight: .regu
 @MainActor
 enum CursorOverlayCopy {
   static func displayText<S: FloatingBarState>(for state: S) -> String {
+    // The failure message wins over the transcript: on .error the transcript
+    // is what was lost, and showing it as though nothing happened is worse
+    // than showing nothing.
+    if state.barPhase == .error {
+      return state.feedbackMessage.isEmpty ? L("识别失败", "Recognition failed") : state.feedbackMessage
+    }
     if !state.transcriptionText.isEmpty { return state.transcriptionText }
     switch state.barPhase {
     case .preparing: return L("准备中…", "Preparing…")
@@ -89,6 +97,9 @@ struct CursorOverlayView<S: FloatingBarState>: View {
 
   @State private var pulsing = false
   @State private var metaVisible = false
+  /// Delays the hover row's dismissal so the pointer can travel to its
+  /// buttons without them vanishing en route.
+  @State private var hoverDismiss: DispatchWorkItem?
   /// Trailing typewriter buffer. ASR partials arrive in bursts of several
   /// characters, and rendering the raw string makes them pop in as chunks.
   /// Pure appends (the common case for cumulative partials) are revealed one
@@ -144,7 +155,19 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     // Pin to the panel's top edge so resize animations stay anchored.
     .frame(maxHeight: .infinity, alignment: .top)
     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: buttonsVisible)
-    .onHover { metaVisible = $0 }
+    .onHover { inside in
+      hoverDismiss?.cancel()
+      hoverDismiss = nil
+      if inside {
+        metaVisible = true
+        return
+      }
+      // Grace period: the row holds ✕ and ✓, so hiding it the instant the
+      // pointer leaves the capsule would snatch the buttons away mid-reach.
+      let work = DispatchWorkItem { metaVisible = false }
+      hoverDismiss = work
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    }
     .onAppear {
       revealedText = displayText
       withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
@@ -180,9 +203,12 @@ struct CursorOverlayView<S: FloatingBarState>: View {
 
   // MARK: - Center capsule
 
-  /// Everything on one line: dot, transcript, frozen timer, ghost actions.
-  /// The empty region to the right of short text is deliberate capacity,
-  /// exactly like a half-filled text field.
+  /// Dot + transcript, and nothing else. The clock and the two ghost buttons
+  /// used to ride along here, which put 114pt of chrome on the right against
+  /// a 6pt dot on the left — the capsule visibly leaned, and the text (the
+  /// entire point of the surface) was squeezed to 66% of the width while
+  /// still head-truncating. They live in the hover row now; this row is the
+  /// transcript's.
   private var mainCapsule: some View {
     HStack(spacing: 10) {
       Circle()
@@ -193,46 +219,23 @@ struct CursorOverlayView<S: FloatingBarState>: View {
         // working on it" when the opposite is true.
         .opacity(pulsing && tone != .failed ? 0.35 : 1.0)
       transcriptText
-      Spacer(minLength: 4)
-      inlineStatus
-      if buttonsVisible {
-        GhostButton(
-          symbol: "xmark",
-          primary: false,
-          help: L("取消并丢弃本次录音", "Cancel and discard this recording"),
-          accessibilityLabel: L("取消", "Cancel")
-        ) {
-          state.requestPanelCancel()
-        }
-        .transition(.opacity.combined(with: .scale(scale: 0.6)))
-        GhostButton(
-          symbol: "checkmark",
-          primary: true,
-          help: L("停止并插入", "Stop and insert"),
-          accessibilityLabel: L("完成", "Done")
-        ) {
-          onSend()
-        }
-        .transition(.opacity.combined(with: .scale(scale: 0.6)))
-      }
+      Spacer(minLength: 0)
     }
-    .padding(.leading, 17)
-    // Tighter on the right: the ghost buttons carry their own visual inset.
-    .padding(.trailing, buttonsVisible ? 8 : 16)
+    // Symmetric now that nothing hangs off the trailing edge.
+    .padding(.horizontal, 17)
     .padding(.vertical, 8)
     .frame(width: CursorOverlayMetrics.capsuleWidth)
     .frostSurface(Capsule(), backlight: dotColor)
   }
 
-  /// Right-hand inline readout: the elapsed clock while capturing, or the
-  /// phase label once it ends. The one piece of metadata worth a permanent
-  /// slot — everything else is hover-only.
+  /// Phase readout for the hover row: elapsed clock while capturing, the
+  /// processing label once it ends.
   @ViewBuilder private var inlineStatus: some View {
     Group {
       switch state.barPhase {
       case .processing, .recovering:
         Text(state.effectiveProcessingLabel)
-          .foregroundStyle(TF.lampAmber.opacity(0.85))
+          .foregroundStyle(TF.lampAmber.opacity(0.9))
           .lineLimit(1)
       default:
         if let start = state.recordingStartDate {
@@ -241,11 +244,11 @@ struct CursorOverlayView<S: FloatingBarState>: View {
             endDate: state.barPhase == .recording || state.barPhase == .preparing
               ? nil : state.recordingStopDate
           )
-          .foregroundStyle(TF.frostTextFaint)
+          .foregroundStyle(TF.frostTextDim)
         }
       }
     }
-    .font(.system(size: 10, weight: .medium, design: .monospaced))
+    .font(.system(size: 9, weight: .medium, design: .monospaced))
     .fixedSize()
   }
 
@@ -284,35 +287,69 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     ) > CursorOverlayMetrics.textMaxWidth
   }
 
-  /// Meta row: input device · mode · char count · average speed. Hover-only,
-  /// and free-floating — no capsule of its own. A second chromed pill under
-  /// the first read as two competing objects; bare 9pt monospace over the
-  /// desktop reads as an annotation, which is what it is. The timer moved
-  /// inline into the capsule, so it is not repeated here.
+  /// Hover row: device · mode · length · speed · clock, then the two actions.
+  /// This row holds real controls now, so it can't blink out the instant the
+  /// pointer crosses a gap — see `metaVisible`'s grace period.
+  ///
+  /// No pill of its own: a second chromed object under the capsule read as
+  /// two competing surfaces. But bare text needs *some* floor — over a white
+  /// document 9pt at 0.34 alpha measured 1.0:1, i.e. perfectly invisible at
+  /// exactly the moment the user hovered to read it. A soft blurred scrim
+  /// gives contrast without becoming an object: no edge, no corner radius.
   private var secondaryCluster: some View {
     let secondary = CursorOverlayCopy.secondary(for: state)
-    return HStack(spacing: 5) {
-      if let device = secondary.device {
-        Text(device)
+    return HStack(spacing: 7) {
+      HStack(spacing: 5) {
+        if let device = secondary.device {
+          Text(device)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: CursorOverlayMetrics.secondaryItemMaxWidth)
+          Text(CursorOverlayMetrics.secondarySeparator)
+        }
+        Text(secondary.mode)
           .lineLimit(1)
           .truncationMode(.tail)
           .frame(maxWidth: CursorOverlayMetrics.secondaryItemMaxWidth)
         Text(CursorOverlayMetrics.secondarySeparator)
+        Text(secondary.charCount)
+        if let speed = secondary.speed {
+          Text(CursorOverlayMetrics.secondarySeparator)
+          Text(speed)
+        }
       }
-      Text(secondary.mode)
-        .lineLimit(1)
-        .truncationMode(.tail)
-        .frame(maxWidth: CursorOverlayMetrics.secondaryItemMaxWidth)
-      Text(CursorOverlayMetrics.secondarySeparator)
-      Text(secondary.charCount)
-      if let speed = secondary.speed {
-        Text(CursorOverlayMetrics.secondarySeparator)
-        Text(speed)
+      .font(.system(size: 9, weight: .medium, design: .monospaced))
+      .foregroundStyle(TF.frostTextDim)
+
+      inlineStatus
+
+      if buttonsVisible {
+        GhostButton(
+          symbol: "xmark",
+          primary: false,
+          help: L("取消并丢弃本次录音", "Cancel and discard this recording"),
+          accessibilityLabel: L("取消", "Cancel")
+        ) {
+          state.requestPanelCancel()
+        }
+        GhostButton(
+          symbol: "checkmark",
+          primary: true,
+          help: L("停止并插入", "Stop and insert"),
+          accessibilityLabel: L("完成", "Done")
+        ) {
+          onSend()
+        }
       }
     }
-    .font(.system(size: 9, weight: .medium, design: .monospaced))
-    .foregroundStyle(TF.frostTextFaint)
     .fixedSize()
+    .padding(.horizontal, 10)
+    .padding(.vertical, 3)
+    .background {
+      Capsule()
+        .fill(.black.opacity(0.45))
+        .blur(radius: 6)
+    }
   }
 
   private var dotColor: Color {
@@ -381,7 +418,7 @@ private struct GhostButton: View {
 
 // MARK: - Capsule Click Button
 
-/// Transparent real NSButton for the orbs. Unlike a SwiftUI Button, an
+/// Transparent real NSButton for the ghost actions. Unlike a SwiftUI Button, an
 /// NSButton shows up in the panel's hit-test, so the window can let its
 /// clicks through and drag everything else. Title explicitly emptied —
 /// NSButton's default title is the literal string "Button".

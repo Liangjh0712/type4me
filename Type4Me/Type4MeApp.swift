@@ -518,6 +518,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for: capturedMode, provider: selectedProvider)
               let effectiveMode =
                 availableModes.first(where: { $0.id == resolvedMode.id }) ?? resolvedMode
+              let recoveryOrigin: RecognitionSession.AudioOrigin =
+                MainActor.assumeIsolated { self.hotkeyManager.isExternalTrigger }
+                  ? .device : .microphone
               Task {
                 let action = await self.session.handleRecoveryHotkeyPress()
                 guard action == .interrupted else { return }
@@ -525,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   self.appState.currentMode = effectiveMode
                   self.appState.startRecording()
                 }
-                await self.session.startRecording(mode: effectiveMode)
+                await self.session.startRecording(mode: effectiveMode, origin: recoveryOrigin)
               }
               return
             }
@@ -584,6 +587,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               self.appState.currentMode = effectiveMode
               self.appState.startRecording()
             }
+            // Captured synchronously: the flag is only valid for the duration of the
+            // triggering call, and the Task below runs after it has been cleared.
+            let origin: RecognitionSession.AudioOrigin =
+              MainActor.assumeIsolated { self.hotkeyManager.isExternalTrigger }
+                ? .device : .microphone
             Task {
               // Wait for previous session to fully clean up before starting
               let ready = await self.session.awaitIdle()
@@ -591,7 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("[Type4Me] >>> HOTKEY: previous session did not reach idle in time")
                 DebugFileLogger.log("hotkey start: awaitIdle timed out")
               }
-              await self.session.startRecording(mode: effectiveMode)
+              await self.session.startRecording(mode: effectiveMode, origin: origin)
             }
           },
           onStop: { [weak self] in
@@ -952,13 +960,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch event {
         case .connected(let deviceName):
           NSLog("[Passport] connected: %@", deviceName)
-          // Device audio takes over while it is attached; unplugging hands the
-          // microphone back. Ignored mid-recording, applied on the next one.
-          await self.session.useAudioSource(passportSource)
+          // Registered, not switched to: the card is not a system audio device, so a
+          // Mac hotkey must keep recording from the Mac's own microphone. Only the
+          // card's own key records from the card.
+          await self.session.setExternalAudioSource(passportSource)
 
         case .disconnected:
           NSLog("[Passport] disconnected")
-          await self.session.useAudioSource(nil)
+          await self.session.setExternalAudioSource(nil)
 
         case .recordingRequested:
           await MainActor.run {

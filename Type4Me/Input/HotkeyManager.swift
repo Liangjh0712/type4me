@@ -660,6 +660,15 @@ final class HotkeyManager: NSObject {
         handleBindingEvent(binding: binding, pressed: pressed)
     }
 
+    /// Whether the recording being started came from the hardware device rather than
+    /// the keyboard.
+    ///
+    /// Read by the binding's `onStart` to pick a microphone. Carried here rather than
+    /// passed through `ModeBinding` because the bindings are built once at launch and
+    /// shared by both trigger paths — the alternative was a parallel set of
+    /// device-flavoured bindings that would drift out of step.
+    private(set) var isExternalTrigger = false
+
     /// Drive a recording from something other than a key press — a hardware
     /// device's own button, say.
     ///
@@ -692,6 +701,8 @@ final class HotkeyManager: NSObject {
             onStart: binding.onStart,
             onStop: binding.onStop
         )
+        isExternalTrigger = true
+        defer { isExternalTrigger = false }
         handleBindingEvent(binding: pushToTalk, pressed: pressed)
         return true
     }

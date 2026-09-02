@@ -59,12 +59,16 @@ actor RecognitionSession {
 
   // MARK: - Dependencies
 
-  /// Where the PCM comes from. Defaults to the local microphone; an external
-  /// device can be swapped in (see `AudioSource`). The no-argument initializer
-  /// keeps existing call sites and tests working unchanged.
+  /// Where the PCM for the *current* recording comes from.
+  ///
+  /// Chosen per recording rather than globally: the hardware device is not a system
+  /// audio device, so a Mac hotkey must still record from the Mac's microphone even
+  /// while the card is connected. Whoever started the recording decides.
   private var audioSource: any AudioSource
-  /// Fallback when no external source is attached.
+  /// The local microphone, used unless a recording says otherwise.
   private let microphoneSource: any AudioSource
+  /// An attached hardware device, when one is connected.
+  private var externalSource: (any AudioSource)?
   private let injectionEngine = TextInjectionEngine()
   let historyStore = HistoryStore.shared
   private var asrClient: (any SpeechRecognizer)?
@@ -74,22 +78,46 @@ actor RecognitionSession {
     self.microphoneSource = audioSource
   }
 
-  /// Swap the audio source, e.g. when a hardware device connects or unplugs.
+  /// Which microphone a recording should use.
+  enum AudioOrigin: Sendable {
+    /// The Mac's own input device, per the user's microphone preference.
+    case microphone
+    /// The attached hardware device. Falls back to the microphone if none is
+    /// connected, so a stale trigger cannot produce a silent recording.
+    case device
+  }
+
+  /// Register or clear the attached device's audio source.
   ///
-  /// Only takes effect while idle: replacing the source mid-recording would leave
-  /// the outgoing one's buffered audio and journal half-finished, and the ASR
-  /// stream would see a discontinuity it cannot interpret. A swap requested during
-  /// a recording is dropped, and the next recording picks up the new source.
-  func useAudioSource(_ source: (any AudioSource)?) {
-    let replacement = source ?? microphoneSource
-    guard state == .idle else {
-      DebugFileLogger.log("audio source swap deferred state=\(state)")
+  /// Registering does not change what a keyboard-triggered recording captures — the
+  /// card is not a system input device, and treating it as one meant pressing the
+  /// Mac hotkey recorded from a card sitting across the desk.
+  func setExternalAudioSource(_ source: (any AudioSource)?) {
+    externalSource = source
+    DebugFileLogger.log("external audio source \(source == nil ? "cleared" : "registered")")
+  }
+
+  /// Point the session at the source for the recording about to start.
+  ///
+  /// Ignored mid-recording: swapping would abandon the outgoing source's buffer and
+  /// journal half-written, and hand the ASR stream a discontinuity it cannot read.
+  private func selectAudioSource(_ origin: AudioOrigin) {
+    let selected: any AudioSource
+    switch origin {
+    case .microphone:
+      selected = microphoneSource
+    case .device:
+      selected = externalSource ?? microphoneSource
+    }
+
+    guard state == .idle || state == .starting else {
+      DebugFileLogger.log("audio source selection ignored state=\(state)")
       return
     }
-    guard replacement !== audioSource else { return }
-    audioSource = replacement
+    guard selected !== audioSource else { return }
+    audioSource = selected
     DebugFileLogger.log(
-      "audio source switched to=\(replacement === microphoneSource ? "microphone" : "device")")
+      "audio source = \(selected === microphoneSource ? "microphone" : "device")")
   }
 
   /// Whether recordings currently come from an external device.
@@ -502,7 +530,12 @@ actor RecognitionSession {
 
   // MARK: - Start
 
-  func startRecording(mode: ProcessingMode = .direct) async {
+  /// Start a recording.
+  ///
+  /// `origin` picks the microphone: a Mac hotkey records from the Mac, the hardware
+  /// device's own key records from the device. They are independent because the card
+  /// is not a system audio device — macOS cannot route it, so nothing else would.
+  func startRecording(mode: ProcessingMode = .direct, origin: AudioOrigin = .microphone) async {
     if state == .finishing || state == .injecting || state == .postProcessing
       || state == .recovering
     {
@@ -520,6 +553,9 @@ actor RecognitionSession {
 
     stoppedByMaxDuration = false
     targetBundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    // Pick the microphone before anything touches the source, and after the reset
+    // above so the previous recording's source is already torn down.
+    selectAudioSource(origin)
     let provider = CredentialStore.selectedASRProvider
     activeProvider = provider
 

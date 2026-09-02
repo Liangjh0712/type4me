@@ -167,11 +167,11 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
     private var hintText: String {
         snapshot.isConnected
             ? L(
-                "拔掉设备后自动回到 Mac 麦克风。",
-                "Unplugging hands recording back to the Mac microphone.")
+                "设备按键录设备麦克风，Mac 快捷键仍录 Mac 麦克风，互不影响。",
+                "The device key records from the device; Mac hotkeys keep using the Mac microphone.")
             : L(
-                "用支持数据传输的 USB 线连接设备，会自动识别。",
-                "Connect the device with a data-capable USB cable; it is detected automatically.")
+                "用支持数据传输的 USB 线连接，或开启蓝牙后靠近电脑即可。",
+                "Connect a data-capable USB cable, or bring the device near the Mac with Bluetooth on.")
     }
 
     // MARK: - Usage
@@ -195,8 +195,8 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
 
                 Text(
                     L(
-                        "录音使用当前选中的模式，与键盘快捷键一致；键盘的「按住 / 切换」设置不影响设备。",
-                        "Recordings use the currently selected mode, same as the keyboard. The keyboard's hold/toggle preference does not affect the device."
+                        "设备录音使用当前选中的模式，与键盘一致；但麦克风各自独立——键盘快捷键始终录 Mac 麦克风。",
+                        "The device records with the currently selected mode, same as the keyboard — but the microphones are separate: a keyboard hotkey always records from the Mac."
                     )
                 )
                 .font(.system(size: 11))

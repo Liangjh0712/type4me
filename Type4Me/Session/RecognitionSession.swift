@@ -455,6 +455,11 @@ actor RecognitionSession {
   private var pendingSelectionAskConversationContext = ""
   /// When true, skip text injection (paste) but still save to clipboard & history.
   private var injectionAborted = false
+  /// When true, the user discarded this recording outright: no typing, no clipboard,
+  /// no history. Stronger than `injectionAborted`, which is a "don't type it, but
+  /// keep it around" — a discard means the words are unwanted, so leaving them on the
+  /// clipboard would overwrite whatever the user had copied for nothing.
+  private var sessionDiscarded = false
   // Decision used when a final LLM request fails and the user chooses retry/raw.
   private enum FinalOptimizationDecision {
     case retry
@@ -588,6 +593,7 @@ actor RecognitionSession {
     self.recordingStartTime = nil
     hasEmittedReadyForCurrentSession = false
     injectionAborted = false
+    sessionDiscarded = false
     speculativeThrottle.reset()
     speculativeLLMUnavailable = false
     pendingLLMError = nil
@@ -971,6 +977,26 @@ actor RecognitionSession {
     injectionAborted = true
     resolveFinalOptimizationDecision(.useRaw)
     DebugFileLogger.log("abortInjection: injection will be skipped")
+  }
+
+  /// Throw this recording away wherever the pipeline has got to.
+  ///
+  /// Covers both windows with one call because the device cannot know which one it
+  /// is in: while still recording there is nothing to keep, and once recognition is
+  /// under way the text has to be suppressed on its way out. Unlike
+  /// `abortInjection()` nothing is kept — no paste, no clipboard, no history row.
+  func discardSession() async {
+    sessionDiscarded = true
+    resolveFinalOptimizationDecision(.useRaw)
+    DebugFileLogger.log("discardSession: user discarded from state=\(state)")
+    if state == .recording || state == .starting {
+      // Nothing has been recognized yet, so tear the whole thing down.
+      SystemVolumeManager.restore()
+      discardCurrentAudio()
+      await forceReset()
+    }
+    // Otherwise recognition is already running: let it finish and let the
+    // `sessionDiscarded` checks in the stop path suppress every output.
   }
 
   /// Parse a Mac Action LLM reply for a `<tool_call>{...}</tool_call>`, dispatch
@@ -1833,6 +1859,25 @@ actor RecognitionSession {
       finalText = finalText.removingCJKLatinSpaces
       finalText = finalText.strippingTrailingPunctuation
 
+      // The user threw this recording away while it was being recognized. Bail out
+      // above injection, clipboard, and history alike: recognition finished, but the
+      // words are unwanted, so producing any of its three outputs would be acting on
+      // a decision the user already reversed.
+      if sessionDiscarded {
+        DebugFileLogger.log("stop: discarded by user, dropping len=\(finalText.count)")
+        discardCurrentAudio()
+        onASREvent?(.discarded)
+        if sessionGeneration == myGeneration, state != .idle {
+          state = .idle
+          hasEmittedReadyForCurrentSession = false
+          currentTranscript = .empty
+          warmUpASRConnection()
+        }
+        resetSpeculativeLLM()
+        SystemVolumeManager.restore()
+        return
+      }
+
       state = .injecting
       let defaults = UserDefaults.standard
       injectionEngine.preserveClipboard =
@@ -1915,16 +1960,24 @@ actor RecognitionSession {
 
     } else {
       // Speech was captured but ASR produced no usable text. Keep the audio
-      // as an explicit recovery record instead of silently dropping it.
+      // as an explicit recovery record instead of silently dropping it — unless
+      // the user discarded the recording, in which case there is nothing to
+      // recover and a saved row would be a record of something they rejected.
       let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-      DebugFileLogger.log("stop: no text recognized (duration=\(duration)s), preserving audio")
-      await persistCurrentHistory(
-        rawText: "",
-        processedText: nil,
-        finalText: "",
-        status: "asr_no_text_audio_saved"
-      )
-      onASREvent?(.finalizedEmpty)
+      if sessionDiscarded {
+        DebugFileLogger.log("stop: discarded by user, no text to drop")
+        discardCurrentAudio()
+        onASREvent?(.discarded)
+      } else {
+        DebugFileLogger.log("stop: no text recognized (duration=\(duration)s), preserving audio")
+        await persistCurrentHistory(
+          rawText: "",
+          processedText: nil,
+          finalText: "",
+          status: "asr_no_text_audio_saved"
+        )
+        onASREvent?(.finalizedEmpty)
+      }
     }
 
     // Only reset to idle if this is still the active session.
@@ -2197,7 +2250,7 @@ actor RecognitionSession {
       .liveOptimizationUnavailable, .liveOptimizationFailed,
       .llmRequestStarted, .llmRequestFinished, .finalOptimizationFailed,
       .recoveryStarted, .recoveryPrompt, .recoverySucceeded, .recoveryFailed,
-      .recoveryInterrupted, .finalized, .finalizedEmpty, .macActionResult,
+      .recoveryInterrupted, .finalized, .finalizedEmpty, .discarded, .macActionResult,
       .selectionAskStarted, .selectionAskAnswerDelta, .selectionAskAnswerCompleted:
       break
     }

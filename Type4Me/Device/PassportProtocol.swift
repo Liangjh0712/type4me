@@ -28,6 +28,14 @@ enum PassportProtocol {
         case voiceEnd
         /// Sent right after `voiceEnd`: how many frames the device itself dropped.
         case status(drop: Int)
+        /// The user discarded this recording from the device during recognition.
+        ///
+        /// The device has already returned to its ready screen and will ignore any
+        /// transcript that arrives afterwards, but that is only its own view — the
+        /// host is still running ASR and would type the result out. Without acting
+        /// on this, "cancel" merely tidies the device screen while the words the
+        /// user rejected still land in their document.
+        case sessionAbort
         /// A key gesture the host must turn into a keystroke.
         case keyAction(KeyAction)
         /// A verdict from the on-device approval screen. Unused for voice input.
@@ -70,6 +78,9 @@ enum PassportProtocol {
 
         case "status":
             return .status(drop: object["drop"] as? Int ?? 0)
+
+        case "session.abort":
+            return .sessionAbort
 
         case "key.action":
             guard let raw = object["action"] as? String,

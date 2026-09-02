@@ -128,6 +128,10 @@ enum RecognitionEvent: Sendable {
     case error(Error)
     case completed
     case finalizedEmpty
+    /// The user threw the recording away: recognition may well have succeeded, but
+    /// nothing was typed, copied, or saved. Distinct from `finalizedEmpty`, which is
+    /// ASR coming back with nothing.
+    case discarded
     case processingResult(text: String)
     case processingLabelOverride(String)
   case liveOptimizationStarted(sourceText: String, sourceRevision: Int, modeID: UUID)

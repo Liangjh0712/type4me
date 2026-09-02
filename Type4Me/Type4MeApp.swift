@@ -266,6 +266,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           // TRANSCRIBING only on an agent.status, so this path must report it or
           // the card freezes for 30 seconds.
           Task { await PassportLink.shared.finishSession(state: .done) }
+        case .discarded:
+          // The bar was already cleared when the key was pressed (see
+          // `discardDeviceRecording`) — by the time recognition winds down that
+          // feedback has usually auto-hidden, and calling `showCancelled()` again
+          // would flash "已取消" a second time for one cancel. This only sweeps up
+          // the hotkey state, which the session's own teardown does not own.
+          self.hotkeyManager.isProcessing = false
+          self.safeResetHotkeyState()
         case .processingLabelOverride(let label):
           appState.processingLabelOverride = label
         case .liveOptimizationStarted(let sourceText, let sourceRevision, let modeID):
@@ -1018,9 +1026,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         case .clearRequested:
           await MainActor.run { PassportKeystroke.clearInputField() }
+
+        case .discardRequested:
+          await self.discardDeviceRecording()
         }
       }
     }
+  }
+
+  /// Throw away the recording the device just rejected.
+  ///
+  /// One call covers both windows the user can be in — still speaking, or waiting on
+  /// recognition — because the device cannot tell which, and `discardSession` picks
+  /// the right teardown from the session's own state. The bar is cleared here rather
+  /// than left to the session so "cancelled" appears the instant the key is pressed:
+  /// when recognition is mid-flight the session's own `.discarded` event can be
+  /// seconds away, and the user needs to see that the press registered.
+  private func discardDeviceRecording() async {
+    let phase = await MainActor.run { self.appState.barPhase }
+    // A stale abort — the device pressed cancel after the Mac had already finished
+    // and typed the text. Nothing is in flight to discard, and flashing "cancelled"
+    // would claim we undid something we did not.
+    guard phase == .preparing || phase == .recording || phase == .processing
+      || phase == .recovering
+    else {
+      DebugFileLogger.log("passport discard ignored: nothing in flight (phase=\(phase))")
+      return
+    }
+    DebugFileLogger.log("passport discard requested phase=\(phase)")
+    let pendingModeChange = await MainActor.run {
+      self.appState.showCancelled()
+      self.hotkeyManager.isProcessing = false
+      self.safeResetHotkeyState()
+      self.deviceRecordingModeId = nil
+      let pending = self.panelModeSessionTask
+      self.panelModeSessionTask = nil
+      return pending
+    }
+    await pendingModeChange?.value
+    await session.discardSession()
   }
 
   func applicationWillTerminate(_ notification: Notification) {

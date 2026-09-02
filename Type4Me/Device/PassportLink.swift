@@ -61,6 +61,9 @@ actor PassportLink {
         case submitRequested
         /// Clear the current input field.
         case clearRequested
+        /// The user discarded the recording from the device. Whatever stage the
+        /// pipeline is at, nothing may be typed.
+        case discardRequested
     }
 
     private var eventContinuation: AsyncStream<Event>.Continuation?
@@ -384,6 +387,16 @@ actor PassportLink {
         case .keyAction(.clear):
             eventContinuation?.yield(.clearRequested)
 
+        case .sessionAbort:
+            // The device has already put itself back in READY, so it is not waiting
+            // on a terminal status — but the watchdog armed by `voice.end` is, and
+            // letting it fire 20 seconds later would push a stale `done` at a device
+            // that has moved on. Close the session out without replying.
+            DebugFileLogger.log("passport link session.abort — user discarded the recording")
+            logger.info("device aborted the session")
+            finishSession(reason: "device abort", notifyDevice: false)
+            eventContinuation?.yield(.discardRequested)
+
         case .agentAction(let taskID, let action):
             // The approval screen is not wired up for voice input; acknowledge so
             // the device does not wait on us.
@@ -410,7 +423,16 @@ actor PassportLink {
     /// device stuck in TRANSCRIBING for 30 seconds, which reads to the user as
     /// "it froze after I finished speaking". `armFinishTimeout` is the backstop for
     /// a path nobody remembered to cover.
-    func finishSession(state: PassportProtocol.AgentState = .done, reason: String? = nil) {
+    ///
+    /// `notifyDevice: false` is for the one case where the device ended the session
+    /// itself: it is already back in READY and does not need telling, but the
+    /// watchdog still has to be stood down so it cannot fire a stale `done` at a
+    /// device that has moved on — or worse, at the next recording.
+    func finishSession(
+        state: PassportProtocol.AgentState = .done,
+        reason: String? = nil,
+        notifyDevice: Bool = true
+    ) {
         guard !didFinishSession else { return }
         didFinishSession = true
         sessionActive = false
@@ -418,8 +440,11 @@ actor PassportLink {
         finishTimeoutTask = nil
         publish { $0.isStreaming = false }
 
-        transport?.send(.control, text: PassportProtocol.agentStatus(state, message: reason ?? ""))
-        DebugFileLogger.log("passport link session finished state=\(state.rawValue) reason=\(reason ?? "-")")
+        if notifyDevice {
+            transport?.send(.control, text: PassportProtocol.agentStatus(state, message: reason ?? ""))
+        }
+        DebugFileLogger.log(
+            "passport link session finished state=\(state.rawValue) reason=\(reason ?? "-") notify=\(notifyDevice)")
     }
 
     /// Start the watchdog that reports the session over if nothing else does.

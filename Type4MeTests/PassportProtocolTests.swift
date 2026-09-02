@@ -57,6 +57,13 @@ final class PassportProtocolTests: XCTestCase {
     XCTAssertEqual(PassportProtocol.parseEvent(#"{"event":"status","drop":7}"#), .status(drop: 7))
   }
 
+  /// The device returns to its ready screen on its own, so this frame is the host's
+  /// only signal that the words were rejected — without it the transcript is typed
+  /// out and the cancel is silently a no-op.
+  func testParsesSessionAbort() {
+    XCTAssertEqual(PassportProtocol.parseEvent(#"{"event":"session.abort"}"#), .sessionAbort)
+  }
+
   func testParsesKeyActions() {
     XCTAssertEqual(
       PassportProtocol.parseEvent(#"{"event":"key.action","action":"enter"}"#), .keyAction(.enter))

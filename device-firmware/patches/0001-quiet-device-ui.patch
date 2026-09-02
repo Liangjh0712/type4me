@@ -10,8 +10,24 @@ index e7295c1..fb4ff7b 100644
           "nvs_settings.c"
           "adpcm.c"
           "audio_streamer.c"
+diff --git a/main/app_state.c b/main/app_state.c
+index 2a00cf8..4a57f6f 100644
+--- a/main/app_state.c
++++ b/main/app_state.c
+@@ -101,7 +101,10 @@ static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
+ 
+ void app_state_init(app_state_t *s) {
+     memset(s, 0, sizeof(*s));
+-    s->state = APP_ST_HOME;
++    // 开机直接进 READY:HOME 与 READY 都是"待命",区别只是 READY 能录音,而那一次
++    // OK 单击对用户没有意义 —— 开机总要按一下才能说话。合并后 OK 键空出来。
++    // HOME 状态本身保留(app_stage_t 未变),只是不再作为初始态进入。
++    s->state = APP_ST_READY;
+     s->screen_on = true;
+     s->panel_on = true;
+     // 开机即按"未连接"渲染(无 Mac 时不会收到断开事件,初始 true 会一直误判为
 diff --git a/main/app_ui.c b/main/app_ui.c
-index c29bd06..e18a220 100644
+index c29bd06..96776ed 100644
 --- a/main/app_ui.c
 +++ b/main/app_ui.c
 @@ -3,6 +3,8 @@
@@ -134,7 +150,7 @@ index c29bd06..e18a220 100644
                             &lv_font_montserrat_14, UI_INK, 0, 0, W);
  
      // Toast(底部浮层,空文本即隐藏)
-@@ -172,13 +223,31 @@ static void build_home(void)
+@@ -172,13 +223,34 @@ static void build_home(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -161,33 +177,49 @@ index c29bd06..e18a220 100644
 +        // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
 +        // 后文字才真正水平居中于面板(此前偏右 7px)。
 +        label(plate, owner, &lv_font_montserrat_20, UI_INK, -7, -2, 200);
-+        label(p->root, "Voice Input", &lv_font_montserrat_14, UI_MUTED, 0, 100, W);
++        // 副标题挤在名牌与人物之间会被压掉(实机上只剩 "Vo...ut"),所以让它压在
++        // 名牌下缘、人物再往下让位。
++        label(p->root, "Voice Input", &lv_font_montserrat_14, UI_MUTED, 0, 98, W);
++        pet_image(p->root, &pet_idle, 122);
 +    } else {
-+        // 没设名字:副标题升为主标题占住名牌的位置,避免上方留一块空白。
++        // 没设名字:副标题升为主标题占住名牌的位置,人物回到与其他页一致的高度。
 +        label(p->root, "Voice Input", &lv_font_montserrat_20, UI_PAPER, 0, CONTENT_Y + 20, W);
++        pet_image(p->root, &pet_idle, 100);
 +    }
-+    pet_image(p->root, &pet_idle, 96);
 +    // 只说下一步做什么。原先底部还列着 ENTER/CLEAR 两个此刻用不到的键,读起来
 +    // 像调试输出。
 +    hint_label(p->root, "hold OK to begin");
  }
  
  static void build_ready(void)
-@@ -192,9 +261,10 @@ static void build_ready(void)
+@@ -192,9 +264,23 @@ static void build_ready(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
 -    // 工作流切换已取消(固定 build),READY 为简单就绪页
 -    label(p->root, "READY", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 24, W);
 -    hint_label(p->root, "HOLD VOL+: SPEAK   DOWN: ENTER   DBL-VOL+: CLEAR");
-+    // 就绪页:待机表情 + 一句话。表情告诉你设备醒着在等,文字说怎么开始。
-+    pet_image(p->root, &pet_idle, 96);
-+    label(p->root, "Ready", &lv_font_montserrat_20, UI_PAPER, 0, 212, W);
++    // 开机后的主页面(HOME 已并入此页):名牌 + 待机表情 + 一句话。
++    // 不再单独写 "Ready" —— 名牌、表情和"按住说话"的提示已经说清了状态,
++    // 多一行状态词是冗余。
++    char owner[NVS_OWNER_MAX] = { 0 };
++    nvs_settings_get_owner(owner, sizeof(owner));
++
++    if (owner[0]) {
++        lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
++        // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消。
++        label(plate, owner, &lv_font_montserrat_20, UI_INK, -7, -2, 200);
++        label(p->root, "Voice Input", &lv_font_montserrat_14, UI_MUTED, 0, 98, W);
++        pet_image(p->root, &pet_idle, 122);
++    } else {
++        label(p->root, "Voice Input", &lv_font_montserrat_20, UI_PAPER, 0, CONTENT_Y + 20, W);
++        pet_image(p->root, &pet_idle, 100);
++    }
 +    hint_label(p->root, "hold the top key and speak");
  }
  
  static void build_listening(void)
-@@ -208,12 +278,12 @@ static void build_listening(void)
+@@ -208,12 +294,12 @@ static void build_listening(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -206,7 +238,7 @@ index c29bd06..e18a220 100644
  }
  
  static void build_transcribing(void)
-@@ -227,9 +297,11 @@ static void build_transcribing(void)
+@@ -227,9 +313,11 @@ static void build_transcribing(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -221,7 +253,7 @@ index c29bd06..e18a220 100644
  }
  
  static void build_running(void)
-@@ -243,12 +315,11 @@ static void build_running(void)
+@@ -243,12 +331,11 @@ static void build_running(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -238,7 +270,7 @@ index c29bd06..e18a220 100644
  }
  
  static void build_approval(void)
-@@ -276,7 +347,7 @@ static void build_approval(void)
+@@ -276,7 +363,7 @@ static void build_approval(void)
      lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
      lv_obj_set_height(p->ap_diff, 88);
  
@@ -247,7 +279,7 @@ index c29bd06..e18a220 100644
  }
  
  static void set_hidden(lv_obj_t *o, bool hidden)
-@@ -368,14 +439,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
+@@ -368,14 +455,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
      }
  
      // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)

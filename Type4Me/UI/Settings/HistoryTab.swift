@@ -158,6 +158,25 @@ struct HistoryTab: View {
     @State private var exportEnd = Date()
     @State private var exportRecordCount: Int = 0
 
+    /// Entry kind filter. Quick notes are the one kind worth isolating: they were
+    /// never typed anywhere, so this list is the only place their text exists.
+    enum KindFilter: String, Hashable {
+        case all
+        case quickNote
+
+        var label: String {
+            switch self {
+            case .all: return L("全部", "All")
+            case .quickNote: return L("速记", "Notes")
+            }
+        }
+
+        /// The `status` value to match in SQL, or nil for no filter.
+        var status: String? { self == .quickNote ? "quick_note" : nil }
+    }
+
+    @State private var kindFilter: KindFilter = .all
+
     // Date filter
     @State private var dateFilter: DateFilter = .all
     @State private var showCustomRange = false
@@ -284,6 +303,32 @@ struct HistoryTab: View {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(TF.settingsTextTertiary.opacity(0.2), lineWidth: 1)
                 )
+
+                // Kind filter: All / Notes
+                Menu {
+                    ForEach([KindFilter.all, .quickNote], id: \.self) { filter in
+                        Button {
+                            kindFilter = filter
+                        } label: {
+                            if kindFilter == filter {
+                                Label(filter.label, systemImage: "checkmark")
+                            } else {
+                                Text(filter.label)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: kindFilter == .quickNote ? "square.and.pencil" : "tray.full")
+                            .font(.system(size: 11))
+                        Text(kindFilter.label).font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(
+                        kindFilter == .all ? TF.settingsTextSecondary : TF.settingsNavActive)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
 
                 // Date filter menu
                 Menu {
@@ -443,6 +488,12 @@ struct HistoryTab: View {
                 await loadStatistics()
             }
         }
+        .onChange(of: kindFilter) { _, _ in
+            selectedIds.removeAll()
+            Task {
+                await loadRecords()
+            }
+        }
         .onChange(of: dateFilter) { _, _ in
             selectedIds.removeAll()
             Task {
@@ -550,7 +601,8 @@ struct HistoryTab: View {
 
     private func loadRecords() async {
         let range = dateFilter.dateRange
-        let fetched = await historyStore.fetchPage(limit: Self.pageSize, from: range?.start, to: range?.end)
+        let fetched = await historyStore.fetchPage(
+            limit: Self.pageSize, from: range?.start, to: range?.end, status: kindFilter.status)
         records = fetched
         hasMore = fetched.count >= Self.pageSize
     }
@@ -580,7 +632,8 @@ struct HistoryTab: View {
             return
         }
         let range = dateFilter.dateRange
-        let page = await historyStore.fetchPage(limit: Self.pageSize, before: cursor, from: range?.start)
+        let page = await historyStore.fetchPage(
+            limit: Self.pageSize, before: cursor, from: range?.start, status: kindFilter.status)
         records.append(contentsOf: page)
         hasMore = page.count >= Self.pageSize
         isLoadingMore = false

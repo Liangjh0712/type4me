@@ -142,9 +142,17 @@ actor HistoryStore {
         return executeQuery(sql)
     }
 
-    /// Cursor-based pagination with optional date range filter.
-    /// Pass `cursor` for subsequent pages, `from`/`to` as ISO8601 strings for date filtering.
-    func fetchPage(limit: Int, before cursor: String? = nil, from: String? = nil, to: String? = nil) -> [HistoryRecord] {
+    /// Cursor-based pagination with optional date range and status filters.
+    /// Pass `cursor` for subsequent pages, `from`/`to` as ISO8601 strings for date
+    /// filtering, `status` to keep only one kind of entry (e.g. quick notes).
+    ///
+    /// The status filter lives in SQL rather than in the view so it survives
+    /// pagination — filtering the loaded page instead would silently stop finding
+    /// matches past the first fifty records.
+    func fetchPage(
+        limit: Int, before cursor: String? = nil, from: String? = nil, to: String? = nil,
+        status: String? = nil
+    ) -> [HistoryRecord] {
         var conditions: [String] = []
         var params: [String] = []
         if let cursor {
@@ -158,6 +166,10 @@ actor HistoryStore {
         if let to {
             conditions.append("created_at < ?")
             params.append(to)
+        }
+        if let status {
+            conditions.append("status = ?")
+            params.append(status)
         }
         let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
         let sql = "SELECT * FROM recognition_history \(whereClause) ORDER BY created_at DESC LIMIT \(limit);"

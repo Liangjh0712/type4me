@@ -1,8 +1,29 @@
 diff --git a/main/app_ui.c b/main/app_ui.c
-index c29bd06..2d737a6 100644
+index c29bd06..6be726f 100644
 --- a/main/app_ui.c
 +++ b/main/app_ui.c
-@@ -59,7 +59,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
+@@ -27,6 +27,11 @@
+ #define BATT_NUB_W   4
+ #define TIME_X       182
+ #define TIME_W       52
++// 链路图标:电池左侧,只在链路通时显示。有线画一个 USB 插头轮廓,无线画三段
++// 递增的信号弧 —— 用形状而不是 "USB"/"BLE" 三个字母,顶栏宽度紧张,而这里
++// 只需要回答"现在能不能拔线"。
++#define LINK_X       116
++#define LINK_Y       6
+ 
+ // ---- 页内部件索引(与 page 切换共用) ----
+ typedef struct {
+@@ -48,6 +53,8 @@ static lv_obj_t *s_batt_icon;   // 电池描边框(数字居中在框内)
+ static lv_obj_t *s_batt_nub;    // 右缘触点
+ static lv_obj_t *s_batt_label;
+ static lv_obj_t *s_time_label;
++static lv_obj_t *s_link_usb;    // 顶栏链路图标:有线(插头)
++static lv_obj_t *s_link_ble;    // 顶栏链路图标:无线(信号弧)
+ static lv_obj_t *s_offline_banner;
+ static lv_obj_t *s_offline_text;
+ static lv_obj_t *s_netbusy_banner;
+@@ -59,7 +66,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
  static bool s_last_screen_on = true;
  static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单屏方案)
  
@@ -11,7 +32,7 @@ index c29bd06..2d737a6 100644
  static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
  
  // ---- 基础块(无 LVGL 样式噪音) ----
-@@ -94,6 +94,40 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
+@@ -94,6 +101,40 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
      return label(parent, text, &lv_font_montserrat_14, UI_MUTED, 0, HINT_Y, W);
  }
  
@@ -52,7 +73,25 @@ index c29bd06..2d737a6 100644
  // ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
  static void build_background(void)
  {
-@@ -147,12 +181,12 @@ static void build_chrome(void)
+@@ -143,16 +184,30 @@ static void build_chrome(void)
+     s_time_label = label(s_chrome, "--:--", &lv_font_montserrat_14, 0xFFFFFF,
+                          TIME_X, 5, TIME_W);
+ 
++    // 链路图标:两个都建好,render 按 link_name 显隐其一。做成容器而不是单个
++    // block,是因为图标由几个块拼成 —— 整组显隐比逐块管理简单。
++    s_link_usb = block(s_chrome, LINK_X, LINK_Y, 16, 14, UI_INK);
++    lv_obj_set_style_bg_opa(s_link_usb, LV_OPA_TRANSP, 0);
++    block(s_link_usb, 6, 0, 4, 4, 0xFFFFFF);        // 插头颈
++    block(s_link_usb, 2, 4, 12, 7, 0xFFFFFF);       // 插头体
++    block(s_link_usb, 5, 11, 6, 3, 0xFFFFFF);       // 线
++
++    s_link_ble = block(s_chrome, LINK_X, LINK_Y, 16, 14, UI_INK);
++    lv_obj_set_style_bg_opa(s_link_ble, LV_OPA_TRANSP, 0);
++    block(s_link_ble, 2, 10, 3, 4, 0xFFFFFF);       // 三段递增信号弧
++    block(s_link_ble, 7, 6, 3, 8, 0xFFFFFF);
++    block(s_link_ble, 12, 2, 3, 12, 0xFFFFFF);
++
+     // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)。
      // 文本是子 label(render 按通道名改写文案);banner 本体是 block,不能
      // 对 block 调 label_set_*(会按 label 布局读越界内存 → Load access fault)。
      s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
@@ -67,7 +106,7 @@ index c29bd06..2d737a6 100644
                             &lv_font_montserrat_14, UI_INK, 0, 0, W);
  
      // Toast(底部浮层,空文本即隐藏)
-@@ -175,10 +209,11 @@ static void build_home(void)
+@@ -175,10 +230,11 @@ static void build_home(void)
      lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
      // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
      // 后文字才真正水平居中于面板(此前偏右 7px)。
@@ -82,7 +121,7 @@ index c29bd06..2d737a6 100644
  }
  
  static void build_ready(void)
-@@ -192,9 +227,10 @@ static void build_ready(void)
+@@ -192,9 +248,10 @@ static void build_ready(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -96,7 +135,7 @@ index c29bd06..2d737a6 100644
  }
  
  static void build_listening(void)
-@@ -208,12 +244,13 @@ static void build_listening(void)
+@@ -208,12 +265,13 @@ static void build_listening(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -116,7 +155,7 @@ index c29bd06..2d737a6 100644
  }
  
  static void build_transcribing(void)
-@@ -227,9 +264,11 @@ static void build_transcribing(void)
+@@ -227,9 +285,11 @@ static void build_transcribing(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -131,7 +170,7 @@ index c29bd06..2d737a6 100644
  }
  
  static void build_running(void)
-@@ -243,12 +282,11 @@ static void build_running(void)
+@@ -243,12 +303,11 @@ static void build_running(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -148,7 +187,7 @@ index c29bd06..2d737a6 100644
  }
  
  static void build_approval(void)
-@@ -276,7 +314,7 @@ static void build_approval(void)
+@@ -276,7 +335,7 @@ static void build_approval(void)
      lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
      lv_obj_set_height(p->ap_diff, 88);
  
@@ -157,3 +196,26 @@ index c29bd06..2d737a6 100644
  }
  
  static void set_hidden(lv_obj_t *o, bool hidden)
+@@ -368,14 +427,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
+     }
+ 
+     // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
+-    // 文案按当前链路通道渲染(BLE/USB;断线横幅显示 link_name 字样)
+-    label_set_fmt_if_changed(s_offline_text, "%s DISCONNECTED - reconnecting...",
+-                             snap->link_name);
+-    label_set_fmt_if_changed(s_netbusy_text, "%s BUSY - dropping frames",
+-                             snap->link_name);
++    //
++    // 不再把通道名写进文案:通道现在由顶栏图标表示,而横幅要回答的是"电脑还连着
++    // 吗",通道是哪一条对这个问题没有帮助。
+     set_hidden(s_offline_banner, snap->link_up);
+     set_hidden(s_netbusy_banner, !snap->net_busy || !snap->link_up);
+ 
++    // 顶栏链路图标:链路通时显示当前通道,断线时两个都藏起来(横幅已经在说了)。
++    bool wired = snap->link_name[0] == 'U';   // "USB" / "BLE"
++    set_hidden(s_link_usb, !snap->link_up || !wired);
++    set_hidden(s_link_ble, !snap->link_up || wired);
++
+     if (snap->toast[0]) {
+         label_set_if_changed(s_toast, snap->toast);
+         set_hidden(lv_obj_get_parent(s_toast), false);

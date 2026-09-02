@@ -1,8 +1,19 @@
 diff --git a/main/app_ui.c b/main/app_ui.c
-index c29bd06..6be726f 100644
+index c29bd06..8bed073 100644
 --- a/main/app_ui.c
 +++ b/main/app_ui.c
-@@ -27,6 +27,11 @@
+@@ -18,6 +18,10 @@
+ #define W            240
+ #define H            320
+ 
++// 待机页名牌上的名字。改这一行即可换人;montserrat_20 下 200px 名牌大约放得下
++// 14 个字符,更长会被截断。
++#define DEVICE_OWNER_NAME  "LukeLiang"
++
+ // 顶栏(无 BLE 点、无 CPU/RAM 监测):右侧对齐组:电池图标(描边框+右缘
+ // 触点,数字居中)、HH:MM 时间(最右贴 6px)。240px:144+34+4 / 182+52。
+ #define BATT_X       144
+@@ -27,6 +31,11 @@
  #define BATT_NUB_W   4
  #define TIME_X       182
  #define TIME_W       52
@@ -14,7 +25,7 @@ index c29bd06..6be726f 100644
  
  // ---- 页内部件索引(与 page 切换共用) ----
  typedef struct {
-@@ -48,6 +53,8 @@ static lv_obj_t *s_batt_icon;   // 电池描边框(数字居中在框内)
+@@ -48,6 +57,8 @@ static lv_obj_t *s_batt_icon;   // 电池描边框(数字居中在框内)
  static lv_obj_t *s_batt_nub;    // 右缘触点
  static lv_obj_t *s_batt_label;
  static lv_obj_t *s_time_label;
@@ -23,7 +34,7 @@ index c29bd06..6be726f 100644
  static lv_obj_t *s_offline_banner;
  static lv_obj_t *s_offline_text;
  static lv_obj_t *s_netbusy_banner;
-@@ -59,7 +66,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
+@@ -59,7 +70,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
  static bool s_last_screen_on = true;
  static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单屏方案)
  
@@ -32,7 +43,7 @@ index c29bd06..6be726f 100644
  static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
  
  // ---- 基础块(无 LVGL 样式噪音) ----
-@@ -94,6 +101,40 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
+@@ -94,6 +105,40 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
      return label(parent, text, &lv_font_montserrat_14, UI_MUTED, 0, HINT_Y, W);
  }
  
@@ -73,7 +84,7 @@ index c29bd06..6be726f 100644
  // ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
  static void build_background(void)
  {
-@@ -143,16 +184,30 @@ static void build_chrome(void)
+@@ -143,16 +188,30 @@ static void build_chrome(void)
      s_time_label = label(s_chrome, "--:--", &lv_font_montserrat_14, 0xFFFFFF,
                           TIME_X, 5, TIME_W);
  
@@ -106,22 +117,29 @@ index c29bd06..6be726f 100644
                             &lv_font_montserrat_14, UI_INK, 0, 0, W);
  
      // Toast(底部浮层,空文本即隐藏)
-@@ -175,10 +230,11 @@ static void build_home(void)
+@@ -172,13 +231,17 @@ static void build_home(void)
+     lv_obj_set_size(p->root, W, H);
+     lv_obj_set_pos(p->root, 0, 0);
+ 
++    // 待机页做成身份卡:名牌上是主人的名字,底下小字说明这是什么设备。
++    // 设备名就叫 AI Passport,出厂固件也是身份卡形态,这里顺着那个语义。
      lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
      // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
      // 后文字才真正水平居中于面板(此前偏右 7px)。
 -    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
-+    label(plate, "Voice Input", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
-     ui_pixel_mascot_create(p->root, 101, 100);
+-    ui_pixel_mascot_create(p->root, 101, 100);
 -    label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
 -    hint_label(p->root, "OK: ENTER   DBL-VOL+: CLEAR   DOWN: ENTER");
++    label(plate, DEVICE_OWNER_NAME, &lv_font_montserrat_20, UI_INK, -7, -2, 200);
++    label(p->root, "Voice Input", &lv_font_montserrat_14, UI_MUTED, 0, CONTENT_Y + 54, W);
++    ui_pixel_mascot_create(p->root, 101, 112);
 +    // 只说下一步做什么。原先底部还列着 ENTER/CLEAR 两个此刻用不到的键,读起来
 +    // 像调试输出。
-+    label(p->root, "hold OK to begin", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
++    label(p->root, "hold OK to begin", &lv_font_montserrat_14, UI_MUTED, 0, 208, W);
  }
  
  static void build_ready(void)
-@@ -192,9 +248,10 @@ static void build_ready(void)
+@@ -192,9 +255,10 @@ static void build_ready(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -135,7 +153,7 @@ index c29bd06..6be726f 100644
  }
  
  static void build_listening(void)
-@@ -208,12 +265,13 @@ static void build_listening(void)
+@@ -208,12 +272,13 @@ static void build_listening(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -155,7 +173,7 @@ index c29bd06..6be726f 100644
  }
  
  static void build_transcribing(void)
-@@ -227,9 +285,11 @@ static void build_transcribing(void)
+@@ -227,9 +292,11 @@ static void build_transcribing(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -170,7 +188,7 @@ index c29bd06..6be726f 100644
  }
  
  static void build_running(void)
-@@ -243,12 +303,11 @@ static void build_running(void)
+@@ -243,12 +310,11 @@ static void build_running(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -187,7 +205,7 @@ index c29bd06..6be726f 100644
  }
  
  static void build_approval(void)
-@@ -276,7 +335,7 @@ static void build_approval(void)
+@@ -276,7 +342,7 @@ static void build_approval(void)
      lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
      lv_obj_set_height(p->ap_diff, 88);
  
@@ -196,7 +214,7 @@ index c29bd06..6be726f 100644
  }
  
  static void set_hidden(lv_obj_t *o, bool hidden)
-@@ -368,14 +427,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
+@@ -368,14 +434,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
      }
  
      // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)

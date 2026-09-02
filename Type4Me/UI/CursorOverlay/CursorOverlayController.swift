@@ -89,9 +89,18 @@ final class CursorOverlayController {
   private let panel = CursorOverlayPanel()
   private let hosting: NSHostingView<CursorOverlayView<AppState>>
 
-  private var lastPhase: FloatingBarPhase = .hidden
   /// Dwell timer for the .error state, so a failure is actually seen.
   private var pendingErrorDismiss: DispatchWorkItem?
+  /// True from the moment `hide()` starts its fade until the fade completes.
+  /// `panel.isVisible` stays true for that whole 0.15s, so it cannot be used to
+  /// answer "is the capsule up?" — see `show()`.
+  private var isFadingOut = false
+  /// Bumped on every show/hide. A fade-out completion only gets to call
+  /// `orderOut` if nothing has happened since it was scheduled; without this,
+  /// a stop-then-start inside the fade window tore down the panel that the new
+  /// recording had just brought up. The top deck and the headset toast already
+  /// guard their completions this way.
+  private var visibilityGeneration = 0
 
   init(state: AppState, userDefaults: UserDefaults = .standard) {
     self.state = state
@@ -139,37 +148,29 @@ final class CursorOverlayController {
     startObserving()  // one-shot: re-register before reading
 
     let phase = state.barPhase
-    let wasActive = lastPhase == .preparing || lastPhase == .recording
-    let isActive = phase == .preparing || phase == .recording
-    let enteredRecording = isActive && !wasActive
-    lastPhase = phase
+    let action = CursorOverlayVisibility.action(
+      phase: phase,
+      styleIsCursor: TranscriptPanelStyle.current(userDefaults: userDefaults) == .cursor,
+      panel: CursorOverlayVisibility.PanelState(
+        isVisible: panel.isVisible, isFadingOut: isFadingOut)
+    )
 
-    guard TranscriptPanelStyle.current(userDefaults: userDefaults) == .cursor else {
-      if panel.isVisible { hide() }
-      return
-    }
-
-    if enteredRecording {
-      show()
-    }
-
-    switch phase {
-    case .hidden, .done:
-      hide()
-    case .error:
-      // Hold the failure on screen instead of vanishing. Styles 1/2/4 all
-      // linger on .error; the capsule used to hide, so a failed dictation
-      // looked exactly like a successful one — the user's speech disappeared
-      // with nothing but a sound to explain it.
-      if panel.isVisible {
-        updateFrame()
-        scheduleErrorDismiss()
-      }
-    default:
+    if phase == .error {
+      if action == .refit { scheduleErrorDismiss() }
+    } else {
       pendingErrorDismiss?.cancel()
       pendingErrorDismiss = nil
-      // Re-fit the capsule as the transcript grows.
-      if panel.isVisible { updateFrame() }
+    }
+
+    switch action {
+    case .show:
+      show()
+    case .hide:
+      hide()
+    case .refit:
+      updateFrame()
+    case .none:
+      break
     }
   }
 
@@ -195,27 +196,51 @@ final class CursorOverlayController {
 
   // MARK: - Show / hide
 
+  /// Brings the capsule up, including when it is mid-fade from the previous
+  /// utterance. Always a cold show — `CursorOverlayVisibility` only asks for one
+  /// when the old frame's utterance is over — so the active display and the
+  /// parked anchor are re-resolved rather than resized around.
   private func show() {
-    updateFrame()
-    guard !panel.isVisible else { return }
-    panel.alphaValue = 0
+    updateFrame(coldShow: true)
+    let wasFadingOut = isFadingOut
+    isFadingOut = false
+    // Disarms any in-flight fade completion, which would otherwise order the
+    // panel out from under the recording that just started.
+    visibilityGeneration &+= 1
+    guard wasFadingOut || !panel.isVisible else { return }
+    // Assigning alphaValue cancels the fade-out's animation outright, so the two
+    // never interleave. Resume from wherever the fade got to rather than from 0:
+    // restarting at 0 would darken an almost-opaque capsule before brightening
+    // it again, which is a visible dip on a fast stop-start.
+    let from = wasFadingOut ? panel.alphaValue : 0
+    panel.alphaValue = from
     panel.orderFrontRegardless()
     NSAnimationContext.runAnimationGroup { context in
-      context.duration = 0.12
+      // Scale the fade-in to the distance left to travel, so a near-opaque
+      // resume snaps rather than crawling back up over the full 0.12s.
+      context.duration = 0.12 * Double(1 - from)
       panel.animator().alphaValue = 1
     }
   }
 
   private func hide() {
-    guard panel.isVisible else { return }
+    guard panel.isVisible, !isFadingOut else { return }
+    isFadingOut = true
+    visibilityGeneration &+= 1
+    let expectedGeneration = visibilityGeneration
     let panelRef = panel
     NSAnimationContext.runAnimationGroup(
       { context in
         context.duration = 0.15
         panelRef.animator().alphaValue = 0
       },
-      completionHandler: {
-        MainActor.assumeIsolated { panelRef.orderOut(nil) }
+      completionHandler: { [weak self] in
+        MainActor.assumeIsolated {
+          // A show() landed while this fade was running: leave the panel alone.
+          guard let self, self.visibilityGeneration == expectedGeneration else { return }
+          self.isFadingOut = false
+          panelRef.orderOut(nil)
+        }
       }
     )
   }
@@ -297,11 +322,15 @@ final class CursorOverlayController {
 
   // MARK: - Geometry
 
-  private func updateFrame() {
+  /// - Parameter coldShow: forces the "landing fresh" path even though the
+  ///   panel is technically still onscreen. Set when resuming from a fade-out:
+  ///   the utterance that owned the old position is over, so the capsule should
+  ///   re-resolve the active display instead of resizing around a stale frame.
+  private func updateFrame(coldShow: Bool = false) {
     let size = measuredSize()
     let origin: NSPoint
 
-    if panel.isVisible {
+    if panel.isVisible && !coldShow {
       // Resize in place: left and top edges anchored to the current frame, so
       // bucket crossings glide around a stable anchor. Never re-resolve the
       // screen mid-utterance — that would teleport the capsule if the user

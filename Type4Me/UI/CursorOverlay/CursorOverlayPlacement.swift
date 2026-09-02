@@ -92,3 +92,73 @@ enum CursorOverlayPlacement {
     )
   }
 }
+
+// MARK: - Visibility
+
+/// Pure decision layer for "should the capsule be onscreen, and how should it
+/// get there" — split out from the controller so the fade-window edge cases can
+/// be tested without a window server.
+///
+/// It exists because `NSWindow.isVisible` is not the same question as "is the
+/// capsule up": it stays true for the whole 0.15s fade-out. Reading it as
+/// though it meant "shown" made a recording started within 150ms of the
+/// previous one ending produce no capsule at all — the show was skipped as
+/// redundant, and the in-flight fade then ordered the panel out from under the
+/// live recording. Intermittent by construction, and indistinguishable from the
+/// overlay being hidden behind the frontmost window.
+enum CursorOverlayVisibility {
+
+  /// What the controller should do with the panel for a given phase.
+  enum Action: Equatable {
+    /// Bring the panel up, re-resolving the active display and the parked
+    /// anchor. Always a cold show: this is only emitted when the panel is down
+    /// or on its way down, and in both cases the utterance that owned the old
+    /// frame is over — resizing around that frame would leave the capsule on
+    /// whichever display the last recording happened on.
+    case show
+    /// Start (or leave running) the fade-out.
+    case hide
+    /// Re-fit the existing frame to new content, in place.
+    case refit
+    /// Leave the panel exactly as it is.
+    case none
+  }
+
+  /// The panel's own state, as the controller knows it.
+  struct PanelState: Equatable {
+    /// `NSWindow.isVisible` — true during a fade-out too.
+    var isVisible: Bool
+    /// True between the start of the fade-out and its completion.
+    var isFadingOut: Bool
+
+    /// The question the controller actually needs answered, and the one
+    /// `isVisible` silently gets wrong for 150ms after every utterance.
+    var isUp: Bool { isVisible && !isFadingOut }
+  }
+
+  static func action(
+    phase: FloatingBarPhase,
+    styleIsCursor: Bool,
+    panel: PanelState
+  ) -> Action {
+    guard styleIsCursor else {
+      return panel.isVisible ? .hide : .none
+    }
+
+    switch phase {
+    case .preparing, .recording:
+      // Stated as an invariant ("capture is live ⇒ the capsule is up") rather
+      // than as a reaction to entering the phase. The transition-based form
+      // left the capsule hidden for a whole utterance whenever it happened to
+      // be down for any reason other than the previous phase.
+      return panel.isUp ? .refit : .show
+    case .hidden, .done:
+      return .hide
+    case .processing, .recovering, .error:
+      // Never re-fit a fading panel: that frame belongs to the utterance that
+      // ended, and an error arriving after the capsule is gone must not
+      // resurrect it — this surface is not an alert.
+      return panel.isUp ? .refit : .none
+    }
+  }
+}

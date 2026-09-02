@@ -64,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private let hotkeyManager = HotkeyManager()
   private let session = RecognitionSession()
   private var panelModeSessionTask: Task<Void, Never>?
+  /// Retained for the lifetime of the app: `PassportLink` holds only a weak
+  /// reference to it, and the recognition session swaps to it while a device is
+  /// attached.
+  private var passportAudioSource: PassportAudioSource?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSLog("[Type4Me] applicationDidFinishLaunching")
@@ -167,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       Task {
         await pendingModeChange?.value
         await session.cancelRecording()
+        await PassportLink.shared.finishSession(state: .done, reason: "cancelled")
       }
     }
     appState.onPanelModeSelected = { [weak self] mode in
@@ -237,6 +242,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           }
         case .transcript(let transcript):
           appState.setLiveTranscript(transcript)
+          // Mirror the live text onto the device screen so the user can glance at
+          // the card instead of the Mac.
+          if PassportLink.isConnected {
+            let text = transcript.canonicalText
+            Task { await PassportLink.shared.showTranscript(text, final: false) }
+          }
         case .completed:
           appState.stopRecording()
           if await session.stoppedByMaxDuration {
@@ -248,6 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           appState.cancel()
           self.hotkeyManager.isProcessing = false
           self.safeResetHotkeyState()
+          // Nothing was recognized, but the session still ended: the device leaves
+          // TRANSCRIBING only on an agent.status, so this path must report it or
+          // the card freezes for 30 seconds.
+          Task { await PassportLink.shared.finishSession(state: .done) }
         case .processingLabelOverride(let label):
           appState.processingLabelOverride = label
         case .liveOptimizationStarted(let sourceText, let sourceRevision, let modeID):
@@ -318,6 +333,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           appState.finalize(text: text, outcome: injection)
           self.hotkeyManager.isProcessing = false
           self.safeResetHotkeyState()
+          Task {
+            await PassportLink.shared.showTranscript(text, final: true)
+            await PassportLink.shared.finishSession(state: .done)
+          }
         case .macActionResult(let message, let status):
           appState.showMacActionResult(message: message, status: status)
           self.hotkeyManager.isProcessing = false
@@ -337,6 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           self.selectionAskController.cancelFollowUpRecording()
           self.hotkeyManager.isProcessing = false
           self.safeResetHotkeyState()
+          Task { await PassportLink.shared.finishSession(state: .error) }
         }
       }
     }
@@ -431,6 +451,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CredentialStore.selectedASRProvider = .volcano
       }
     }
+
+    // Attach a hardware voice device if one is plugged in, and follow it as it
+    // comes and goes.
+    startPassportDeviceLink()
 
     // Check if menu bar icon is hidden by macOS 26+ "Allow in Menu Bar" setting
     checkMenuBarVisibility()
@@ -650,6 +674,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
           await pendingModeChange?.value
           await self.session.cancelRecording()
+          await PassportLink.shared.finishSession(state: .done, reason: "cancelled")
         }
       }
       return true
@@ -901,11 +926,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  // MARK: - Hardware voice device
+
+  /// Attach to an AI Passport device and translate its events into recordings.
+  ///
+  /// The device is a remote microphone and a remote hotkey: its record key routes
+  /// through the real hotkey binding for the current mode, so a device recording is
+  /// indistinguishable from a keyboard one — same provider resolution, same desync
+  /// guards, same LLM post-processing.
+  private func startPassportDeviceLink() {
+    let passportSource = PassportAudioSource()
+    self.passportAudioSource = passportSource
+
+    Task {
+      await PassportLink.shared.setAudioSink { [weak passportSource] pcm in
+        passportSource?.accept(pcm)
+      }
+
+      let events = await PassportLink.shared.events()
+      await PassportLink.shared.connect()
+
+      for await event in events {
+        switch event {
+        case .connected(let deviceName):
+          NSLog("[Passport] connected: %@", deviceName)
+          // Device audio takes over while it is attached; unplugging hands the
+          // microphone back. Ignored mid-recording, applied on the next one.
+          await self.session.useAudioSource(passportSource)
+
+        case .disconnected:
+          NSLog("[Passport] disconnected")
+          await self.session.useAudioSource(nil)
+
+        case .recordingRequested:
+          await MainActor.run {
+            let modeId = self.appState.currentMode.id
+            guard self.hotkeyManager.triggerBinding(modeId: modeId, pressed: true) else {
+              // No binding for this mode means the hotkey path cannot run, so
+              // there is nothing sane to start; tell the device so it does not
+              // sit in TRANSCRIBING.
+              Task { await PassportLink.shared.finishSession(state: .error, reason: "no mode") }
+              return
+            }
+          }
+
+        case .recordingFinished:
+          await MainActor.run {
+            _ = self.hotkeyManager.triggerBinding(
+              modeId: self.appState.currentMode.id, pressed: false)
+          }
+
+        case .submitRequested:
+          await MainActor.run { PassportKeystroke.pressReturn() }
+
+        case .clearRequested:
+          await MainActor.run { PassportKeystroke.clearInputField() }
+        }
+      }
+    }
+  }
+
   func applicationWillTerminate(_ notification: Notification) {
     hotkeyManager.stop()
     SystemVolumeManager.restore()
     // Synchronous kill: don't rely on async Task, app exits immediately after this returns
     SenseVoiceServerManager.killAllServerProcesses()
+    PassportLink.closeAllLinksSynchronously()
   }
 
   // MARK: - URL Scheme Handling

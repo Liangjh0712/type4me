@@ -7,6 +7,13 @@ struct ASRRequestOptions: Sendable, Equatable {
     var boostingTableID: String?
     var contextHistoryLength: Int = 20
     var bypassProxy: Bool = false
+    /// Whether the client should discard the first ~400ms to avoid the start sound
+    /// bleeding into recognition.
+    ///
+    /// True for the local microphone, where the cue plays into the same room. An
+    /// external device gates its own tone before it opens the audio stream, so
+    /// skipping there would throw away the user's first word instead.
+    var skipsStartToneSamples: Bool = true
     /// When set, ASR clients connect to this URL instead of their default endpoint.
     var cloudProxyURL: String?
     var urlSessionConfiguration: URLSessionConfiguration {

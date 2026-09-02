@@ -660,6 +660,29 @@ final class HotkeyManager: NSObject {
         handleBindingEvent(binding: binding, pressed: pressed)
     }
 
+    /// Drive a recording from something other than a key press — a hardware
+    /// device's own button, say.
+    ///
+    /// Routes through the real binding for `modeId` rather than calling the session
+    /// directly, so the external trigger inherits everything the hotkey path does:
+    /// provider-specific mode resolution, the toggle-desync guard that redirects a
+    /// second start into a stop, the idle wait before starting, and the safety
+    /// timers. Returns false when no binding matches, which happens if the mode was
+    /// deleted or its hotkey unassigned.
+    @discardableResult
+    func triggerBinding(modeId: UUID, pressed: Bool) -> Bool {
+        guard let binding = bindings.first(where: { $0.modeId == modeId }) else {
+            NSLog("[Type4Me] external trigger: no binding for mode %@", modeId.uuidString)
+            DebugFileLogger.log("external trigger no binding mode=\(modeId)")
+            return false
+        }
+        handleBindingEvent(binding: binding, pressed: pressed)
+        return true
+    }
+
+    /// Whether any mode currently has a binding registered.
+    var hasBindings: Bool { !bindings.isEmpty }
+
     internal func simulateStopActiveRecording() {
         stopActiveRecording()
     }

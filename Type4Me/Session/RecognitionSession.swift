@@ -60,15 +60,41 @@ actor RecognitionSession {
   // MARK: - Dependencies
 
   /// Where the PCM comes from. Defaults to the local microphone; an external
-  /// device can be injected instead (see `AudioSource`). The no-argument
-  /// initializer keeps existing call sites and tests working unchanged.
-  private let audioSource: any AudioSource
+  /// device can be swapped in (see `AudioSource`). The no-argument initializer
+  /// keeps existing call sites and tests working unchanged.
+  private var audioSource: any AudioSource
+  /// Fallback when no external source is attached.
+  private let microphoneSource: any AudioSource
   private let injectionEngine = TextInjectionEngine()
   let historyStore = HistoryStore.shared
   private var asrClient: (any SpeechRecognizer)?
 
   init(audioSource: any AudioSource = AudioCaptureEngine()) {
     self.audioSource = audioSource
+    self.microphoneSource = audioSource
+  }
+
+  /// Swap the audio source, e.g. when a hardware device connects or unplugs.
+  ///
+  /// Only takes effect while idle: replacing the source mid-recording would leave
+  /// the outgoing one's buffered audio and journal half-finished, and the ASR
+  /// stream would see a discontinuity it cannot interpret. A swap requested during
+  /// a recording is dropped, and the next recording picks up the new source.
+  func useAudioSource(_ source: (any AudioSource)?) {
+    let replacement = source ?? microphoneSource
+    guard state == .idle else {
+      DebugFileLogger.log("audio source swap deferred state=\(state)")
+      return
+    }
+    guard replacement !== audioSource else { return }
+    audioSource = replacement
+    DebugFileLogger.log(
+      "audio source switched to=\(replacement === microphoneSource ? "microphone" : "device")")
+  }
+
+  /// Whether recordings currently come from an external device.
+  var isUsingExternalAudioSource: Bool {
+    audioSource !== microphoneSource
   }
 
   private let logger = Logger(
@@ -633,7 +659,10 @@ actor RecognitionSession {
       enablePunc: true,
       hotwords: hotwords,
       boostingTableID: biasSettings.boostingTableID,
-      bypassProxy: ProxyBypassMode.current.bypassASR
+      bypassProxy: ProxyBypassMode.current.bypassASR,
+      // A hardware source gates its own start tone before opening the stream, so
+      // trimming the first 400ms there would drop the user's first word.
+      skipsStartToneSamples: !isUsingExternalAudioSource
     )
 
     // Capture prompt context beside audio startup; resolve it only if the mode uses it.

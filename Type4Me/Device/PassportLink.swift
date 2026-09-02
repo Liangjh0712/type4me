@@ -91,6 +91,11 @@ actor PassportLink {
     /// Guards the `agent.status` obligation: whichever exit path runs first wins.
     private var didFinishSession = true
     private var hostAudioFrames = 0
+    /// Backstop for the `agent.status` obligation. The explicit call sites cover
+    /// the paths we know about; this covers the ones added later. Fires well inside
+    /// the device's own 30-second timeout so the user never sees the freeze.
+    private var finishTimeoutTask: Task<Void, Never>?
+    private static let finishTimeout = Duration.seconds(20)
 
     private init() {}
 
@@ -253,6 +258,7 @@ actor PassportLink {
             sessionActive = false
             publish { $0.isStreaming = false }
             DebugFileLogger.log("passport link voice.end hostFrames=\(hostAudioFrames)")
+            armFinishTimeout()
             eventContinuation?.yield(.recordingFinished)
 
         case .status(let drop):
@@ -294,15 +300,39 @@ actor PassportLink {
     /// every terminal path — success, ASR failure, cancellation, injection failure,
     /// and the silent-recording fast exit. Skipping any one of them leaves the
     /// device stuck in TRANSCRIBING for 30 seconds, which reads to the user as
-    /// "it froze after I finished speaking".
+    /// "it froze after I finished speaking". `armFinishTimeout` is the backstop for
+    /// a path nobody remembered to cover.
     func finishSession(state: PassportProtocol.AgentState = .done, reason: String? = nil) {
         guard !didFinishSession else { return }
         didFinishSession = true
         sessionActive = false
+        finishTimeoutTask?.cancel()
+        finishTimeoutTask = nil
         publish { $0.isStreaming = false }
 
         transport?.send(.control, text: PassportProtocol.agentStatus(state, message: reason ?? ""))
         DebugFileLogger.log("passport link session finished state=\(state.rawValue) reason=\(reason ?? "-")")
+    }
+
+    /// Start the watchdog that reports the session over if nothing else does.
+    ///
+    /// Relying on every call site to remember is how the reference client shipped a
+    /// frozen device: two failure paths returned without sending anything. Rather
+    /// than trust an exhaustive list of exits, assume one will be missed.
+    private func armFinishTimeout() {
+        finishTimeoutTask?.cancel()
+        finishTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.finishTimeout)
+            guard !Task.isCancelled, let self else { return }
+            await self.finishByTimeout()
+        }
+    }
+
+    private func finishByTimeout() {
+        guard !didFinishSession else { return }
+        logger.warning("no terminal status sent within \(Self.finishTimeout); reporting done")
+        DebugFileLogger.log("passport link finish timeout — host never reported session end")
+        finishSession(state: .done, reason: "timeout")
     }
 
     // MARK: - State publishing

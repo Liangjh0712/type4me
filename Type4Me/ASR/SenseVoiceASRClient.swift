@@ -58,7 +58,9 @@ actor SenseVoiceASRClient: SpeechRecognizer {
 
     /// Samples to skip at start to avoid start-sound interference.
     /// 200ms delay + 150ms tone + 50ms margin = 400ms x 16 samples/ms = 6400 samples.
-    private let skipInitialSamples = 6400
+    /// Set to zero when the source already gates its own tone (see
+    /// `ASRRequestOptions.skipsStartToneSamples`).
+    private var skipInitialSamples = 6400
     private var samplesSkipped: Int = 0
 
     /// Audio buffer for the current speech segment (used for partial recognition).
@@ -232,6 +234,7 @@ actor SenseVoiceASRClient: SpeechRecognizer {
         confirmedSegments = []
         currentPartialText = ""
         totalSamplesFed = 0
+        skipInitialSamples = options.skipsStartToneSamples ? 6400 : 0
         samplesSkipped = 0
         speechBuffer = []
         allAudioData = Data()

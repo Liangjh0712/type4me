@@ -28,6 +28,13 @@ final class PassportUSBTransport: PassportTransport, @unchecked Sendable {
         set { stateLock.withLock { _onFrame = newValue } }
     }
 
+    /// Unused: a wired port is usable as soon as `open()` returns, so the link layer
+    /// does not wait for a readiness callback here.
+    var onReady: (() -> Void)? {
+        get { stateLock.withLock { _onReady } }
+        set { stateLock.withLock { _onReady = newValue } }
+    }
+
     var onDisconnect: (() -> Void)? {
         get { stateLock.withLock { _onDisconnect } }
         set { stateLock.withLock { _onDisconnect = newValue } }
@@ -38,6 +45,7 @@ final class PassportUSBTransport: PassportTransport, @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var _onFrame: ((PassportFrame.Message) -> Void)?
+    private var _onReady: (() -> Void)?
     private var _onDisconnect: (() -> Void)?
     private var fileDescriptor: Int32 = -1
     private var isClosing = false

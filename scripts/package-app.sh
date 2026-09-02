@@ -32,6 +32,7 @@ ARCH="${ARCH:-universal}"      # arm64 or universal
 MICROPHONE_USAGE_DESCRIPTION="${MICROPHONE_USAGE_DESCRIPTION:-${APP_NAME} 需要访问麦克风以录制语音并将其转换为文本。}"
 SPEECH_RECOGNITION_USAGE_DESCRIPTION="${SPEECH_RECOGNITION_USAGE_DESCRIPTION:-${APP_NAME} 需要语音识别权限以将你的语音转写为文字。}"
 APPLE_EVENTS_USAGE_DESCRIPTION="${APPLE_EVENTS_USAGE_DESCRIPTION:-${APP_NAME} 需要辅助功能权限来注入转写文字到其他应用}"
+BLUETOOTH_USAGE_DESCRIPTION="${BLUETOOTH_USAGE_DESCRIPTION:-${APP_NAME} 需要蓝牙权限以连接 AI Passport 语音硬件并接收音频。}"
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 
 ENTITLEMENTS="$PROJECT_DIR/entitlements.plist"
@@ -149,6 +150,8 @@ cat >"$INFO_PLIST" <<EOF
     <string>${SPEECH_RECOGNITION_USAGE_DESCRIPTION}</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>${APPLE_EVENTS_USAGE_DESCRIPTION}</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>${BLUETOOTH_USAGE_DESCRIPTION}</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

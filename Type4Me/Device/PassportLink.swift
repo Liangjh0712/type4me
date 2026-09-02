@@ -30,6 +30,13 @@ actor PassportLink {
         var isStreaming = false
         /// Frames the device reported dropping in the last session.
         var lastDeviceDrop = 0
+        /// Which pipe is carrying the session.
+        var transport: Kind?
+
+        enum Kind: String, Sendable {
+            case usb
+            case bluetooth
+        }
     }
 
     static var snapshot: LinkSnapshot { stateBox.withLock { $0 } }
@@ -84,9 +91,12 @@ actor PassportLink {
     private var intentionalDisconnect = false
     /// Last open failure, so discovery retries do not repeat one message forever.
     private var lastOpenFailure: String?
+    /// A BLE transport is scanning, so discovery should not start a second one.
+    private var isBluetoothScanning = false
+    /// Whether this link has announced itself connected.
+    private var didReportConnected = false
 
     /// Per-session recording state.
-    private var sessionEncoding: PassportAudioEncoding = .pcm
     private var sessionActive = false
     /// Guards the `agent.status` obligation: whichever exit path runs first wins.
     private var didFinishSession = true
@@ -125,36 +135,69 @@ actor PassportLink {
         discoveryTask = nil
     }
 
-    /// One discovery tick: attach if nothing is attached and a device is there.
+    /// One discovery tick: attach if nothing is attached.
+    ///
+    /// Deliberately does not pre-check for a serial port — that would make the
+    /// wireless path unreachable, since a BLE device is only discoverable by
+    /// scanning. `connect()` picks the pipe.
     private func connectIfDevicePresent() async {
-        guard transport == nil, PassportSerialDiscovery.preferredPort() != nil else { return }
+        guard transport == nil else { return }
         await connect()
     }
 
     // MARK: - Connect / disconnect
 
-    /// Attach to a device if one is present. Safe to call when already connected.
+    /// Attach to a device, preferring the wired link when one is plugged in.
+    ///
+    /// USB wins because it is strictly better when available — uncompressed audio,
+    /// a console for diagnostics, and no radio contention — but BLE is the everyday
+    /// case, so it is tried whenever no cable is present.
     func connect() async {
         guard transport == nil else { return }
 
-        guard let port = PassportSerialDiscovery.preferredPort() else {
-            logger.debug("no device present")
-            return
+        if let port = PassportSerialDiscovery.preferredPort() {
+            // The wired transport is up as soon as `open()` returns.
+            await attach(PassportUSBTransport(port: port), describing: port.path, isReady: true)
+        } else if bluetoothEnabled, !isBluetoothScanning {
+            // BLE only starts scanning here; readiness arrives with the first frame.
+            isBluetoothScanning = true
+            await attach(
+                PassportBLETransport(), describing: PassportBLETransport.advertisedName, isReady: false)
         }
+    }
 
-        let usb = PassportUSBTransport(port: port)
+    /// Whether to look for the device over the air. Wired-only is useful while
+    /// debugging, and turning the radio off avoids a pairing prompt for anyone who
+    /// does not own the hardware.
+    private var bluetoothEnabled: Bool {
+        PassportLinkPreferences.isBluetoothEnabled
+    }
+
+    /// Open a transport and adopt it.
+    ///
+    /// `isReady` distinguishes the two pipes: a wired port is live the moment it
+    /// opens, whereas `open()` on BLE only starts scanning — the device may be out of
+    /// range or off. So a BLE transport is held without claiming to be connected, and
+    /// the first inbound frame promotes it (`markReadyIfNeeded`). Reporting connected
+    /// too early would show "connected" for a card sitting in a drawer.
+    private func attach(
+        _ candidate: any PassportTransport, describing name: String, isReady: Bool
+    ) async {
         linkGeneration += 1
         let generation = linkGeneration
 
-        usb.onFrame = { [weak self] frame in
+        candidate.onFrame = { [weak self] frame in
             Task { await self?.handle(frame, generation: generation) }
         }
-        usb.onDisconnect = { [weak self] in
+        candidate.onReady = { [weak self] in
+            Task { await self?.handleReady(generation: generation) }
+        }
+        candidate.onDisconnect = { [weak self] in
             Task { await self?.handleDisconnect(generation: generation) }
         }
 
         do {
-            try usb.open()
+            try candidate.open()
         } catch {
             // Discovery retries every few seconds, so only log a change of reason —
             // otherwise a device left plugged into a busy port fills the log.
@@ -164,26 +207,55 @@ actor PassportLink {
                 logger.warning("open failed: \(description, privacy: .public)")
                 DebugFileLogger.log("passport link open failed error=\(description)")
             }
+            isBluetoothScanning = false
             return
         }
         lastOpenFailure = nil
 
-        transport = usb
+        transport = candidate
         intentionalDisconnect = false
+        didReportConnected = false
+
+        if isReady {
+            reportConnected(name: name, candidate: candidate)
+        } else {
+            DebugFileLogger.log("passport link scanning transport=ble")
+        }
+    }
+
+    /// Announce the link as usable and prime the device.
+    private func reportConnected(name: String, candidate: any PassportTransport) {
+        guard !didReportConnected else { return }
+        didReportConnected = true
 
         publish { state in
             state.isConnected = true
-            state.deviceName = usb.displayName
+            state.deviceName = candidate.displayName
+            state.transport = candidate is PassportBLETransport ? .bluetooth : .usb
         }
 
         // The device has no clock of its own, so its logs and screen start at the
         // epoch until we tell it the time.
-        usb.send(.control, text: PassportProtocol.timeSet(epoch: Int(Date().timeIntervalSince1970)))
-        usb.send(.control, text: PassportProtocol.agentStatus(.ready))
+        candidate.send(.control, text: PassportProtocol.timeSet(epoch: Int(Date().timeIntervalSince1970)))
+        candidate.send(.control, text: PassportProtocol.agentStatus(.ready))
 
-        logger.info("connected \(usb.displayName, privacy: .public)")
-        DebugFileLogger.log("passport link connected device=\(usb.displayName)")
-        eventContinuation?.yield(.connected(deviceName: usb.displayName))
+        logger.info("connected \(name, privacy: .public)")
+        DebugFileLogger.log("passport link connected device=\(name)")
+        eventContinuation?.yield(.connected(deviceName: candidate.displayName))
+    }
+
+    /// A frame arrived, so whatever transport delivered it is genuinely live.
+    private func markReadyIfNeeded() {
+        guard !didReportConnected, let transport else { return }
+        reportConnected(name: transport.displayName, candidate: transport)
+    }
+
+    /// The transport reported itself usable — BLE finished scanning, connecting and
+    /// subscribing.
+    private func handleReady(generation: Int) {
+        guard generation == linkGeneration else { return }
+        isBluetoothScanning = false
+        markReadyIfNeeded()
     }
 
     /// Detach deliberately. Suppresses reconnection.
@@ -191,10 +263,13 @@ actor PassportLink {
         intentionalDisconnect = true
         transport?.close()
         transport = nil
+        isBluetoothScanning = false
+        didReportConnected = false
         publish { state in
             state.isConnected = false
             state.deviceName = nil
             state.isStreaming = false
+            state.transport = nil
         }
     }
 
@@ -219,10 +294,13 @@ actor PassportLink {
         }
 
         transport = nil
+        isBluetoothScanning = false
+        didReportConnected = false
         publish { state in
             state.isConnected = false
             state.deviceName = nil
             state.isStreaming = false
+            state.transport = nil
         }
         logger.info("disconnected intentional=\(self.intentionalDisconnect)")
         DebugFileLogger.log("passport link disconnected intentional=\(intentionalDisconnect)")
@@ -237,12 +315,18 @@ actor PassportLink {
 
     private func handle(_ frame: PassportFrame.Message, generation: Int) {
         guard generation == linkGeneration else { return }
+        // Any frame proves the transport is live, which is how a scanning BLE link
+        // learns it actually found the device.
+        markReadyIfNeeded()
 
         switch frame.kind {
         case .audio:
             guard sessionActive else { return }
             hostAudioFrames += 1
-            audioSink?(decodeAudio(frame.payload))
+            // Already 16 kHz mono Int16: the wired transport receives PCM outright,
+            // and the wireless one reassembles and decodes ADPCM before publishing.
+            // Decoding again here would treat PCM as ADPCM and destroy the audio.
+            audioSink?(frame.payload)
 
         case .event:
             guard let line = String(data: frame.payload, encoding: .utf8),
@@ -261,17 +345,6 @@ actor PassportLink {
         }
     }
 
-    private func decodeAudio(_ payload: Data) -> Data {
-        switch sessionEncoding {
-        case .pcm:
-            // Already one recognition chunk: 3200 bytes of 16 kHz mono Int16.
-            return payload
-        case .imaADPCM:
-            // BLE only; wired sessions never take this path.
-            return PassportADPCM.decodeBlock(payload) ?? Data()
-        }
-    }
-
     private func handle(_ event: PassportProtocol.Event) {
         switch event {
         case .hello(let proto):
@@ -279,10 +352,10 @@ actor PassportLink {
             DebugFileLogger.log("passport link hello proto=\(proto)")
 
         case .voiceStart(let encoding):
-            sessionEncoding = encoding
             sessionActive = true
             didFinishSession = false
             hostAudioFrames = 0
+            transport?.beginSession()
             publish { $0.isStreaming = true }
             DebugFileLogger.log("passport link voice.start encoding=\(encoding.rawValue)")
             eventContinuation?.yield(.recordingRequested)

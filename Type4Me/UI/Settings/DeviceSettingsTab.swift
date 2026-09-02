@@ -13,6 +13,7 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
     /// drive SwiftUI invalidation.
     @State private var snapshot = PassportLink.snapshot
     @State private var isReconnecting = false
+    @AppStorage(PassportLinkPreferences.bluetoothEnabledKey) private var bluetoothEnabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -52,7 +53,9 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
 
                 if let deviceName = snapshot.deviceName {
                     SettingsDivider()
-                    SettingsRow(label: L("端口", "Port"), value: deviceName)
+                    SettingsRow(label: L("连接方式", "Link"), value: transportText)
+                    SettingsDivider()
+                    SettingsRow(label: L("设备", "Device"), value: deviceName)
                 }
 
                 if snapshot.lastDeviceDrop > 0 {
@@ -63,6 +66,10 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
                         statusColor: TF.settingsAccentAmber
                     )
                 }
+
+                SettingsDivider()
+
+                bluetoothToggleRow
 
                 SettingsDivider()
 
@@ -77,6 +84,41 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
                     }
                 }
                 .padding(.top, 10)
+            }
+        }
+    }
+
+    /// Wireless can be turned off to keep the link wired-only — useful while
+    /// debugging, since the wired channel carries a console, and it avoids a pairing
+    /// prompt for anyone without the hardware.
+    private var bluetoothToggleRow: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L("通过蓝牙连接", "Connect over Bluetooth"))
+                    .font(.system(size: 13))
+                    .foregroundStyle(TF.settingsText)
+                Text(L("关闭后仅使用 USB", "When off, only USB is used"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(TF.settingsTextTertiary)
+            }
+            Spacer()
+            Toggle("", isOn: $bluetoothEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .padding(.vertical, 10)
+        .onChange(of: bluetoothEnabled) { _, enabled in
+            // Applying immediately is what makes the switch feel like a switch:
+            // turning it off drops an active wireless link, turning it on starts
+            // looking right away instead of at the next discovery tick.
+            Task {
+                if enabled {
+                    await PassportLink.shared.connect()
+                } else if snapshot.transport == .bluetooth {
+                    await PassportLink.shared.disconnect()
+                }
+                snapshot = PassportLink.snapshot
             }
         }
     }
@@ -100,6 +142,14 @@ struct DeviceSettingsTab: View, SettingsCardHelpers {
         .buttonStyle(.borderless)
         .foregroundStyle(TF.settingsAccentAmber)
         .fixedSize()
+    }
+
+    private var transportText: String {
+        switch snapshot.transport {
+        case .bluetooth: return L("蓝牙", "Bluetooth")
+        case .usb: return L("USB", "USB")
+        case nil: return "—"
+        }
     }
 
     private var statusText: String {

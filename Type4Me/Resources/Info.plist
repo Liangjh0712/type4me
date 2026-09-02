@@ -24,6 +24,8 @@
     <string>Type4Me Lab needs microphone access to capture your voice for transcription.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Type4Me Lab needs speech recognition access to transcribe your voice into text.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Type4Me Lab needs Bluetooth access to receive audio from an AI Passport voice device.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2024 Type4Me. All rights reserved.</string>
     <key>NSAppTransportSecurity</key>

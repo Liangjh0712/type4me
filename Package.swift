@@ -37,6 +37,7 @@ var targets: [Target] = [
         ] : []) + [
             .linkedFramework("MediaPlayer"),
             .linkedFramework("IOKit"),
+            .linkedFramework("CoreBluetooth"),
         ]
     ),
     .testTarget(

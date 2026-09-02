@@ -19,6 +19,15 @@ protocol PassportTransport: AnyObject, Sendable {
     /// Called for every decoded inbound frame, on the transport's own queue.
     var onFrame: ((PassportFrame.Message) -> Void)? { get set }
 
+    /// Called once the link is genuinely usable.
+    ///
+    /// A wired port is usable the moment it opens, but BLE has to scan, connect and
+    /// subscribe first — and the device sends nothing until asked, so waiting for a
+    /// frame would leave the link looking dead. Transports that are ready
+    /// immediately may skip this; the link layer treats `open()` returning as ready
+    /// for those.
+    var onReady: (() -> Void)? { get set }
+
     /// Called once when the link drops, for any reason including `close()`.
     var onDisconnect: (() -> Void)? { get set }
 
@@ -31,9 +40,16 @@ protocol PassportTransport: AnyObject, Sendable {
     /// Send one host→device frame. Failures are logged, not thrown: the protocol
     /// never retries a downlink, and a dropped one must not abort the session.
     func send(_ kind: PassportFrame.Kind, _ payload: Data)
+
+    /// A new recording is starting. Transports carrying per-session decoder state
+    /// reset it here; the device resets its encoder at the same moment.
+    func beginSession()
 }
 
 extension PassportTransport {
+    /// Most transports carry no per-session state.
+    func beginSession() {}
+
     func send(_ kind: PassportFrame.Kind, text: String) {
         send(kind, Data(text.utf8))
     }

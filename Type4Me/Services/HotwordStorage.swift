@@ -156,11 +156,16 @@ enum HotwordStorage {
         return loadBuiltin().count
     }
 
-    /// Reveal built-in hotwords file in Finder (creates empty file if missing).
+    /// Seeds `builtin-hotwords.json` from `defaultHotwords` when the file is absent.
+    /// Idempotent: an existing file (even an empty one) is left alone so Finder edits survive.
+    static func seedBuiltinIfNeeded() {
+        guard !FileManager.default.fileExists(atPath: builtinFileURL.path) else { return }
+        saveBuiltin(defaultHotwords)
+    }
+
+    /// Reveal built-in hotwords file in Finder (seeds defaults if missing).
     static func revealBuiltinInFinder() {
-        if !FileManager.default.fileExists(atPath: builtinFileURL.path) {
-            saveBuiltin([])
-        }
+        seedBuiltinIfNeeded()
         #if canImport(AppKit)
         NSWorkspace.shared.activateFileViewerSelecting([builtinFileURL])
         #endif
@@ -168,9 +173,16 @@ enum HotwordStorage {
 
     // MARK: - Effective (merge both stores)
 
-    /// Returns the user's hotwords (managed via Settings UI).
+    /// Returns merged built-in + user hotwords, deduplicated case-insensitively.
+    /// User entries win, so a differently-cased user spelling replaces the built-in one.
     static func loadEffective() -> [String] {
-        return load()
+        let user = load()
+        var seen = Set(user.map { $0.lowercased() })
+        var merged = user
+        for word in loadBuiltin() where seen.insert(word.lowercased()).inserted {
+            merged.append(word)
+        }
+        return merged
     }
 
     // MARK: - Cloud-compatible words

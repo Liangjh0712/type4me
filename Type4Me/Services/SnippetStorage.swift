@@ -59,8 +59,9 @@ enum SnippetStorage {
         ("wife coding",     "vibe coding"),
 
         // ── Claude ──
+        // NOTE: "clod" is a real word and "cloud" is far too common to remap;
+        // both are left to hotword boosting instead.
         ("Cloud Code",      "Claude Code"),
-        ("clod",            "Claude"),
         ("clawed",          "Claude"),
         ("claud",           "Claude"),
 
@@ -116,12 +117,9 @@ enum SnippetStorage {
         ("hug and face",    "Hugging Face"),
 
         // ── Codex ──
-        ("codecs",          "Codex"),
+        // NOTE: "codec"/"codecs" are real words in A/V contexts — mapping them to
+        // Codex rewrites legitimate speech, so only the casing fix ships here.
         ("CodeX",           "Codex"),
-        ("Codec",           "Codex"),
-
-        // ── JSON ──
-        ("Jason",           "JSON"),
 
         // ── fine-tuning ──
         ("finight tuning",  "fine-tuning"),
@@ -168,8 +166,6 @@ enum SnippetStorage {
 
         // ── AI coding tools ──
         ("wind surf",       "Windsurf"),
-        ("Klein",           "Cline"),
-        ("C line",          "Cline"),
         ("aid her",         "Aider"),
         ("open router",     "OpenRouter"),
         ("light LLM",       "LiteLLM"),
@@ -177,7 +173,6 @@ enum SnippetStorage {
         ("VLLM",            "vLLM"),
         ("llama CPP",       "llama.cpp"),
         ("curser",          "Cursor"),
-        ("克色",            "Cursor"),
 
         // ── Dev tools ──
         ("get hub",         "GitHub"),
@@ -195,7 +190,6 @@ enum SnippetStorage {
         // ── Infra & formats ──
         ("DM g",            "DMG"),
         ("verse cell",      "Vercel"),
-        ("verse L",         "Vercel"),
         ("super base",      "Supabase"),
         ("cloud flare",     "Cloudflare"),
         ("cloud flair",     "Cloudflare"),
@@ -268,11 +262,16 @@ enum SnippetStorage {
         return loadBuiltin().count
     }
 
+    /// Seeds `builtin-snippets.json` from `defaultSnippets` when the file is absent.
+    /// Idempotent: an existing file (even an empty one) is left alone so Finder edits survive.
+    static func seedBuiltinIfNeeded() {
+        guard !FileManager.default.fileExists(atPath: builtinFileURL.path) else { return }
+        saveBuiltin(defaultSnippets)
+    }
+
     /// Reveal built-in snippets file in Finder.
     static func revealBuiltinInFinder() {
-        if !FileManager.default.fileExists(atPath: builtinFileURL.path) {
-            saveBuiltin(defaultSnippets)
-        }
+        seedBuiltinIfNeeded()
         #if canImport(AppKit)
         NSWorkspace.shared.activateFileViewerSelecting([builtinFileURL])
         #endif
@@ -374,26 +373,29 @@ enum SnippetStorage {
 
     private static func compiledRules() -> [CompiledRule] {
         if let cached = cacheLock.withLock({ $0 }) { return cached }
-        let allSnippets = load()
 
-        let rules = allSnippets.compactMap { snippet -> CompiledRule? in
-            let pattern = buildFlexPattern(snippet.trigger)
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
-            return CompiledRule(regex: regex, pattern: pattern, template: NSRegularExpression.escapedTemplate(for: snippet.value))
-        }
+        // User entries override built-in ones on trigger conflict: compile the user
+        // store first, then keep only the built-in rules it doesn't already cover.
+        let userRules = compile(load())
+        let userPatterns = Set(userRules.map(\.pattern))
+        let builtinRules = compile(loadBuiltin()).filter { !userPatterns.contains($0.pattern) }
+
+        let rules = builtinRules + userRules
         cacheLock.withLock { $0 = rules }
         return rules
     }
 
-    private static func compiledAppRules(bundleId: String) -> [CompiledRule] {
-        if let cached = appCacheLock.withLock({ $0[bundleId] }) { return cached }
-        let snippets = loadAppSnippets(bundleId: bundleId)
-
-        let rules = snippets.compactMap { snippet -> CompiledRule? in
+    private static func compile(_ snippets: [(trigger: String, value: String)]) -> [CompiledRule] {
+        return snippets.compactMap { snippet -> CompiledRule? in
             let pattern = buildFlexPattern(snippet.trigger)
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
             return CompiledRule(regex: regex, pattern: pattern, template: NSRegularExpression.escapedTemplate(for: snippet.value))
         }
+    }
+
+    private static func compiledAppRules(bundleId: String) -> [CompiledRule] {
+        if let cached = appCacheLock.withLock({ $0[bundleId] }) { return cached }
+        let rules = compile(loadAppSnippets(bundleId: bundleId))
         appCacheLock.withLock { $0[bundleId] = rules }
         return rules
     }

@@ -81,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     SnippetStorage.migrateIfNeeded()
     AudioInputDevicePreferenceStore.migrateIfNeeded()
 
+    // Seed the built-in vocabulary files before anything reads them (cloud table sync below,
+    // hotwords.txt for the Qwen3 server, and the compiled snippet rules).
+    HotwordStorage.seedBuiltinIfNeeded()
+    SnippetStorage.seedBuiltinIfNeeded()
+
     // Sync hotwords to Volcengine cloud table (async, non-blocking)
     VolcHotwordSyncManager.syncIfNeeded()
 

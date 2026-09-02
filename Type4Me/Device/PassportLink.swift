@@ -52,8 +52,9 @@ actor PassportLink {
     enum Event: Sendable {
         case connected(deviceName: String)
         case disconnected
-        /// The record key went down; start a recording.
-        case recordingRequested
+        /// The record key went down; start a recording. `isNote` means the device's
+        /// OK key was used, so the text should be kept rather than typed.
+        case recordingRequested(isNote: Bool)
         /// The record key came up; stop and process.
         case recordingFinished
         /// Submit the current input field.
@@ -351,14 +352,15 @@ actor PassportLink {
             logger.info("device hello proto=\(proto)")
             DebugFileLogger.log("passport link hello proto=\(proto)")
 
-        case .voiceStart(let encoding):
+        case .voiceStart(let encoding, let isNote):
             sessionActive = true
             didFinishSession = false
             hostAudioFrames = 0
             transport?.beginSession()
             publish { $0.isStreaming = true }
-            DebugFileLogger.log("passport link voice.start encoding=\(encoding.rawValue)")
-            eventContinuation?.yield(.recordingRequested)
+            DebugFileLogger.log(
+                "passport link voice.start encoding=\(encoding.rawValue) note=\(isNote)")
+            eventContinuation?.yield(.recordingRequested(isNote: isNote))
 
         case .voiceEnd:
             sessionActive = false

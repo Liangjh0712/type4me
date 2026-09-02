@@ -210,6 +210,10 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
   enum ExecutionKind: String, Codable, Sendable {
     case recording
     case selectionAsk
+    /// Records and transcribes exactly like `.recording`, but keeps the text
+    /// instead of typing it: nothing is injected and the clipboard is left alone.
+    /// For jotting something down without disturbing whatever you were doing.
+    case quickNote
   }
 
   /// Global default hotkey style, stored in UserDefaults.
@@ -296,6 +300,7 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
   static let translateId = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
   static let macActionId = UUID(uuidString: "00000000-0000-0000-0000-000000000008")!
   static let selectionAskId = UUID(uuidString: "00000000-0000-0000-0000-000000000009")!
+  static let quickNoteId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
   static var direct: ProcessingMode {
     ProcessingMode(
       id: directId,
@@ -853,6 +858,27 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
     )
   }
 
+  /// Speak, and the text is kept rather than typed.
+  ///
+  /// No prompt, so no LLM: a note is worth having the moment you finish speaking,
+  /// and the raw transcript can be polished afterwards from the history list. The
+  /// point is that nothing is disturbed — no injection, no clipboard — so it works
+  /// while you are in the middle of something else.
+  ///
+  /// No default hotkey: the hardware device's OK key drives this, and picking a
+  /// keyboard shortcut for it risks colliding with whatever the user already uses.
+  static var quickNote: ProcessingMode {
+    ProcessingMode(
+      id: quickNoteId,
+      name: L("速记", "Quick Note"),
+      prompt: "",
+      isBuiltin: true,
+      processingLabel: L("记录中", "Saving"),
+      hotkeyBindings: [],
+      executionKind: .quickNote
+    )
+  }
+
   static let agentModePromptTemplate = #"""
     # Role
     你是一个"直接交付"型 AI 助手。用户通过语音口述一个需求，你的任务是**直接给出最终成品**，让用户能立即粘贴到目标场景使用。
@@ -1005,11 +1031,11 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
     )
   }
 
-  static var builtins: [ProcessingMode] { [.direct, .formalWriting, .macAction, .selectionAsk] }
+  static var builtins: [ProcessingMode] { [.direct, .formalWriting, .macAction, .selectionAsk, .quickNote] }
   static var defaults: [ProcessingMode] {
     [
       .direct, .formalWriting, .promptOptimize, .translate, .translateToChinese, .agentMode,
-      .commandMode, .macAction, .selectionAsk,
+      .commandMode, .macAction, .selectionAsk, .quickNote,
     ]
   }
 }
@@ -1047,7 +1073,10 @@ final class AppState {
     ASRProviderRegistry.supportedModes(
       from: availableModes,
       for: CredentialStore.selectedASRProvider
-    ).filter { $0.executionKind == .recording }
+    )
+    // Ask Anything answers into its own panel and has nothing to pick here.
+    // Quick Note is a normal recording that keeps its text, so it belongs.
+    .filter { $0.executionKind != .selectionAsk }
   }
   var feedbackMessage: String = L("已完成", "Done")
   var feedbackKind: FeedbackKind = .standard

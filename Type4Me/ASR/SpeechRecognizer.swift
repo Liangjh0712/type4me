@@ -106,6 +106,9 @@ struct RecognitionTranscript: Sendable, Equatable {
 enum InjectionOutcome: Sendable, Equatable {
     case inserted
     case copiedToClipboard
+    /// Quick Note: kept in history, deliberately not typed and not put on the
+    /// clipboard — the point is to leave whatever you were doing untouched.
+    case savedAsNote
 
     var completionMessage: String {
         switch self {
@@ -113,6 +116,8 @@ enum InjectionOutcome: Sendable, Equatable {
             return L("已完成", "Done")
         case .copiedToClipboard:
             return L("已粘贴到剪贴板", "Copied to clipboard")
+        case .savedAsNote:
+            return L("已存为速记", "Saved as note")
         }
     }
 }

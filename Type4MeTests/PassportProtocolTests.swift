@@ -19,13 +19,28 @@ final class PassportProtocolTests: XCTestCase {
   func testParsesVoiceStartWithPCM() {
     let event = PassportProtocol.parseEvent(#"{"event":"voice.start","audio":"pcm"}"#)
 
-    XCTAssertEqual(event, .voiceStart(encoding: .pcm))
+    XCTAssertEqual(event, .voiceStart(encoding: .pcm, isNote: false))
   }
 
   func testParsesVoiceStartWithADPCM() {
     let event = PassportProtocol.parseEvent(#"{"event":"voice.start","audio":"ima_adpcm"}"#)
 
-    XCTAssertEqual(event, .voiceStart(encoding: .imaADPCM))
+    XCTAssertEqual(event, .voiceStart(encoding: .imaADPCM, isNote: false))
+  }
+
+  /// The OK key records the same way but the text is kept rather than typed.
+  func testParsesQuickNoteSession() {
+    let event = PassportProtocol.parseEvent(#"{"event":"voice.start","audio":"pcm","note":true}"#)
+
+    XCTAssertEqual(event, .voiceStart(encoding: .pcm, isNote: true))
+  }
+
+  /// Older firmware omits the field entirely, so its absence must read as a normal
+  /// recording rather than failing to parse.
+  func testMissingNoteFieldMeansNormalRecording() {
+    let event = PassportProtocol.parseEvent(#"{"event":"voice.start","audio":"pcm"}"#)
+
+    XCTAssertEqual(event, .voiceStart(encoding: .pcm, isNote: false))
   }
 
   /// The same firmware sends PCM over USB and ADPCM over BLE, so the announced

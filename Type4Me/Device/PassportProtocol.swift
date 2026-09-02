@@ -20,8 +20,10 @@ enum PassportProtocol {
     enum Event: Sendable, Equatable {
         /// Wired link handshake completed. Never sent over BLE.
         case hello(proto: Int)
-        /// Record key pressed. Carries which encoding this session will use.
-        case voiceStart(encoding: PassportAudioEncoding)
+        /// Record key pressed. Carries which encoding this session will use, and
+        /// whether it is a quick note — the OK key records the same way but the
+        /// text is kept rather than typed.
+        case voiceStart(encoding: PassportAudioEncoding, isNote: Bool)
         /// Record key released; the device has drained its audio ring.
         case voiceEnd
         /// Sent right after `voiceEnd`: how many frames the device itself dropped.
@@ -58,7 +60,10 @@ enum PassportProtocol {
             // the same firmware serves PCM over USB and ADPCM over BLE.
             let wireName = object["audio"] as? String ?? PassportAudioEncoding.pcm.rawValue
             guard let encoding = PassportAudioEncoding(wireName: wireName) else { return nil }
-            return .voiceStart(encoding: encoding)
+            // Absent on a normal recording, so a device running older firmware
+            // simply never reports notes rather than failing to parse.
+            let isNote = object["note"] as? Bool ?? false
+            return .voiceStart(encoding: encoding, isNote: isNote)
 
         case "voice.end":
             return .voiceEnd

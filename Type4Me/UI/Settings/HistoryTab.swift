@@ -811,6 +811,13 @@ struct HistoryTab: View {
                 if let mode = record.processingMode {
                     Label(mode, systemImage: "text.bubble")
                 }
+                if record.status == "quick_note" {
+                    // Distinct from the mode-name label: a note was never typed
+                    // anywhere, so it is the only entry whose text still lives
+                    // only here.
+                    Label(L("速记", "Note"), systemImage: "square.and.pencil")
+                        .foregroundStyle(TF.settingsAccentAmber)
+                }
                 if let provider = record.asrProvider {
                     Label(provider, systemImage: "mic")
                 }

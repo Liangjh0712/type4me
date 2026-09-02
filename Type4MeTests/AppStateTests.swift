@@ -619,13 +619,16 @@ final class AppStateTests: XCTestCase {
     XCTAssertEqual(appState.barPhase, .processing)
   }
 
-  func testPanelModeListContainsOnlyRecordingModes() {
+  /// The panel picker offers anything that records into the bar. Ask Anything is the
+  /// exception — it answers into its own panel, so picking it there means nothing.
+  /// Quick Note does belong: it is a normal recording that keeps its text.
+  func testPanelModeListExcludesAskAnything() {
     let appState = AppState()
 
     XCTAssertFalse(appState.selectablePanelModes.isEmpty)
-    XCTAssertTrue(appState.selectablePanelModes.allSatisfy { $0.executionKind == .recording })
     XCTAssertFalse(
       appState.selectablePanelModes.contains { $0.id == ProcessingMode.selectionAskId })
+    XCTAssertTrue(appState.selectablePanelModes.contains { $0.id == ProcessingMode.quickNoteId })
   }
 
   private func makeTranscript(_ text: String, revision: Int = 1) -> RecognitionTranscript {

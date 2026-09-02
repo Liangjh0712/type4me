@@ -402,6 +402,16 @@ struct ModesSettingsTab: View {
         macActionDescription
       } else if mode.id == ProcessingMode.selectionAskId {
         selectionAskDescription
+      } else if mode.id == ProcessingMode.quickNoteId {
+        Text(
+          L(
+            "说完就存进历史，不粘贴、不碰剪贴板，当前在做的事不受打扰。不走 LLM——速记的价值在快，需要润色可以事后在历史里做。硬件设备的 OK 键默认走这个模式。",
+            "Saves straight to history: nothing is typed, the clipboard is untouched, and whatever you were doing stays as it was. No LLM — a note is worth having the moment you stop talking, and you can polish it later from the history list. The hardware device's OK key uses this mode."
+          )
+        )
+        .font(.system(size: 12))
+        .foregroundStyle(TF.settingsTextSecondary)
+        .lineSpacing(3)
       } else {
         Text(
           L(
@@ -423,6 +433,7 @@ struct ModesSettingsTab: View {
     case ProcessingMode.formalWritingId: return "wand.and.stars"
     case ProcessingMode.macActionId: return "command.circle.fill"
     case ProcessingMode.selectionAskId: return "sparkle.magnifyingglass"
+    case ProcessingMode.quickNoteId: return "square.and.pencil"
     default: return "bolt.fill"
     }
   }

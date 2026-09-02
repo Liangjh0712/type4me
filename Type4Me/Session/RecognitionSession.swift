@@ -1845,13 +1845,20 @@ actor RecognitionSession {
       // immediately after paste, without waiting for actor re-scheduling.
       let engine = injectionEngine
       let aborted = injectionAborted
+      // Quick Note keeps the text in history and touches nothing else — no typing,
+      // no clipboard. Anything that disturbed the foreground app would defeat the
+      // point of jotting something down mid-task.
+      let isQuickNote = currentMode.executionKind == .quickNote
       let onEvent = self.onASREvent
       let injectLog =
         "stop: injecting method=clipboard len=\(finalText.count) +\(ContinuousClock.now - stopT0)"
       _ = await withCheckedContinuation { continuation in
         Task.detached {
           let outcome: InjectionOutcome
-          if aborted {
+          if isQuickNote {
+            DebugFileLogger.log("stop: quick note, saved to history only len=\(finalText.count)")
+            outcome = .savedAsNote
+          } else if aborted {
             engine.copyToClipboard(finalText)
             DebugFileLogger.log("stop: injection aborted by ESC, text saved to clipboard & history")
             outcome = .copiedToClipboard
@@ -1881,7 +1888,11 @@ actor RecognitionSession {
       // Save text and its finalized audio under the recording's stable ID.
       let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
       let status: String
-      if injectionAborted {
+      if isQuickNote {
+        // Takes precedence: a note is a note even if the LLM or the stream had
+        // trouble along the way, and the history list filters on this.
+        status = "quick_note"
+      } else if injectionAborted {
         status = "aborted"
       } else if llmFailed {
         status = "llm_error"

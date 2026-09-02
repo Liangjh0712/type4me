@@ -68,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// reference to it, and the recognition session swaps to it while a device is
   /// attached.
   private var passportAudioSource: PassportAudioSource?
+  /// Which mode the device's current recording started under, so the release goes
+  /// to the same binding even if the selected mode changed meanwhile.
+  private var deviceRecordingModeId: UUID?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSLog("[Type4Me] applicationDidFinishLaunching")
@@ -479,7 +482,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let modes = ASRProviderRegistry.supportedModes(from: availableModes, for: provider)
     let bindings: [ModeBinding] = modes.flatMap { mode in
       let capturedMode = mode
-      return mode.hotkeyBindings.map { hotkey in
+      // A mode with no keyboard shortcut still needs a binding so external
+      // triggers — the hardware device's keys — can reach it. Quick Note ships
+      // without a shortcut on purpose: picking one risks colliding with whatever
+      // the user already uses, and the device's OK key is its intended entry.
+      // `externalOnlyKeyCode` never matches a real event, so the tap ignores it.
+      let hotkeys =
+        mode.hotkeyBindings.isEmpty
+        ? [
+          HotkeyBinding(
+            id: mode.id,
+            keyCode: Int(ModeBinding.externalOnlyKeyCode),
+            modifiers: 0,
+            style: .hold
+          )
+        ]
+        : mode.hotkeyBindings
+      return hotkeys.map { hotkey in
         ModeBinding(
           bindingId: hotkey.id,
           modeId: mode.id,
@@ -969,9 +988,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           NSLog("[Passport] disconnected")
           await self.session.setExternalAudioSource(nil)
 
-        case .recordingRequested:
+        case .recordingRequested(let isNote):
           await MainActor.run {
-            let modeId = self.appState.currentMode.id
+            // The OK key means Quick Note regardless of which mode is selected —
+            // it is a distinct gesture, not a variation on the current one.
+            let modeId = isNote ? ProcessingMode.quickNoteId : self.appState.currentMode.id
+            self.deviceRecordingModeId = modeId
             guard self.hotkeyManager.triggerBinding(modeId: modeId, pressed: true) else {
               // No binding for this mode means the hotkey path cannot run, so
               // there is nothing sane to start; tell the device so it does not
@@ -983,8 +1005,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         case .recordingFinished:
           await MainActor.run {
-            _ = self.hotkeyManager.triggerBinding(
-              modeId: self.appState.currentMode.id, pressed: false)
+            // Release the same binding that started it: the user may have changed
+            // the selected mode mid-recording, and a note must not be released
+            // against the regular mode's binding.
+            let modeId = self.deviceRecordingModeId ?? self.appState.currentMode.id
+            self.deviceRecordingModeId = nil
+            _ = self.hotkeyManager.triggerBinding(modeId: modeId, pressed: false)
           }
 
         case .submitRequested:

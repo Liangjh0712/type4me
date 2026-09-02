@@ -28,6 +28,13 @@ struct ModeBinding {
     // Keyboard keyCodes are 0–127, so no collision.
     // The encoded value fits in both Int and UInt16 (CGKeyCode).
 
+    /// Key code for a binding that only external triggers can reach.
+    ///
+    /// Keyboard codes are 0-127, mouse buttons 0x8002+, media keys 0x9000+, so this
+    /// value can never arrive from the event tap. It exists so a mode without a
+    /// keyboard shortcut still has a `ModeBinding` for `triggerBinding` to drive.
+    static let externalOnlyKeyCode: CGKeyCode = 0xFFFF
+
     private static let mouseKeyCodeBase = 0x8000
     private static let mediaKeyCodeBase = 0x9000
     static let modifierKeyCodes: Set<Int> = [54, 55, 56, 58, 59, 60, 61, 62, 63]

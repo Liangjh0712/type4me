@@ -10,8 +10,46 @@ index e7295c1..fb4ff7b 100644
           "nvs_settings.c"
           "adpcm.c"
           "audio_streamer.c"
+diff --git a/main/app_protocol.c b/main/app_protocol.c
+index 694d949..b7f3ff9 100644
+--- a/main/app_protocol.c
++++ b/main/app_protocol.c
+@@ -172,7 +172,8 @@ size_t app_protocol_device_hello(char *buf, size_t cap, int proto) {
+     return n;
+ }
+ 
+-size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format) {
++size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format,
++                                bool note) {
+     cJSON *o = cJSON_CreateObject();
+     cJSON_AddStringToObject(o, "event", "voice.start");
+     // 音频格式(App 据此分发):ima_adpcm = 每帧一个独立 IMA ADPCM block
+@@ -182,6 +183,9 @@ size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format)
+     // 未知格式 App 侧按 pcm 兜底,换编解码器(如退 ulaw)不需要改协议。
+     if (!audio_format) audio_format = "pcm";
+     cJSON_AddStringToObject(o, "audio", audio_format);
++    // note = 速记会话(设备 OK 键起录):Mac 端走"只存历史、不注入"的模式。
++    // 只在为真时带上,老版本 App 收到不认识的字段会忽略,协议保持向后兼容。
++    if (note) cJSON_AddBoolToObject(o, "note", 1);
+     size_t n = serialize(o, buf, cap);
+     cJSON_Delete(o);
+     return n;
+diff --git a/main/app_protocol.h b/main/app_protocol.h
+index 490f897..5dd3b0b 100644
+--- a/main/app_protocol.h
++++ b/main/app_protocol.h
+@@ -24,7 +24,8 @@ void app_protocol_dispatch_event(const app_event_t *ev);
+ 
+ // 设备→Mac 序列化。返回写入字节数(不含 NUL);失败返回 0。
+ size_t app_protocol_device_hello(char *buf, size_t cap, int proto);
+-size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format);
++size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format,
++                                bool note);
+ size_t app_protocol_voice_end(char *buf, size_t cap);
+ // 上行按键动作(enter/clear,PC client 执行注入;见 key-remap 任务)
+ size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action);
 diff --git a/main/app_state.c b/main/app_state.c
-index 2a00cf8..4a57f6f 100644
+index 2a00cf8..0dbb3a9 100644
 --- a/main/app_state.c
 +++ b/main/app_state.c
 @@ -101,7 +101,10 @@ static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
@@ -26,6 +64,68 @@ index 2a00cf8..4a57f6f 100644
      s->screen_on = true;
      s->panel_on = true;
      // 开机即按"未连接"渲染(无 Mac 时不会收到断开事件,初始 true 会一直误判为
+@@ -169,8 +172,8 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
+     emit(out, n, max, a);
+ }
+ 
+-// PTT 开始(音量加按下即触发):离线 toast+error 音;在线滴声+开流。
+-static void start_ptt(app_state_t *s, uint64_t now_ms,
++// PTT 开始(UP 按下即触发;OK 按下则是速记会话):离线 toast+error 音;在线滴声+开流。
++static void start_ptt(app_state_t *s, uint64_t now_ms, bool note,
+                       app_action_t *out, uint8_t *n, uint8_t max) {
+     if (!s->link_up) {
+         set_toast(s, now_ms, "OFFLINE - PTT blocked");
+@@ -187,6 +190,8 @@ static void start_ptt(app_state_t *s, uint64_t now_ms,
+         app_action_t t = { .type = APP_ACT_PLAY_TONE };
+         t.u.tone = APP_TONE_START;
+         emit(out, n, max, t);
++        // 先落标记:main.c 序列化 voice.start 时读 s_state.note_session。
++        s->note_session = note;
+         app_action_t v = { .type = APP_ACT_SEND_VOICE_START };
+         emit(out, n, max, v);
+         s->stream_started = false;
+@@ -342,6 +347,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+     case APP_ST_READY:
+         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+             send_key_action(s, APP_KEY_ENTER, out, n, max);
++        } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
++            // 速记:和 UP 同样是按住说话,区别只在 voice.start 带 note 标记 ——
++            // Mac 端据此只存历史、不注入。OK 长按锁屏仍然可用:锁屏在
++            // handle_event 开头就被截住(APP_EV_KEY_LONG),走不到这里。
++            start_ptt(s, now_ms, true, out, n, max);
+         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
+             // 音量加"按下即录"(2026-08-29,取代原先等 0.5s 长按判定):真机实测
+             // 按下到真正 `采集开始` 要 ~1.01s —— 428ms 花在长按阈值上,另外 578ms
+@@ -367,7 +377,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+             if (ev->u.key.mv > PTT_UP_PRESS_MAX_MV) {
+                 break;
+             }
+-            start_ptt(s, now_ms, out, n, max);
++            start_ptt(s, now_ms, false, out, n, max);
+         }
+         break;
+ 
+@@ -378,7 +388,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+         // 录音期间清空不可达:三档分压键同时按下 UP+DOWN 只会读出更低的那一档,
+         // DOWN 长按压根形成不了。
+         if ((ev->type == APP_EV_KEY_LONG_UP || ev->type == APP_EV_KEY_RELEASE) &&
+-            b == APP_BTN_UP) {
++            (b == APP_BTN_UP || (s->note_session && b == APP_BTN_OK))) {
+             // 误触收口:不足 PTT_MIN_TALK_MS 就松手 = 误碰或轻点,里面不可能有
+             // 语音。丢掉音频、把会话收束回 READY,不进转写。
+             if (now_ms - s->state_since_ms < PTT_MIN_TALK_MS) {
+diff --git a/main/app_state.h b/main/app_state.h
+index 5ae5e29..af5cf4e 100644
+--- a/main/app_state.h
++++ b/main/app_state.h
+@@ -33,6 +33,7 @@ typedef struct {
+     uint64_t       ble_connect_ms;  // BLE 连接时刻(连接握手期密集射频 → 假长按,抑制 PTT)
+     uint64_t       toast_until_ms;
+     bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)
++    bool           note_session;    // 本会话是速记(OK 键起录):Mac 端只存不注入
+     char           toast[APP_TOAST_MAX];
+     char           agent_message[APP_AGENT_MSG_MAX];
+     bool           transcript_final;   // false → agent_message 是转写预览(未定稿);true = 定稿/非转写
 diff --git a/main/app_ui.c b/main/app_ui.c
 index c29bd06..96776ed 100644
 --- a/main/app_ui.c
@@ -357,6 +457,20 @@ index 455a996..944ef81 100644
      reg("reboot", "重启设备", NULL, cmd_reboot);
      reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
      return ESP_OK;
+diff --git a/main/main.c b/main/main.c
+index 9afea03..24b5ac4 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -215,7 +215,8 @@ static void run_actions(const app_action_t *acts, uint8_t n)
+         case APP_ACT_SEND_VOICE_START:
+             // 会话通道决定音频格式(voice.start 上报,App 据此分发解码)
+             len = app_protocol_voice_start(buf, sizeof(buf),
+-                                           mode_audio_format(s_state.link_channel));
++                                           mode_audio_format(s_state.link_channel),
++                                           s_state.note_session);
+             send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
+             break;
+         case APP_ACT_SEND_VOICE_END:
 diff --git a/main/nvs_settings.c b/main/nvs_settings.c
 index 6f86eb4..6fa395d 100644
 --- a/main/nvs_settings.c

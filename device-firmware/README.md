@@ -48,10 +48,11 @@ ESP-IDF:     v5.5.3
 ## 换设备后如何重现
 
 ```bash
-# 1. 工具链（一次性，约 1.5GB）
+# 1. 工具链（一次性）
 git clone -b v5.5.3 --depth 1 --recursive \
   https://github.com/espressif/esp-idf.git ~/esp/esp-idf
 cd ~/esp/esp-idf && ./install.sh esp32c3
+brew install cmake ninja        # macOS 上 IDF 不自带这两个
 
 # 2. 固件源码 + 我们的改动
 git clone https://github.com/zhaohuaxiaoy/folo-ai-passport-voice /tmp/folo-fw
@@ -74,6 +75,11 @@ idf.py -p /dev/cu.usbmodem* flash
 
 `idf.py flash` 只写 bootloader / 分区表 / app，不碰 NVS，所以设备的
 BLE 配对信息和名字会保留。
+
+**不要删 `managed_components/`。** 它看着像构建产物，其实上游把打过补丁的
+`espressif__button` 副本提交进了仓库——里面的 `button_adc_set_ignore_until()`
+是上电假按键抑制的实现，删掉后重新拉取会得到未打补丁的 4.2.1，链接期报
+`undefined reference`。`dependencies.lock` 同理。
 
 ## 刷机前必读
 

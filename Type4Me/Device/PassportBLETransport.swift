@@ -24,10 +24,12 @@ final class PassportBLETransport: NSObject, PassportTransport, @unchecked Sendab
     /// nothing and we filter on the name instead.
     static let advertisedName = "AI Passport"
 
-    /// Declared as 16-bit UUIDs nested in a 128-bit service, which is how they
-    /// surface on macOS. Building the full 128-bit form byte-order-reversed is an
-    /// easy way to match nothing at all.
-    static let serviceUUID = CBUUID(string: "A2B0")
+    /// The firmware declares a 128-bit service containing 16-bit characteristics,
+    /// built with NimBLE's little-endian initializer — so the service arrives on
+    /// macOS byte-reversed, as `FB349B5F-8000-8000-1000-00000000A2B0`, while the
+    /// characteristics surface in short form. Verified by enumerating the real
+    /// device: matching the service on `A2B0` finds nothing.
+    static let serviceUUID = CBUUID(string: "FB349B5F-8000-8000-1000-00000000A2B0")
     static let controlUUID = CBUUID(string: "A2B1")
     static let eventUUID = CBUUID(string: "A2B2")
     static let audioUUID = CBUUID(string: "A2B3")
@@ -233,7 +235,10 @@ extension PassportBLETransport: CBCentralManagerDelegate {
     }
 
     func centralManager(_ manager: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        peripheral.discoverServices([Self.serviceUUID])
+        // Discover everything and filter afterwards: passing the service UUID here
+        // depends on getting its byte order exactly right, and getting it wrong
+        // returns an empty list rather than an error.
+        peripheral.discoverServices(nil)
         DebugFileLogger.log("passport ble connected")
     }
 
@@ -260,9 +265,17 @@ extension PassportBLETransport: CBCentralManagerDelegate {
 extension PassportBLETransport: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard let service = peripheral.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
-            logger.warning("audio service not found")
-            DebugFileLogger.log("passport ble service missing")
+        // Match on the 16-bit suffix rather than the exact string: the firmware's
+        // little-endian 128-bit declaration is what makes this UUID look scrambled,
+        // and a change to how it is written should not break discovery.
+        let service = peripheral.services?.first { candidate in
+            candidate.uuid == Self.serviceUUID
+                || candidate.uuid.uuidString.uppercased().hasSuffix("A2B0")
+        }
+        guard let service else {
+            let found = (peripheral.services ?? []).map(\.uuid.uuidString).joined(separator: ",")
+            logger.warning("audio service not found among \(found, privacy: .public)")
+            DebugFileLogger.log("passport ble service missing found=[\(found)]")
             close()
             return
         }
@@ -274,21 +287,22 @@ extension PassportBLETransport: CBPeripheralDelegate {
         _ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?
     ) {
         for characteristic in service.characteristics ?? [] {
-            switch characteristic.uuid {
-            case Self.controlUUID:
+            // Suffix matching for the same reason as the service: whether a UUID
+            // surfaces in short or long form depends on how the firmware declared it.
+            let suffix = characteristic.uuid.uuidString.uppercased()
+            if suffix.hasSuffix("A2B1") {
                 controlCharacteristic = characteristic
-            case Self.eventUUID, Self.audioUUID:
+            } else if suffix.hasSuffix("A2B2") || suffix.hasSuffix("A2B3") {
                 // Subscribing is what makes the device consider itself online; until
                 // the EVENT CCCD is written it shows OFFLINE and blocks recording.
                 // The characteristics require encryption, so this write is also what
                 // prompts macOS to pair (Just Works, no PIN).
                 peripheral.setNotifyValue(true, for: characteristic)
-            default:
-                break
             }
         }
+        let found = (service.characteristics ?? []).map(\.uuid.uuidString).joined(separator: ",")
         DebugFileLogger.log(
-            "passport ble characteristics mtu=\(peripheral.maximumWriteValueLength(for: .withoutResponse))")
+            "passport ble characteristics=[\(found)] mtu=\(peripheral.maximumWriteValueLength(for: .withoutResponse))")
     }
 
     func peripheral(
@@ -301,7 +315,7 @@ extension PassportBLETransport: CBPeripheralDelegate {
             DebugFileLogger.log("passport ble subscribe failed uuid=\(characteristic.uuid) error=\(error.localizedDescription)")
             return
         }
-        if characteristic.uuid == Self.eventUUID, characteristic.isNotifying {
+        if characteristic.uuid.uuidString.uppercased().hasSuffix("A2B2"), characteristic.isNotifying {
             isSubscribedToEvents = true
             DebugFileLogger.log("passport ble event subscribed")
             // The device counts itself online from this moment, and it sends nothing
@@ -316,13 +330,11 @@ extension PassportBLETransport: CBPeripheralDelegate {
         error: Error?
     ) {
         guard error == nil, let value = characteristic.value else { return }
-        switch characteristic.uuid {
-        case Self.audioUUID:
+        let suffix = characteristic.uuid.uuidString.uppercased()
+        if suffix.hasSuffix("A2B3") {
             handleAudio(value)
-        case Self.eventUUID:
+        } else if suffix.hasSuffix("A2B2") {
             handleEvent(value)
-        default:
-            break
         }
     }
 }

@@ -1,19 +1,37 @@
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index e7295c1..fb4ff7b 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -7,6 +7,7 @@ idf_component_register(
+          "app_events.c"
+          "app_sound.c"
+          "app_ui.c"
++         "pet_frames.c"   # 生成物,见 device-firmware/tools/gen_pet_frames.py
+          "nvs_settings.c"
+          "adpcm.c"
+          "audio_streamer.c"
 diff --git a/main/app_ui.c b/main/app_ui.c
-index c29bd06..8bed073 100644
+index c29bd06..40c8220 100644
 --- a/main/app_ui.c
 +++ b/main/app_ui.c
-@@ -18,6 +18,10 @@
+@@ -3,6 +3,8 @@
+ #include "bsp_battery.h"     // 电量(主循环已把真实值补进快照,此处仅渲染)
+ #include "bsp_display.h"
+ #include "time_sync.h"       // 顶栏 HH:MM(校时源仅电脑客户端,未校时 "--:--")
++#include "pet_frames.h"
++#include "nvs_settings.h"   // 待机页名牌读 owner
+ #include "ui_pixel.h"
+ #include "lvgl.h"
+ #include <stdarg.h>
+@@ -18,6 +20,7 @@
  #define W            240
  #define H            320
  
-+// 待机页名牌上的名字。改这一行即可换人;montserrat_20 下 200px 名牌大约放得下
-+// 14 个字符,更长会被截断。
-+#define DEVICE_OWNER_NAME  "LukeLiang"
 +
  // 顶栏(无 BLE 点、无 CPU/RAM 监测):右侧对齐组:电池图标(描边框+右缘
  // 触点,数字居中)、HH:MM 时间(最右贴 6px)。240px:144+34+4 / 182+52。
  #define BATT_X       144
-@@ -27,6 +31,11 @@
+@@ -27,11 +30,15 @@
  #define BATT_NUB_W   4
  #define TIME_X       182
  #define TIME_W       52
@@ -25,7 +43,12 @@ index c29bd06..8bed073 100644
  
  // ---- 页内部件索引(与 page 切换共用) ----
  typedef struct {
-@@ -48,6 +57,8 @@ static lv_obj_t *s_batt_icon;   // 电池描边框(数字居中在框内)
+     lv_obj_t *root;                       // 本页容器(显隐切换)
+-    lv_obj_t *rec_label;                  // LISTENING:RECORDING 大字
+     lv_obj_t *rec_elapsed;                // LISTENING:计时
+     lv_obj_t *tr_message;                 // TRANSCRIBING:消息
+     lv_obj_t *run_state;                  // AGENT_RUNNING:状态名
+@@ -48,6 +55,8 @@ static lv_obj_t *s_batt_icon;   // 电池描边框(数字居中在框内)
  static lv_obj_t *s_batt_nub;    // 右缘触点
  static lv_obj_t *s_batt_label;
  static lv_obj_t *s_time_label;
@@ -34,7 +57,7 @@ index c29bd06..8bed073 100644
  static lv_obj_t *s_offline_banner;
  static lv_obj_t *s_offline_text;
  static lv_obj_t *s_netbusy_banner;
-@@ -59,7 +70,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
+@@ -59,7 +68,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
  static bool s_last_screen_on = true;
  static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单屏方案)
  
@@ -43,28 +66,22 @@ index c29bd06..8bed073 100644
  static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
  
  // ---- 基础块(无 LVGL 样式噪音) ----
-@@ -94,6 +105,40 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
+@@ -94,6 +103,34 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
      return label(parent, text, &lv_font_montserrat_14, UI_MUTED, 0, HINT_Y, W);
  }
  
-+// ---- 状态图标(纯色块拼像素画,不引字库) ----
-+//
-+// 每页一个大图标承担"这是什么状态"的表达,文字退到辅助位:一眼扫到形状比读
-+// 单词快,且全大写英文短语在 240px 屏上既挤又硬。图标用 block 拼,复用既有
-+// 像素语言,不额外占 flash(内嵌字库要几十 KB,只为几个词不值)。
-+
-+// 麦克风:胶囊头 + 支架 + 底座。LISTENING 用。
-+static void icon_mic(lv_obj_t *parent, int cx, int cy, uint32_t color)
++// 吉祥物:同一个形象换表情表示状态。位图比色块拼的图标信息量大得多 —— 一张
++// 举手的笑脸说"我在听",比 mic 图标加一行 "Listening" 两者都清楚。四帧共 76KB,
++// app 分区还剩 2.9MB,不构成压力。
++static lv_obj_t *pet_image(lv_obj_t *parent, const lv_image_dsc_t *src, int y)
 +{
-+    block(parent, cx - 9, cy - 22, 18, 26, color);        // 头(胶囊主体)
-+    block(parent, cx - 11, cy - 14, 2, 12, color);        // 左护弧
-+    block(parent, cx + 9, cy - 14, 2, 12, color);         // 右护弧
-+    block(parent, cx - 11, cy - 2, 22, 2, color);         // 弧底
-+    block(parent, cx - 2, cy, 4, 8, color);               // 支架
-+    block(parent, cx - 10, cy + 8, 20, 3, color);         // 底座
++    lv_obj_t *img = lv_image_create(parent);
++    lv_image_set_src(img, src);
++    lv_obj_set_pos(img, (W - src->header.w) / 2, y);
++    return img;
 +}
 +
-+// 三点省略:识别中。中间点用重色,读作"正在处理"而不是静止装饰。
++// 三点省略:AGENT_RUNNING 用(那一页没有对应表情,Agent 审批流不在语音输入范围内)。
 +static void icon_dots(lv_obj_t *parent, int cx, int cy, uint32_t color)
 +{
 +    block(parent, cx - 22, cy, 10, 10, color);
@@ -72,7 +89,7 @@ index c29bd06..8bed073 100644
 +    block(parent, cx + 12, cy, 10, 10, color);
 +}
 +
-+// 声波:麦克风两侧的弧,表示在收音。
++// 声波:录音页放在吉祥物两侧,把"在收音"这件事画出来。
 +static void icon_waves(lv_obj_t *parent, int cx, int cy, uint32_t color)
 +{
 +    block(parent, cx - 30, cy - 6, 3, 12, color);
@@ -84,7 +101,7 @@ index c29bd06..8bed073 100644
  // ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
  static void build_background(void)
  {
-@@ -143,16 +188,30 @@ static void build_chrome(void)
+@@ -143,16 +180,30 @@ static void build_chrome(void)
      s_time_label = label(s_chrome, "--:--", &lv_font_montserrat_14, 0xFFFFFF,
                           TIME_X, 5, TIME_W);
  
@@ -117,43 +134,60 @@ index c29bd06..8bed073 100644
                             &lv_font_montserrat_14, UI_INK, 0, 0, W);
  
      // Toast(底部浮层,空文本即隐藏)
-@@ -172,13 +231,17 @@ static void build_home(void)
+@@ -172,13 +223,31 @@ static void build_home(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
-+    // 待机页做成身份卡:名牌上是主人的名字,底下小字说明这是什么设备。
-+    // 设备名就叫 AI Passport,出厂固件也是身份卡形态,这里顺着那个语义。
-     lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
-     // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
-     // 后文字才真正水平居中于面板(此前偏右 7px)。
+-    lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
+-    // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
+-    // 后文字才真正水平居中于面板(此前偏右 7px)。
 -    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
 -    ui_pixel_mascot_create(p->root, 101, 100);
 -    label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
 -    hint_label(p->root, "OK: ENTER   DBL-VOL+: CLEAR   DOWN: ENTER");
-+    label(plate, DEVICE_OWNER_NAME, &lv_font_montserrat_20, UI_INK, -7, -2, 200);
-+    label(p->root, "Voice Input", &lv_font_montserrat_14, UI_MUTED, 0, CONTENT_Y + 54, W);
-+    ui_pixel_mascot_create(p->root, 101, 112);
++    // 待机页做成身份卡:名牌上是主人的名字,底下小字说明这是什么设备。
++    // 设备名就叫 AI Passport,出厂固件也是身份卡形态,这里顺着那个语义。
++    //
++    // 名字读自 NVS(见 nvs_settings_get_owner),不编译进固件 —— 仓库对任何人
++    // 通用,设备换手也不用重刷。没设名字就不画名牌,只留副标题居中。
++    char owner[NVS_OWNER_MAX] = { 0 };
++    nvs_settings_get_owner(owner, sizeof(owner));
++
++    // 垂直排布(名牌 40 高、副标题行高 16、吉祥物 44x56):
++    //   名牌 56..96 → 副标题 100..116 → 吉祥物 126..182 → 提示 208
++    // 之前吉祥物在 112 起,和副标题重叠 6px。
++    if (owner[0]) {
++        lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
++        // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
++        // 后文字才真正水平居中于面板(此前偏右 7px)。
++        label(plate, owner, &lv_font_montserrat_20, UI_INK, -7, -2, 200);
++        label(p->root, "Voice Input", &lv_font_montserrat_14, UI_MUTED, 0, 100, W);
++    } else {
++        // 没设名字:副标题升为主标题占住名牌的位置,避免上方留一块空白。
++        label(p->root, "Voice Input", &lv_font_montserrat_20, UI_PAPER, 0, CONTENT_Y + 20, W);
++    }
++    pet_image(p->root, &pet_idle, 122);
 +    // 只说下一步做什么。原先底部还列着 ENTER/CLEAR 两个此刻用不到的键,读起来
 +    // 像调试输出。
 +    label(p->root, "hold OK to begin", &lv_font_montserrat_14, UI_MUTED, 0, 208, W);
  }
  
  static void build_ready(void)
-@@ -192,9 +255,10 @@ static void build_ready(void)
+@@ -192,9 +261,10 @@ static void build_ready(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
 -    // 工作流切换已取消(固定 build),READY 为简单就绪页
 -    label(p->root, "READY", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 24, W);
 -    hint_label(p->root, "HOLD VOL+: SPEAK   DOWN: ENTER   DBL-VOL+: CLEAR");
-+    // 就绪页:静态麦克风图标 + 一句话。图标告诉你设备在待命,文字说怎么开始。
-+    icon_mic(p->root, W / 2, 116, UI_PAPER);
-+    label(p->root, "Ready", &lv_font_montserrat_20, UI_PAPER, 0, 152, W);
++    // 就绪页:待机表情 + 一句话。表情告诉你设备醒着在等,文字说怎么开始。
++    pet_image(p->root, &pet_idle, 96);
++    label(p->root, "Ready", &lv_font_montserrat_20, UI_PAPER, 0, 208, W);
 +    hint_label(p->root, "hold the top key and speak");
  }
  
  static void build_listening(void)
-@@ -208,12 +272,13 @@ static void build_listening(void)
+@@ -208,12 +278,12 @@ static void build_listening(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -163,32 +197,31 @@ index c29bd06..8bed073 100644
 -
 -    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
 -    hint_label(p->root, "RELEASE VOL+: SEND");
-+    // 录音中:麦克风 + 两侧声波,视觉上明确"在收音"。计时放大居中,是这一页
-+    // 唯一需要读的数字;状态词降到小字,因为图标已经说了。
-+    icon_mic(p->root, W / 2, 112, UI_PAPER);
-+    icon_waves(p->root, W / 2, 100, UI_YELLOW);
-+    p->rec_label = label(p->root, "Listening", &lv_font_montserrat_14, UI_MUTED, 0, 148, W);
-+    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_PAPER, 0, 176, W);
++    // 录音中:举手的表情 + 两侧声波。计时是这一页唯一需要读的数字,放大居中;
++    // "在听"这件事由表情说,不再占一行文字。
++    pet_image(p->root, &pet_listen, 88);
++    icon_waves(p->root, W / 2, 120, UI_YELLOW);
++    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_PAPER, 0, 204, W);
 +    hint_label(p->root, "release to send");
  }
  
  static void build_transcribing(void)
-@@ -227,9 +292,11 @@ static void build_transcribing(void)
+@@ -227,9 +297,11 @@ static void build_transcribing(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
 -    label(p->root, "Transcribing...", &lv_font_montserrat_20, UI_INK, 0, 96, W);
 -    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 140, 200);
 -    hint_label(p->root, "PLEASE WAIT");
-+    // 识别中:三点省略号。这一页用户什么都不用做,所以不给按键提示,只给"在忙"
-+    // 的信号 —— 原先底部写 "PLEASE WAIT",既是命令句又占一行。
-+    icon_dots(p->root, W / 2, 112, UI_PAPER);
-+    label(p->root, "Transcribing", &lv_font_montserrat_20, UI_PAPER, 0, 148, W);
-+    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 182, 200);
++    // 识别中:思考的表情。这一页用户什么都不用做,所以不给按键提示 —— 原先底部
++    // 写 "PLEASE WAIT",既是命令句又占一行。
++    pet_image(p->root, &pet_think, 88);
++    label(p->root, "Transcribing", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
++    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 224, 200);
  }
  
  static void build_running(void)
-@@ -243,12 +310,11 @@ static void build_running(void)
+@@ -243,12 +315,11 @@ static void build_running(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -205,7 +238,7 @@ index c29bd06..8bed073 100644
  }
  
  static void build_approval(void)
-@@ -276,7 +342,7 @@ static void build_approval(void)
+@@ -276,7 +347,7 @@ static void build_approval(void)
      lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
      lv_obj_set_height(p->ap_diff, 88);
  
@@ -214,7 +247,7 @@ index c29bd06..8bed073 100644
  }
  
  static void set_hidden(lv_obj_t *o, bool hidden)
-@@ -368,14 +434,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
+@@ -368,14 +439,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
      }
  
      // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
@@ -237,3 +270,136 @@ index c29bd06..8bed073 100644
      if (snap->toast[0]) {
          label_set_if_changed(s_toast, snap->toast);
          set_hidden(lv_obj_get_parent(s_toast), false);
+diff --git a/main/console_cmds.c b/main/console_cmds.c
+index 455a996..944ef81 100644
+--- a/main/console_cmds.c
++++ b/main/console_cmds.c
+@@ -193,6 +193,34 @@ static int cmd_time(int argc, char **argv)
+     return 1;
+ }
+ 
++// ---- owner:待机页名牌上的名字(存 NVS,重启生效) ----
++static int cmd_owner(int argc, char **argv)
++{
++    if (argc == 1) {
++        char name[NVS_OWNER_MAX] = { 0 };
++        nvs_settings_get_owner(name, sizeof(name));
++        out("owner: %s\n", name[0] ? name : "(unset)");
++        return 0;
++    }
++    if (argc == 3 && strcmp(argv[1], "set") == 0) {
++        if (strlen(argv[2]) >= NVS_OWNER_MAX) {
++            out("owner set: too long (max %d chars)\n", NVS_OWNER_MAX - 1);
++            return 1;
++        }
++        esp_err_t e = nvs_settings_set_owner(argv[2]);
++        // 名牌在建页时读一次 NVS,所以要重启才换 —— 说清楚,免得以为没生效。
++        out("owner set: %s (reboot to apply)\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
++        return e == ESP_OK ? 0 : 1;
++    }
++    if (argc == 2 && strcmp(argv[1], "clear") == 0) {
++        esp_err_t e = nvs_settings_set_owner(NULL);
++        out("owner clear: %s (reboot to apply)\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
++        return e == ESP_OK ? 0 : 1;
++    }
++    out("usage: owner | owner set <name> | owner clear\n");
++    return 1;
++}
++
+ // ---- log:导出 USB 模式日志环(REPL 模式下日志直接上屏,环为空) ----
+ // 可选 <offset>:SYS_RESP 载荷上限 2048B(USB_RESP_MAX),环(16KB)超限时
+ // 首块恰在中间截断。`log 2048` / `log 4096` … 按游标分多次取回全量 ——
+@@ -333,6 +361,7 @@ static int cmd_factory(int argc, char **argv)
+ static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
+     { "log",     cmd_log },
+     { "time",    cmd_time },
++    { "owner",   cmd_owner },
+     { "st",      cmd_st },
+     { "rst",     cmd_rst },
+     { "reboot",  cmd_reboot },
+@@ -417,6 +446,7 @@ esp_err_t console_cmds_register(void)
+     reg("st", "系统状态一览(双链路/MTU/掉帧/堆)", NULL, cmd_st);
+     reg("rst", "复位原因(无线自动重启诊断)", NULL, cmd_rst);
+     reg("time", "校时:time | time set <epoch> | time tz <±hh>", NULL, cmd_time);
++    reg("owner", "待机页名字:owner | owner set <name> | owner clear", NULL, cmd_owner);
+     reg("reboot", "重启设备", NULL, cmd_reboot);
+     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
+     return ESP_OK;
+diff --git a/main/nvs_settings.c b/main/nvs_settings.c
+index 6f86eb4..6fa395d 100644
+--- a/main/nvs_settings.c
++++ b/main/nvs_settings.c
+@@ -11,6 +11,7 @@ static const char *TAG = "settings";
+ // 注:rf_mode 键已随双通道常开架构退役(2026-08-28,不再有互斥模式);旧键
+ // 残留于 NVS 无读取方,无害(factory 清空可除)。
+ static const char *K_TZ_HOUR   = "tz_hour";
++static const char *K_OWNER     = "owner";
+ 
+ esp_err_t nvs_settings_init(void) {
+     nvs_handle_t h;
+@@ -44,6 +45,40 @@ esp_err_t nvs_settings_set_tz_hour(int8_t hour) {
+     return e;
+ }
+ 
++// 待机页名牌上的名字。存在设备上而不是编译进固件,所以仓库对任何人都通用,
++// 设备换手也不用重刷 —— 而且插到别的电脑上名字照样在,这是"身份卡"该有的样子。
++// 未设置时返回空串,UI 据此隐藏名牌。
++esp_err_t nvs_settings_get_owner(char *out, size_t cap) {
++    if (!out || cap == 0) return ESP_ERR_INVALID_ARG;
++    out[0] = '\0';
++
++    nvs_handle_t h;
++    if (nvs_open(APP_NS, NVS_READONLY, &h) != ESP_OK) return ESP_OK;   // 无名字即空
++    size_t len = cap;
++    esp_err_t e = nvs_get_str(h, K_OWNER, out, &len);
++    nvs_close(h);
++    if (e != ESP_OK) out[0] = '\0';   // 未设置 / 超长 / 损坏:都按"没名字"处理
++    return ESP_OK;
++}
++
++// 传空串或 NULL 即清除。
++esp_err_t nvs_settings_set_owner(const char *name) {
++    nvs_handle_t h;
++    esp_err_t e = nvs_open(APP_NS, NVS_READWRITE, &h);
++    if (e != ESP_OK) return e;
++
++    if (!name || !name[0]) {
++        e = nvs_erase_key(h, K_OWNER);
++        if (e == ESP_ERR_NVS_NOT_FOUND) e = ESP_OK;   // 本来就没有,视作成功
++    } else {
++        e = nvs_set_str(h, K_OWNER, name);
++    }
++    if (e == ESP_OK) e = nvs_commit(h);
++    nvs_close(h);
++    ESP_LOGI(TAG, "owner = %s", (name && name[0]) ? name : "(cleared)");
++    return e;
++}
++
+ void nvs_settings_factory_reset(void) {
+     nvs_handle_t h;
+     if (nvs_open(APP_NS, NVS_READWRITE, &h) == ESP_OK) {
+diff --git a/main/nvs_settings.h b/main/nvs_settings.h
+index 5ce09b3..c2bb22d 100644
+--- a/main/nvs_settings.h
++++ b/main/nvs_settings.h
+@@ -3,6 +3,7 @@
+ 
+ #include "esp_err.h"
+ #include <stdint.h>
++#include <stddef.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -17,6 +18,12 @@ esp_err_t nvs_settings_init(void);
+ esp_err_t nvs_settings_get_tz_hour(int8_t *hour);
+ esp_err_t nvs_settings_set_tz_hour(int8_t hour);
+ 
++// 待机页名牌上的名字(最长 NVS_OWNER_MAX-1 字节)。设备自己记着,不编译进固件,
++// 所以仓库通用、设备换手无需重刷。未设置时 get 返回空串,UI 隐藏名牌。
++#define NVS_OWNER_MAX 16
++esp_err_t nvs_settings_get_owner(char *out, size_t cap);
++esp_err_t nvs_settings_set_owner(const char *name);   // 空串或 NULL 即清除
++
+ void nvs_settings_factory_reset(void);   // 清 "app" 命名空间
+ 
+ #ifdef __cplusplus

@@ -39,11 +39,45 @@ ESP-IDF:     v5.5.3
 
 ## 我们的改动
 
-`patches/` 下按顺序应用：
+`patches/` 下按顺序应用，`files/` 是要拷进固件的新文件：
 
-| Patch | 内容 |
+| 文件 | 内容 |
 |---|---|
-| `0001-quiet-device-ui.patch` | 重做屏幕 UI：全大写英文短语改成正常大小写，每个状态给一个像素图标承担主要表达，底部只留当前用得到的那一条提示（原先列着此刻按不了的键，读起来像调试输出）。中文需要内嵌 CJK 字库，为几个词占几十 KB 不值，所以保持英文而把重点放在图形上。 |
+| `patches/0001-quiet-device-ui.patch` | 重做屏幕：文案改正常大小写、每状态一个吉祥物表情、底部只留当前用得到的那条提示、顶栏加连接方式图标；待机页名牌显示主人名字（读自设备 NVS，见下）。 |
+| `files/pet_frames.h` | 吉祥物位图的声明（手写，要拷进 `main/`）。 |
+| `tools/gen_pet_frames.py` | 从 Codex pet sprite sheet 生成 `main/pet_frames.c`。位图是生成物，不入库——493KB 的 C 数组没必要进 git，改表情改脚本里的 `PICKS` 表重新生成即可。 |
+
+### 吉祥物
+
+四种表情对应四种状态，同一个形象：
+
+| 状态 | 表情 |
+|---|---|
+| 待机 / 就绪 | 微笑站立 |
+| 录音中 | 举手 —— "我在听" |
+| 识别中 | 抱手歪头 |
+| 电脑断连 | 难过 |
+
+素材是 Codex pet（`~/.codex/pets/fantuan/spritesheet.webp`，8×11 网格，单帧 192×208）。
+不做逐帧动画：表情本身就是状态指示，比动画更有信息量，也省掉帧缓冲的内存。
+四帧缩到 63×104、RGB565A8 格式共 76KB。
+
+需要 alpha 通道——设备背景是蓝天加草地，不透明矩形会切出一个可见方框。
+
+### 待机页的名字
+
+存在设备 NVS 里，不编译进固件，所以这个仓库对任何人都通用，设备换手也不用重刷。
+未设置时不画名牌，副标题升为主标题。
+
+```bash
+# 通过 USB 控制台设置（SYS 帧或串口 REPL 都行）
+owner set LukeLiang
+owner            # 查看
+owner clear      # 清除
+reboot           # 名牌在建页时读一次 NVS，改完要重启
+```
+
+`idf.py flash` 不擦 NVS，所以设一次之后后续刷机都会保留。
 
 ## 换设备后如何重现
 
@@ -59,6 +93,9 @@ git clone https://github.com/zhaohuaxiaoy/folo-ai-passport-voice /tmp/folo-fw
 cd /tmp/folo-fw
 git checkout 403ea8e244a3
 git apply <此仓库>/device-firmware/patches/*.patch
+cp <此仓库>/device-firmware/files/pet_frames.h main/
+python3 <此仓库>/device-firmware/tools/gen_pet_frames.py \
+    ~/.codex/pets/fantuan/spritesheet.webp > main/pet_frames.c
 
 # 3. 编译
 source ~/esp/esp-idf/export.sh

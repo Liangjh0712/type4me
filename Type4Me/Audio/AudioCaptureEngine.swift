@@ -17,7 +17,7 @@ enum AudioCaptureError: Error, LocalizedError {
     }
 }
 
-final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDataOutputSampleBufferDelegate {
+final class AudioCaptureEngine: NSObject, AudioSource, @unchecked Sendable, AVCaptureAudioDataOutputSampleBufferDelegate {
 
     // MARK: - Static properties
 
@@ -80,24 +80,32 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
 
     // MARK: - Public
 
-    var onAudioChunk: ((Data) -> Void)?
-    var onAudioLevel: ((Float) -> Void)?
+    /// Forwarded to `sink`, which owns the chunking and journalling. The engine's
+    /// own job ends at handing converted PCM to the sink.
+    var onAudioChunk: ((Data) -> Void)? {
+        get { sink.onAudioChunk }
+        set { sink.onAudioChunk = newValue }
+    }
+
+    var onAudioLevel: ((Float) -> Void)? {
+        get { sink.onAudioLevel }
+        set { sink.onAudioLevel = newValue }
+    }
 
     // MARK: - Private
 
+    /// The audio-source-agnostic tail: journal → accumulate → cut into chunks.
+    private let sink = PCMSinkCore()
+
     private var captureSession: AVCaptureSession?
     private let stateLock = NSLock()
-    private let bufferLock = NSLock()
-    private var buffer = Data()
-    private var accumulatedAudio = Data()
+    private var converterLock = NSLock()
     private var converter: AVAudioConverter?
     private let outputQueue = DispatchQueue(label: "com.type4me.audiocapture")
     private let outputQueueKey = DispatchSpecificKey<UInt8>()
     private let outputQueueTag: UInt8 = 1
     private var activeOutput: AVCaptureAudioDataOutput?
     private var levelCounter = 0
-    private let journalLock = NSLock()
-    private var journalWriter: AudioJournalWriter?
 
     // MARK: - Warm-up
 
@@ -126,43 +134,27 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
     }
 
     func prepareAudioJournal(metadata: AudioJournalMetadata) throws {
-        let writer = try AudioArchive.shared.beginJournal(metadata: metadata)
-        journalLock.withLock {
-            journalWriter?.discard()
-            journalWriter = writer
-        }
+        try sink.prepareAudioJournal(metadata: metadata)
     }
 
     func updateAudioJournalPartialTranscript(_ text: String) {
-        let writer = journalLock.withLock { journalWriter }
-        writer?.updatePartialTranscript(text)
+        sink.updateAudioJournalPartialTranscript(text)
     }
 
     func finalizeAudioJournal() -> ArchivedAudio? {
-        let writer = journalLock.withLock { journalWriter }
-        return writer?.finalize()
+        sink.finalizeAudioJournal()
     }
 
     func commitAudioJournal() {
-        let writer = journalLock.withLock { () -> AudioJournalWriter? in
-            defer { journalWriter = nil }
-            return journalWriter
-        }
-        writer?.commit()
+        sink.commitAudioJournal()
     }
 
     func preserveAudioJournalForRecovery() {
-        journalLock.withLock {
-            journalWriter = nil
-        }
+        sink.preserveAudioJournalForRecovery()
     }
 
     func discardAudioJournal() {
-        let writer = journalLock.withLock { () -> AudioJournalWriter? in
-            defer { journalWriter = nil }
-            return journalWriter
-        }
-        writer?.discard()
+        sink.discardAudioJournal()
     }
 
     // MARK: - Start / Stop
@@ -174,11 +166,8 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
         }
 
         // Reset state
-        bufferLock.lock()
-        buffer = Data()
-        accumulatedAudio = Data()
-        bufferLock.unlock()
-        converter = nil
+        sink.reset()
+        converterLock.withLock { converter = nil }
 
         try startWithAVCapture()
     }
@@ -243,18 +232,15 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
         session.commitConfiguration()
         captureSession = nil
 
-        flushRemaining()
+        sink.flushRemaining()
         clearCaptureState()
         NSLog("[Audio] Capture session stopped and graph detached")
         DebugFileLogger.log("audio capture stopped; AVCapture graph detached")
     }
 
     private func clearCaptureState() {
-        bufferLock.lock()
-        converter = nil
-        onAudioChunk = nil
-        onAudioLevel = nil
-        bufferLock.unlock()
+        converterLock.withLock { converter = nil }
+        sink.clearCallbacks()
         levelCounter = 0
     }
 
@@ -279,11 +265,11 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
         // Heartbeat log every ~5s (300 callbacks at ~60Hz)
         if levelCounter % 300 == 0 {
             let level = Self.calculateLevel(from: pcmBuffer)
-            DebugFileLogger.log("audio heartbeat callback=\(levelCounter) bufferSize=\(buffer.count) level=\(String(format: "%.3f", level))")
+            DebugFileLogger.log("audio heartbeat callback=\(levelCounter) bufferSize=\(sink.bufferedByteCount) level=\(String(format: "%.3f", level))")
         }
 
         // Create or recreate converter when source format changes
-        bufferLock.lock()
+        converterLock.lock()
         let sourceFormat = pcmBuffer.format
         if converter == nil || converter?.inputFormat != sourceFormat {
             if converter != nil {
@@ -296,10 +282,10 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
             )
         }
         guard let conv = converter else {
-            bufferLock.unlock()
+            converterLock.unlock()
             return
         }
-        bufferLock.unlock()
+        converterLock.unlock()
         convert(buffer: pcmBuffer, using: conv)
     }
 
@@ -334,36 +320,17 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
 
         let audioBuffer = convertedBuffer.audioBufferList.pointee.mBuffers
         guard let mData = audioBuffer.mData else { return }
-        let chunk = Data(bytes: mData, count: byteCount)
-        let journal = journalLock.withLock { journalWriter }
-        journal?.append(chunk)
-
-        bufferLock.lock()
-        accumulatedAudio.append(chunk)
-        buffer.append(chunk)
-        emitFullChunks()
-        bufferLock.unlock()
+        sink.append(Data(bytes: mData, count: byteCount))
     }
 
     /// Returns the full recorded PCM audio since the last start().
     func getRecordedAudio() -> Data {
-        bufferLock.lock()
-        let data = accumulatedAudio
-        bufferLock.unlock()
-        return data
-    }
-
-    /// Emit all complete chunks from the buffer. Must be called with bufferLock held.
-    private func emitFullChunks() {
-        while buffer.count >= Self.chunkByteSize {
-            let chunk = buffer.prefix(Self.chunkByteSize)
-            buffer.removeFirst(Self.chunkByteSize)
-            onAudioChunk?(Data(chunk))
-        }
+        sink.getRecordedAudio()
     }
 
     /// RMS → normalized 0..1 level from float PCM buffer.
-    private static func calculateLevel(from buffer: AVAudioPCMBuffer) -> Float {
+    /// Exposed for testing so `PCMSinkCore.level(fromInt16:)` can be pinned against it.
+    static func calculateLevel(from buffer: AVAudioPCMBuffer) -> Float {
         guard let channelData = buffer.floatChannelData else { return 0 }
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return 0 }
@@ -385,29 +352,11 @@ final class AudioCaptureEngine: NSObject, @unchecked Sendable, AVCaptureAudioDat
         return max(0, min(1, (db + 50) / 50))
     }
 
-    private func bufferSize() -> Int {
-        bufferLock.lock()
-        let size = buffer.count
-        bufferLock.unlock()
-        return size
-    }
-
     private func drainOutputQueue() {
         if DispatchQueue.getSpecific(key: outputQueueKey) == outputQueueTag {
             return  // already on outputQueue, skip to avoid deadlock
         }
         outputQueue.sync {}
-    }
-
-    private func flushRemaining() {
-        bufferLock.lock()
-        let remaining = buffer
-        buffer = Data()
-        bufferLock.unlock()
-
-        if !remaining.isEmpty {
-            onAudioChunk?(remaining)
-        }
     }
 }
 

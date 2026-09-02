@@ -59,10 +59,17 @@ actor RecognitionSession {
 
   // MARK: - Dependencies
 
-  private let audioEngine = AudioCaptureEngine()
+  /// Where the PCM comes from. Defaults to the local microphone; an external
+  /// device can be injected instead (see `AudioSource`). The no-argument
+  /// initializer keeps existing call sites and tests working unchanged.
+  private let audioSource: any AudioSource
   private let injectionEngine = TextInjectionEngine()
   let historyStore = HistoryStore.shared
   private var asrClient: (any SpeechRecognizer)?
+
+  init(audioSource: any AudioSource = AudioCaptureEngine()) {
+    self.audioSource = audioSource
+  }
 
   private let logger = Logger(
     subsystem: "com.type4me.session",
@@ -147,7 +154,7 @@ actor RecognitionSession {
   }
 
   /// Pre-initialize audio subsystem so the first recording starts instantly.
-  func warmUp() { audioEngine.warmUp() }
+  func warmUp() { audioSource.warmUp() }
 
   /// Pre-warm TCP connection to the ASR endpoint so the next WebSocket
   /// connect skips the handshake. Called on app launch and after each recording.
@@ -249,7 +256,9 @@ actor RecognitionSession {
   /// Flipped to true when mic level exceeds threshold during recording.
   /// When false at stop time, we skip the full ASR teardown (no speech = nothing to finalize).
   private var speechDetected = false
-  private static let speechLevelThreshold: Float = 0.15
+  /// Exposed for testing: every `AudioSource` must produce levels on this scale,
+  /// or `stopRecording()` discards the session as silent.
+  static let speechLevelThreshold: Float = 0.15
 
   private func markSpeechDetected() {
     if !speechDetected {
@@ -648,7 +657,7 @@ actor RecognitionSession {
     let levelHandler = self.onAudioLevel
     let speechGraceMs = SoundFeedback.startSoundDurationMs()
     let speechGraceEnd = ContinuousClock.now + .milliseconds(speechGraceMs)
-    audioEngine.onAudioLevel = { [weak self] level in
+    audioSource.onAudioLevel = { [weak self] level in
       if level > RecognitionSession.speechLevelThreshold,
         ContinuousClock.now >= speechGraceEnd
       {
@@ -657,7 +666,7 @@ actor RecognitionSession {
       levelHandler?(level)
     }
 
-    audioEngine.onAudioChunk = { [weak self] data in
+    audioSource.onAudioChunk = { [weak self] data in
       guard self != nil else { return }
       audioBuffer.append(data)
     }
@@ -673,12 +682,12 @@ actor RecognitionSession {
       let preferenceMode = AudioInputDevicePreferenceStore.mode().rawValue
       let priorityUIDs = AudioInputDevicePreferenceStore.priorityEntries().map(\.uid).joined(
         separator: ",")
-      audioEngine.selectedDeviceUID = selectedDeviceUID
+      audioSource.selectedDeviceUID = selectedDeviceUID
       DebugFileLogger.log(
         "audio input selected uid=\(selectedDeviceUID ?? "system-default") "
           + "mode=\(preferenceMode) priority=[\(priorityUIDs)]"
       )
-      try audioEngine.prepareAudioJournal(
+      try audioSource.prepareAudioJournal(
         metadata: AudioJournalMetadata(
           recordID: recordID,
           createdAt: recordingCreatedAt,
@@ -690,7 +699,7 @@ actor RecognitionSession {
           audioRelativePath: nil,
           audioBytes: 0
         ))
-      try audioEngine.start()
+      try audioSource.start()
       NSLog("[Session] Audio engine started OK")
       DebugFileLogger.log("audio engine started OK")
     } catch {
@@ -699,7 +708,7 @@ actor RecognitionSession {
       SoundFeedback.playError()
       await client.disconnect()
       self.asrClient = nil
-      audioEngine.discardAudioJournal()
+      audioSource.discardAudioJournal()
       currentRecordID = nil
       currentRecordingCreatedAt = nil
       state = .idle
@@ -732,9 +741,9 @@ actor RecognitionSession {
       DebugFileLogger.log(
         "ASR connect failed provider=\(provider.rawValue): \(String(describing: error))")
       SoundFeedback.playError()
-      audioEngine.stop()
-      audioEngine.onAudioChunk = nil
-      audioEngine.onAudioLevel = nil
+      audioSource.stop()
+      audioSource.onAudioChunk = nil
+      audioSource.onAudioLevel = nil
       finalizeCurrentAudioIfNeeded()
       await persistCurrentHistory(
         rawText: "",
@@ -785,7 +794,7 @@ actor RecognitionSession {
     // Switch callback from buffer to live pipeline
     var chunkCount = bufferedChunks.count
     let failureFlag = self.uploadFailureFlag
-    audioEngine.onAudioChunk = { [weak self] data in
+    audioSource.onAudioChunk = { [weak self] data in
       guard self != nil else { return }
       if failureFlag?.failed == true { return }
       chunkCount += 1
@@ -1064,7 +1073,7 @@ actor RecognitionSession {
 
   private func finalizeCurrentAudioIfNeeded() {
     guard currentArchivedAudio == nil else { return }
-    currentArchivedAudio = audioEngine.finalizeAudioJournal()
+    currentArchivedAudio = audioSource.finalizeAudioJournal()
   }
 
   private func persistCurrentHistory(
@@ -1102,12 +1111,12 @@ actor RecognitionSession {
         audioStatus: audio == nil ? nil : "retained"
       ))
     if inserted {
-      audioEngine.commitAudioJournal()
+      audioSource.commitAudioJournal()
       await historyStore.pruneAudio()
     } else {
       // Keep the finalized WAV + metadata sidecar. The startup importer
       // will retry the durable history commit on the next launch.
-      audioEngine.preserveAudioJournalForRecovery()
+      audioSource.preserveAudioJournalForRecovery()
       DebugFileLogger.log("history insert failed; preserved audio journal id=\(recordID)")
     }
     currentRecordID = nil
@@ -1116,7 +1125,7 @@ actor RecognitionSession {
   }
 
   private func discardCurrentAudio() {
-    audioEngine.discardAudioJournal()
+    audioSource.discardAudioJournal()
     currentRecordID = nil
     currentRecordingCreatedAt = nil
     currentArchivedAudio = nil
@@ -1409,8 +1418,8 @@ actor RecognitionSession {
     SoundFeedback.playStop()
 
     // Stop capture first so flushRemaining() can emit the tail audio chunk.
-    audioEngine.stop()
-    audioEngine.onAudioChunk = nil
+    audioSource.stop()
+    audioSource.onAudioChunk = nil
     await finishAudioChunkPipeline()
     finalizeCurrentAudioIfNeeded()
     DebugFileLogger.log("stop: audio stopped +\(ContinuousClock.now - stopT0)")
@@ -1532,7 +1541,7 @@ actor RecognitionSession {
       DebugFileLogger.log(
         "stop: ASR session finalization failed (partial=\(partialText.count) chars, uploadFailed=\(uploadFailed), hasStreamingError=\(lastStreamingError != nil)); attempting batch fallback"
       )
-      let fullAudio = audioEngine.getRecordedAudio()
+      let fullAudio = audioSource.getRecordedAudio()
       if !fullAudio.isEmpty, let config = currentConfig {
         onASREvent?(
           .processingResult(
@@ -1886,12 +1895,12 @@ actor RecognitionSession {
     cancelSpeculativeLLM()
     SystemVolumeManager.restore()
 
-    audioEngine.stop()
-    audioEngine.onAudioChunk = nil
-    audioEngine.onAudioLevel = nil
+    audioSource.stop()
+    audioSource.onAudioChunk = nil
+    audioSource.onAudioLevel = nil
     await finishAudioChunkPipeline(timeout: .milliseconds(250))
     finalizeCurrentAudioIfNeeded()
-    let fullAudio = audioEngine.getRecordedAudio()
+    let fullAudio = audioSource.getRecordedAudio()
 
     eventConsumptionTask?.cancel()
     eventConsumptionTask = nil
@@ -2056,7 +2065,7 @@ actor RecognitionSession {
       let transcript = versionedTranscript(rawTranscript)
       currentTranscript = transcript
       onASREvent?(.transcript(transcript))
-      audioEngine.updateAudioJournalPartialTranscript(transcript.canonicalText)
+      audioSource.updateAudioJournalPartialTranscript(transcript.canonicalText)
       if !transcript.canonicalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         speechDetected = true
       }
@@ -2724,9 +2733,9 @@ actor RecognitionSession {
     recoveryTask = nil
     resetSpeculativeLLM()
 
-    audioEngine.stop()
-    audioEngine.onAudioChunk = nil
-    audioEngine.onAudioLevel = nil
+    audioSource.stop()
+    audioSource.onAudioChunk = nil
+    audioSource.onAudioLevel = nil
     await finishAudioChunkPipeline(timeout: .milliseconds(100))
     finalizeCurrentAudioIfNeeded()
     if currentRecordID != nil {

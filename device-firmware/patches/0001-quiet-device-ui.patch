@@ -1,0 +1,159 @@
+diff --git a/main/app_ui.c b/main/app_ui.c
+index c29bd06..2d737a6 100644
+--- a/main/app_ui.c
++++ b/main/app_ui.c
+@@ -59,7 +59,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
+ static bool s_last_screen_on = true;
+ static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单屏方案)
+ 
+-static const char *const RISK_NAMES[APP_RISK_COUNT] = { "LOW RISK", "MEDIUM RISK", "HIGH RISK" };
++static const char *const RISK_NAMES[APP_RISK_COUNT] = { "low risk", "medium risk", "high risk" };
+ static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
+ 
+ // ---- 基础块(无 LVGL 样式噪音) ----
+@@ -94,6 +94,40 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
+     return label(parent, text, &lv_font_montserrat_14, UI_MUTED, 0, HINT_Y, W);
+ }
+ 
++// ---- 状态图标(纯色块拼像素画,不引字库) ----
++//
++// 每页一个大图标承担"这是什么状态"的表达,文字退到辅助位:一眼扫到形状比读
++// 单词快,且全大写英文短语在 240px 屏上既挤又硬。图标用 block 拼,复用既有
++// 像素语言,不额外占 flash(内嵌字库要几十 KB,只为几个词不值)。
++
++// 麦克风:胶囊头 + 支架 + 底座。LISTENING 用。
++static void icon_mic(lv_obj_t *parent, int cx, int cy, uint32_t color)
++{
++    block(parent, cx - 9, cy - 22, 18, 26, color);        // 头(胶囊主体)
++    block(parent, cx - 11, cy - 14, 2, 12, color);        // 左护弧
++    block(parent, cx + 9, cy - 14, 2, 12, color);         // 右护弧
++    block(parent, cx - 11, cy - 2, 22, 2, color);         // 弧底
++    block(parent, cx - 2, cy, 4, 8, color);               // 支架
++    block(parent, cx - 10, cy + 8, 20, 3, color);         // 底座
++}
++
++// 三点省略:识别中。中间点用重色,读作"正在处理"而不是静止装饰。
++static void icon_dots(lv_obj_t *parent, int cx, int cy, uint32_t color)
++{
++    block(parent, cx - 22, cy, 10, 10, color);
++    block(parent, cx - 5, cy, 10, 10, color);
++    block(parent, cx + 12, cy, 10, 10, color);
++}
++
++// 声波:麦克风两侧的弧,表示在收音。
++static void icon_waves(lv_obj_t *parent, int cx, int cy, uint32_t color)
++{
++    block(parent, cx - 30, cy - 6, 3, 12, color);
++    block(parent, cx - 38, cy - 11, 3, 22, color);
++    block(parent, cx + 27, cy - 6, 3, 12, color);
++    block(parent, cx + 35, cy - 11, 3, 22, color);
++}
++
+ // ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
+ static void build_background(void)
+ {
+@@ -147,12 +181,12 @@ static void build_chrome(void)
+     // 文本是子 label(render 按通道名改写文案);banner 本体是 block,不能
+     // 对 block 调 label_set_*(会按 label 布局读越界内存 → Load access fault)。
+     s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
+-    s_offline_text = label(s_offline_banner, "BLE DISCONNECTED - reconnecting...",
++    s_offline_text = label(s_offline_banner, "Mac not connected",
+                            &lv_font_montserrat_14, 0xFFFFFF, 0, 0, W);
+ 
+     // BLE BUSY(音频丢帧中)
+     s_netbusy_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_ORANGE);
+-    s_netbusy_text = label(s_netbusy_banner, "BLE BUSY - dropping frames",
++    s_netbusy_text = label(s_netbusy_banner, "link busy",
+                            &lv_font_montserrat_14, UI_INK, 0, 0, W);
+ 
+     // Toast(底部浮层,空文本即隐藏)
+@@ -175,10 +209,11 @@ static void build_home(void)
+     lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
+     // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
+     // 后文字才真正水平居中于面板(此前偏右 7px)。
+-    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
++    label(plate, "Voice Input", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
+     ui_pixel_mascot_create(p->root, 101, 100);
+-    label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
+-    hint_label(p->root, "OK: ENTER   DBL-VOL+: CLEAR   DOWN: ENTER");
++    // 只说下一步做什么。原先底部还列着 ENTER/CLEAR 两个此刻用不到的键,读起来
++    // 像调试输出。
++    label(p->root, "hold OK to begin", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
+ }
+ 
+ static void build_ready(void)
+@@ -192,9 +227,10 @@ static void build_ready(void)
+     lv_obj_set_size(p->root, W, H);
+     lv_obj_set_pos(p->root, 0, 0);
+ 
+-    // 工作流切换已取消(固定 build),READY 为简单就绪页
+-    label(p->root, "READY", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 24, W);
+-    hint_label(p->root, "HOLD VOL+: SPEAK   DOWN: ENTER   DBL-VOL+: CLEAR");
++    // 就绪页:静态麦克风图标 + 一句话。图标告诉你设备在待命,文字说怎么开始。
++    icon_mic(p->root, W / 2, 116, UI_PAPER);
++    label(p->root, "Ready", &lv_font_montserrat_20, UI_PAPER, 0, 152, W);
++    hint_label(p->root, "hold the top key and speak");
+ }
+ 
+ static void build_listening(void)
+@@ -208,12 +244,13 @@ static void build_listening(void)
+     lv_obj_set_size(p->root, W, H);
+     lv_obj_set_pos(p->root, 0, 0);
+ 
+-    // 录音中不画图标, 直接文字:RECORDING 大字居中(原图标区 y58-131 的中心),
+-    // 简洁直观; 下方 "0s" 计时与 hint 保持。
+-    p->rec_label = label(p->root, "RECORDING", &lv_font_montserrat_20, UI_INK, 0, 86, W);
+-
+-    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
+-    hint_label(p->root, "RELEASE VOL+: SEND");
++    // 录音中:麦克风 + 两侧声波,视觉上明确"在收音"。计时放大居中,是这一页
++    // 唯一需要读的数字;状态词降到小字,因为图标已经说了。
++    icon_mic(p->root, W / 2, 112, UI_PAPER);
++    icon_waves(p->root, W / 2, 100, UI_YELLOW);
++    p->rec_label = label(p->root, "Listening", &lv_font_montserrat_14, UI_MUTED, 0, 148, W);
++    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_PAPER, 0, 176, W);
++    hint_label(p->root, "release to send");
+ }
+ 
+ static void build_transcribing(void)
+@@ -227,9 +264,11 @@ static void build_transcribing(void)
+     lv_obj_set_size(p->root, W, H);
+     lv_obj_set_pos(p->root, 0, 0);
+ 
+-    label(p->root, "Transcribing...", &lv_font_montserrat_20, UI_INK, 0, 96, W);
+-    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 140, 200);
+-    hint_label(p->root, "PLEASE WAIT");
++    // 识别中:三点省略号。这一页用户什么都不用做,所以不给按键提示,只给"在忙"
++    // 的信号 —— 原先底部写 "PLEASE WAIT",既是命令句又占一行。
++    icon_dots(p->root, W / 2, 112, UI_PAPER);
++    label(p->root, "Transcribing", &lv_font_montserrat_20, UI_PAPER, 0, 148, W);
++    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 182, 200);
+ }
+ 
+ static void build_running(void)
+@@ -243,12 +282,11 @@ static void build_running(void)
+     lv_obj_set_size(p->root, W, H);
+     lv_obj_set_pos(p->root, 0, 0);
+ 
+-    block(p->root, 108, 76, 24, 24, UI_SKY_DARK);              // 静态"spinner"块
+-    p->run_state = label(p->root, "running", &lv_font_montserrat_20, UI_INK,
+-                         0, 112, W);
++    icon_dots(p->root, W / 2, 100, UI_PAPER);
++    p->run_state = label(p->root, "Working", &lv_font_montserrat_20, UI_PAPER,
++                         0, 136, W);
+     p->run_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED,
+-                           20, 148, 200);
+-    hint_label(p->root, "AGENT WORKING...");
++                           20, 170, 200);
+ }
+ 
+ static void build_approval(void)
+@@ -276,7 +314,7 @@ static void build_approval(void)
+     lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
+     lv_obj_set_height(p->ap_diff, 88);
+ 
+-    hint_label(p->root, "OK: APPROVE   VOL+: REJECT   DOWN: ENTER");
++    hint_label(p->root, "OK approve    UP reject    DOWN details");
+ }
+ 
+ static void set_hidden(lv_obj_t *o, bool hidden)

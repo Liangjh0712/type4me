@@ -1071,6 +1071,9 @@ struct MenuBarContent: View {
   @Environment(\.openWindow) private var openWindow
   @Environment(\.openWindow) private var openSettingsWindow
   @AppStorage("tf_language") private var language = AppLanguage.systemDefault
+  /// Refreshed on the link's change notification; the menu is rebuilt each time it
+  /// opens, so a stale read only lasts until the next notification.
+  @State private var passportSnapshot = PassportLink.snapshot
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -1084,7 +1087,28 @@ struct MenuBarContent: View {
       }
       .padding(.horizontal, 12)
       .padding(.vertical, 6)
+
+      if passportSnapshot.isConnected {
+        HStack(spacing: 6) {
+          Image(systemName: "cable.connector")
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+          Text(
+            passportSnapshot.isStreaming
+              ? L("AI Passport · 录音中", "AI Passport · recording")
+              : L("AI Passport · 已连接", "AI Passport · connected")
+          )
+          .font(.system(size: 10))
+          .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+      }
     }
+    .onReceive(NotificationCenter.default.publisher(for: PassportLink.stateDidChange)) { _ in
+      passportSnapshot = PassportLink.snapshot
+    }
+    .onAppear { passportSnapshot = PassportLink.snapshot }
 
     Divider()
 

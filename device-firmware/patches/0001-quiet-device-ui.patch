@@ -1,3 +1,52 @@
+diff --git a/components/bsp/include/bsp_audio.h b/components/bsp/include/bsp_audio.h
+index 126df79..c9b0286 100644
+--- a/components/bsp/include/bsp_audio.h
++++ b/components/bsp/include/bsp_audio.h
+@@ -16,6 +16,17 @@ esp_err_t bsp_audio_init(void);
+ //   音调和速度都快一倍。故本函数在格式变化时先 close 再 open。
+ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch);
+ 
++// 关闭 codec:切 5V 功放供电 + 让 ES8311 进 suspend。幂等(未打开时空转)。
++//
++// 为什么需要它:esp_codec_dev_open() 一调,PA 引脚就被拉高并一直保持,直到
++// close 或断电。原先只在 set_format 换格式时 close 过 —— 而全程只用 16kHz,
++// 那条路走不到,于是开机播第一声提示音之后功放就常开到关机(持续毫安级,
++// 远超提示音本身的耗电)。录音/播音结束后调这个把它关掉。
++//
++// ⚠ 代价:下次 bsp_audio_set_format() 要重新走 esp_codec_dev_open()(I2C 写一串
++//   寄存器 + PA 上电),实测几十毫秒。所以别在录音中途反复开关。
++esp_err_t bsp_audio_close(void);
++
+ // 播放 / 录音。bytes 为字节数(16bit 单声道时 = 采样数 x 2)。
+ esp_err_t bsp_audio_write(const void *pcm, size_t bytes);
+ esp_err_t bsp_audio_read(void *pcm, size_t bytes);
+diff --git a/components/bsp/src/bsp_audio.c b/components/bsp/src/bsp_audio.c
+index 822f5e3..6ed81b9 100644
+--- a/components/bsp/src/bsp_audio.c
++++ b/components/bsp/src/bsp_audio.c
+@@ -155,6 +155,22 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
+     return ESP_OK;
+ }
+ 
++// 关掉 codec:esp_codec_dev_close → es8311_enable(false) → PA 引脚拉低 +
++// es8311_suspend。这才是"不出声时不耗电"的落点(驱动侧取证:es8311.c 的
++// es8311_enable 在 disable 分支里 set_mute + ES_PA_DISABLE + suspend)。
++esp_err_t bsp_audio_close(void) {
++    if (!s_dev || !s_opened) return ESP_OK;   // 幂等
++    esp_codec_dev_close(s_dev);
++    s_opened = false;
++    // close 把 I2S 通道退回 READY,而下次 open 内部又会 disable 一次 → 会打
++    // "channel has not been enabled yet"。补一次 enable 让它合法(与 set_format
++    // 里同样的处理,原因见那里的注释)。
++    if (s_tx) i2s_channel_enable(s_tx);
++    if (s_rx) i2s_channel_enable(s_rx);
++    ESP_LOGI(TAG, "codec 关闭(PA 断电)");
++    return ESP_OK;
++}
++
+ esp_err_t bsp_audio_write(const void *pcm, size_t bytes) {
+     if (!s_dev) return ESP_ERR_INVALID_STATE;
+     return esp_codec_dev_write(s_dev, (void *)pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
 diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
 index e7295c1..fb4ff7b 100644
 --- a/main/CMakeLists.txt
@@ -11,7 +60,7 @@ index e7295c1..fb4ff7b 100644
           "adpcm.c"
           "audio_streamer.c"
 diff --git a/main/app_protocol.c b/main/app_protocol.c
-index 694d949..b7f3ff9 100644
+index 694d949..3484ec4 100644
 --- a/main/app_protocol.c
 +++ b/main/app_protocol.c
 @@ -172,7 +172,8 @@ size_t app_protocol_device_hello(char *buf, size_t cap, int proto) {
@@ -34,11 +83,26 @@ index 694d949..b7f3ff9 100644
      size_t n = serialize(o, buf, cap);
      cJSON_Delete(o);
      return n;
+@@ -195,6 +199,14 @@ size_t app_protocol_voice_end(char *buf, size_t cap) {
+     return n;
+ }
+ 
++size_t app_protocol_session_abort(char *buf, size_t cap) {
++    cJSON *o = cJSON_CreateObject();
++    cJSON_AddStringToObject(o, "event", "session.abort");
++    size_t n = serialize(o, buf, cap);
++    cJSON_Delete(o);
++    return n;
++}
++
+ size_t app_protocol_device_status(char *buf, size_t cap, uint32_t drop_count) {
+     cJSON *o = cJSON_CreateObject();
+     cJSON_AddStringToObject(o, "event", "status");
 diff --git a/main/app_protocol.h b/main/app_protocol.h
-index 490f897..5dd3b0b 100644
+index 490f897..f46cf51 100644
 --- a/main/app_protocol.h
 +++ b/main/app_protocol.h
-@@ -24,7 +24,8 @@ void app_protocol_dispatch_event(const app_event_t *ev);
+@@ -24,8 +24,13 @@ void app_protocol_dispatch_event(const app_event_t *ev);
  
  // 设备→Mac 序列化。返回写入字节数(不含 NUL);失败返回 0。
  size_t app_protocol_device_hello(char *buf, size_t cap, int proto);
@@ -46,10 +110,40 @@ index 490f897..5dd3b0b 100644
 +size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format,
 +                                bool note);
  size_t app_protocol_voice_end(char *buf, size_t cap);
++// 用户在识别期退出该次会话(音量+/OK 单击)。设备自己已经回 READY 并会丢弃
++// 迟到的转写文本,但那只是设备侧的视图 —— Mac 仍在跑 ASR 且会把结果注入到
++// 输入框。没有这一帧,"取消"就只是把设备屏幕清干净,用户的话照样被打出来。
++size_t app_protocol_session_abort(char *buf, size_t cap);
  // 上行按键动作(enter/clear,PC client 执行注入;见 key-remap 任务)
  size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action);
+ // decision: app_approval_decision_t (approve/reject/details)
+diff --git a/main/app_sound.c b/main/app_sound.c
+index c50b30e..3e7bafb 100644
+--- a/main/app_sound.c
++++ b/main/app_sound.c
+@@ -84,12 +84,14 @@ esp_err_t app_sound_init(void) {
+         ESP_LOGE(TAG, "bsp_audio_init 失败: %s", esp_err_to_name(e));
+         return e;
+     }
+-    e = bsp_audio_set_format(SAMPLE_RATE, 16, 1);
+-    if (e != ESP_OK) {
+-        ESP_LOGE(TAG, "bsp_audio_set_format 失败: %s", esp_err_to_name(e));
+-        return e;
+-    }
+-    bsp_audio_set_volume(80);
++    // 这里【不】调 bsp_audio_set_format(2026-09-02 省电):它会 esp_codec_dev_open,
++    // 把 5V 功放引脚拉高并一直保持到 close —— 而全程只用 16kHz,换格式那条 close
++    // 路径永不触发,于是开机就常开到关机。提示音已全部取消(用户:"每次按的时候
++    // 还有一个声音…感觉有点费电"),codec 现在唯一的用户是录音,开关交给
++    // audio_streamer_start/stop 跟着会话走。bsp_audio_init 仍要调:它只建 I2S
++    // 通道与 codec 句柄(不上电),audio_streamer 依赖句柄存在。
++    // ⚠ 若将来恢复任何提示音,播放前必须自己 set_format、播完 close ——
++    //   否则要么无声(codec 未打开),要么又回到常开耗电。
+ 
+     s_queue = xQueueCreateStatic(APP_TONE_COUNT, sizeof(uint8_t),
+                                  s_queue_storage, &s_queue_struct);
 diff --git a/main/app_state.c b/main/app_state.c
-index 2a00cf8..0dbb3a9 100644
+index 2a00cf8..7156dff 100644
 --- a/main/app_state.c
 +++ b/main/app_state.c
 @@ -101,7 +101,10 @@ static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
@@ -64,7 +158,7 @@ index 2a00cf8..0dbb3a9 100644
      s->screen_on = true;
      s->panel_on = true;
      // 开机即按"未连接"渲染(无 Mac 时不会收到断开事件,初始 true 会一直误判为
-@@ -169,8 +172,8 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
+@@ -169,27 +172,28 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
      emit(out, n, max, a);
  }
  
@@ -74,17 +168,73 @@ index 2a00cf8..0dbb3a9 100644
 +static void start_ptt(app_state_t *s, uint64_t now_ms, bool note,
                        app_action_t *out, uint8_t *n, uint8_t max) {
      if (!s->link_up) {
++        // 离线被拒:原先靠 180Hz 错误音告知,全局静音后只剩屏幕 —— toast 加一次
++        // 刷新就是全部反馈了(2026-09-02)。这条分支已经有 UI_REFRESH,足够。
          set_toast(s, now_ms, "OFFLINE - PTT blocked");
-@@ -187,6 +190,8 @@ static void start_ptt(app_state_t *s, uint64_t now_ms,
-         app_action_t t = { .type = APP_ACT_PLAY_TONE };
-         t.u.tone = APP_TONE_START;
-         emit(out, n, max, t);
-+        // 先落标记:main.c 序列化 voice.start 时读 s_state.note_session。
-+        s->note_session = note;
+-        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+-        t.u.tone = APP_TONE_ERROR;
+-        emit(out, n, max, t);
+         app_action_t r = { .type = APP_ACT_UI_REFRESH };
+         emit(out, n, max, r);
+     } else {
+-        // 分帧时序:滴声 → voice.start → 开流由 TONE_DONE 驱动(播放完成才采,
+-        // 避免 codec 分时冲突 + 滴声不被录进音频)。app_task 不同步阻塞播滴声;
+-        // sound_worker 优先级 5(高于 app_task/LVGL,2026-08-29 由 3 提升)保证
+-        // 这 80ms 立刻播完 —— 否则它排在 LISTENING 全屏刷新后面,开流要等 ~578ms。
+-        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+-        t.u.tone = APP_TONE_START;
+-        emit(out, n, max, t);
++        // 静音(2026-09-02 用户要求:"每次按的时候还有一个声音"):滴声全部取消。
++        // 但它原先是承重的 —— 开流由 TONE_DONE 驱动(等滴声播完才采集,避免滴声
++        // 被录进音频 + 避开 codec 分时冲突)。没有滴声就没有 TONE_DONE,只剩
++        // handle_tick 里 APP_TONE_PENDING_TIMEOUT_MS 那条兜底 → 每次白等 200ms
++        // 才开始采集,用户张嘴第一个字被吞。所以这里直接开流:不放音就不存在
++        // 分时冲突,也没有滴声可录进去,那道门禁失去了存在的理由。
++        s->note_session = note;   // 先落标记:main.c 序列化 voice.start 时读它
++        app_action_t st = { .type = APP_ACT_STREAM_START };
++        emit(out, n, max, st);
          app_action_t v = { .type = APP_ACT_SEND_VOICE_START };
          emit(out, n, max, v);
-         s->stream_started = false;
-@@ -342,6 +347,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+-        s->stream_started = false;
++        s->stream_started = true;
+         s->state = APP_ST_LISTENING;
+         s->state_since_ms = now_ms;
+     }
+@@ -233,8 +237,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+     // 记录 UP 键最近一次 PRESS 回调读数(2026-08-28):真实按压 3-5mV(手指在
+     // 键上),假按(射频腐蚀)2890mV(无人按键)。CLICK 回调时刻用户已松手,mv
+     // 恒 2890 —— 真假单击只能从 PRESS 读数区分(TRANSCRIBING 退出判定用)。
++    // OK 键同理(2026-09-02 取消能力):速记的取消单击落在 OK 上。
+     if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
+         s->last_up_press_mv = ev->u.key.mv;
++    } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
++        s->last_ok_press_mv = ev->u.key.mv;
+     }
+     // 息屏 = 自动息屏的省电显示态(非锁定):按键先恢复显示,事件照常放行执行。
+     // 锁定态见下方 locked 门禁:操作照常放行但不亮屏(与自动息屏的唤醒是两回事)。
+@@ -317,16 +324,16 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+     // LONG_PRESS_START/LONG_PRESS_UP,不再补报 SINGLE_CLICK —— 想清空的时候绝不会
+     // 先把内容发出去(这正是"清空放双击"做不到的一点,见文件头键位注释)。
+     // 幽灵长按拦截:回调时刻 mv 已回松开电平 = 无人按键(射频腐蚀残留),丢弃。
+-    // 长按到点即清空并给一声提示音 —— 用户无法凭手感知道 500ms 到了没有,和
+-    // 开录音的滴声同理(这是阈值确认音,不是状态音,不违反"转写期静音")。
++    // 到点的反馈改用屏幕 toast(2026-09-02 全局静音):用户无法凭手感知道 500ms
++    // 到了没有,这个确认不能一起删掉 —— 但它不必是声音,清空是盯着屏幕做的动作。
+     if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_DOWN) {
+         if (key_ev_is_fake(ev)) {   // 等价于 mv >= PTT_FAKE_LONG_MV,口径集中在一处
+             return;
+         }
+         send_key_action(s, APP_KEY_CLEAR, out, n, max);
+-        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+-        t.u.tone = APP_TONE_REJECT;   // 220Hz/120ms,清空确认
+-        emit(out, n, max, t);
++        set_toast(s, now_ms, "Cleared");
++        app_action_t r = { .type = APP_ACT_UI_REFRESH };
++        emit(out, n, max, r);
+         return;
+     }
+ 
+@@ -342,6 +349,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
      case APP_ST_READY:
          if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
              send_key_action(s, APP_KEY_ENTER, out, n, max);
@@ -96,7 +246,7 @@ index 2a00cf8..0dbb3a9 100644
          } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
              // 音量加"按下即录"(2026-08-29,取代原先等 0.5s 长按判定):真机实测
              // 按下到真正 `采集开始` 要 ~1.01s —— 428ms 花在长按阈值上,另外 578ms
-@@ -367,7 +377,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+@@ -367,7 +379,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
              if (ev->u.key.mv > PTT_UP_PRESS_MAX_MV) {
                  break;
              }
@@ -105,7 +255,7 @@ index 2a00cf8..0dbb3a9 100644
          }
          break;
  
-@@ -378,7 +388,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+@@ -378,7 +390,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
          // 录音期间清空不可达:三档分压键同时按下 UP+DOWN 只会读出更低的那一档,
          // DOWN 长按压根形成不了。
          if ((ev->type == APP_EV_KEY_LONG_UP || ev->type == APP_EV_KEY_RELEASE) &&
@@ -114,20 +264,220 @@ index 2a00cf8..0dbb3a9 100644
              // 误触收口:不足 PTT_MIN_TALK_MS 就松手 = 误碰或轻点,里面不可能有
              // 语音。丢掉音频、把会话收束回 READY,不进转写。
              if (now_ms - s->state_since_ms < PTT_MIN_TALK_MS) {
+@@ -410,9 +422,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+             str_cpy(a.u.agent_action.task_id, sizeof(a.u.agent_action.task_id), s->task_id);
+             a.u.agent_action.decision = APP_ACTION_REJECT;
+             emit(out, n, max, a);
+-            app_action_t t = { .type = APP_ACT_PLAY_TONE };
+-            t.u.tone = APP_TONE_REJECT;
+-            emit(out, n, max, t);
+             s->state = APP_ST_AGENT_RUNNING;
+             s->state_since_ms = now_ms;
+             str_cpy(s->agent_message, sizeof(s->agent_message), "Rejected by user");
+@@ -425,15 +434,24 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+         break;
+ 
+     case APP_ST_TRANSCRIBING:
+-        // 音量+单击:退出转写场景(2026-08-28 用户需求)——不等识别结果,直接
+-        // 回 READY。迟到的识别文本由 APP_EV_TRANSCRIPT 的 READY/HOME 门禁丢弃。
++        // 单击退出转写场景(2026-08-28 用户需求)——不等识别结果,直接回 READY。
++        // 迟到的识别文本由 APP_EV_TRANSCRIPT 的 READY/HOME 门禁丢弃,并发
++        // session.abort 让 Mac 也撤销注入(2026-09-02:此前只清设备屏幕,Mac
++        // 照样把放弃掉的那句话打进输入框 —— 取消是假的)。
+         // 真实单击的 PRESS 回调 mv=3-5(手指在键上);假按的 PRESS 读数落在别的
+         // 分压档(2890 松开电平 / 598 跨档)→ 用 PRESS 读数区分真假单击(CLICK
+         // 回调时刻用户已松手,mv 恒 2890,不可用)。按下即录不影响这里:转写态
+         // 没有 PRESS 分支,新会话只能从 READY 起。
+-        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP &&
+-            s->last_up_press_mv <= PTT_UP_PRESS_MAX_MV) {
+-            abort_to_ready(s, now_ms, NULL, out, n, max);
++        // UP 与 OK 都可取消:速记(OK 键起录)的手指本来就在 OK 上,只留 UP 会
++        // 逼用户换键。两键在转写态都没有别的语义,READY 态的 OK 也只有 PRESS
++        // (开录)/LONG(锁屏),CLICK 是空的,故互不干扰。
++        if (ev->type == APP_EV_KEY_CLICK &&
++            ((b == APP_BTN_UP && s->last_up_press_mv <= PTT_UP_PRESS_MAX_MV) ||
++             (b == APP_BTN_OK && s->last_ok_press_mv >= OK_PRESS_MIN_MV &&
++              s->last_ok_press_mv <= OK_PRESS_MAX_MV))) {
++            app_action_t a = { .type = APP_ACT_SEND_SESSION_ABORT };
++            emit(out, n, max, a);
++            abort_to_ready(s, now_ms, "Discarded", out, n, max);
+         }
+         break;
+ 
+@@ -474,23 +492,31 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
+         }
+     }
+ 
++    // codec 空闲释放(2026-09-02):放在 screen_on 门禁【之前】—— 走开不碰设备
++    // 正是屏幕已经熄掉的场景,放在下面就永远等不到这一刻(那道 return 挡住的是
++    // 状态超时,不该连省电一起挡)。
++    // 与录音的竞态由 audio_streamer_release_codec 兜住(采集中拒绝执行);这里
++    // 额外排除 LISTENING,免得在明显不该释放时白发一条动作。
++    if (s->codec_idle_since_ms != 0 && s->state != APP_ST_LISTENING &&
++        now_ms - s->codec_idle_since_ms >= APP_CODEC_IDLE_MS) {
++        s->codec_idle_since_ms = 0;
++        app_action_t c = { .type = APP_ACT_CODEC_RELEASE };
++        emit(out, n, max, c);
++    }
++
+     if (!s->screen_on) return;
+ 
+     // 状态超时
+     const uint64_t elapsed = now_ms - s->state_since_ms;
+     switch (s->state) {
+     case APP_ST_LISTENING:
+-        // S3 兜底:滴声队列满/声音任务异常 → TONE_DONE 永不来的场景,超时强制开流
+-        // (宁可无滴声也不让 PTT 卡死无声)。
+-        if (!s->stream_started && elapsed >= APP_TONE_PENDING_TIMEOUT_MS) {
+-            app_action_t st = { .type = APP_ACT_STREAM_START };
+-            emit(out, n, max, st);
+-            s->stream_started = true;
+-        }
++        // 原先这里有一条"TONE_DONE 没来就超时强制开流"的兜底(APP_TONE_PENDING_TIMEOUT_MS)。
++        // 全局静音后 start_ptt 直接开流、当场置 stream_started,那个场景不复存在,
++        // 留着只会让人以为开流还要等什么(2026-09-02)。
+         // 说话时长兜底(2026-08-29 新增,见 APP_PTT_MAX_TALK_MS):松开事件丢失
+         // 时 LISTENING 会永久滞留。到点按"正常松手"处理 —— 已录内容照常进转写,
+         // 不给错误提示(真人一口气到不了 60s,正常路径不可达)。
+-        else if (elapsed >= APP_PTT_MAX_TALK_MS) {
++        if (elapsed >= APP_PTT_MAX_TALK_MS) {
+             end_ptt(s, now_ms, out, n, max);
+         }
+         break;
+@@ -608,9 +634,10 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+         s->approval_risk = ev->u.approval.risk < APP_RISK_COUNT ? ev->u.approval.risk : APP_RISK_MEDIUM;
+         s->state = APP_ST_APPROVAL;
+         s->state_since_ms = now_ms;
+-        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+-        t.u.tone = APP_TONE_APPROVAL;
+-        emit(out, out_n, max, t);
++        // 审批提醒音也一并静音(2026-09-02):这是六声里唯一"值得响"的一声 ——
++        // 它要把注意力从别处拽回屏幕(防口袋盲批,故下面还强制解锁亮屏)。但语音
++        // 输入用不到审批场景,Mac 端从不发 approval.request,响不响都轮不到。
++        // 若将来接回 Agent 审批,这里应该是第一个恢复出声的地方。
+         app_action_t r = { .type = APP_ACT_UI_REFRESH };
+         emit(out, out_n, max, r);
+         break;
+@@ -713,13 +740,10 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+         break;
+ 
+     case APP_EV_TONE_DONE:
+-        // START 提示音播放完成:开流(幂等)。非 LISTENING(误触收口/断链已离开)
+-        // 或流已开 → 忽略,保证"滴声先于采集"且取消期间不误开流。
+-        if (s->state == APP_ST_LISTENING && !s->stream_started) {
+-            app_action_t st = { .type = APP_ACT_STREAM_START };
+-            emit(out, out_n, max, st);
+-            s->stream_started = true;
+-        }
++        // 全局静音后不再有提示音,这个事件也就没人发了(2026-09-02)。留空分支
++        // 而不是删枚举:app_events 的队列里可能还压着一条旧事件,静默忽略即可。
++        // 开流已在 start_ptt 当场完成,这里绝不能再发 STREAM_START —— 否则一次
++        // 会话开两次流。
+         break;
+ 
+     case APP_EV_TICK:
+@@ -769,4 +793,19 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+         }
+         break;
+     }
++
++    // codec 空闲计时的唯一维护点(2026-09-02)。从本次产出的动作反推,而不是
++    // 在六处 STREAM_* emit 点各写一遍 —— 那六处散在按键、超时、断链、音频错误
++    // 四条路径里,漏一处的症状是"功放悄悄常开",没有任何报错。
++    //  - STREAM_START:codec 刚打开,清计时(录音中不该被释放)
++    //  - STREAM_STOP / STREAM_CANCEL:录音结束,从此刻起算空闲
++    // handle_tick 的 CODEC_RELEASE 自己会把 codec_idle_since_ms 归零。
++    for (uint8_t i = 0; i < *out_n; i++) {
++        if (out[i].type == APP_ACT_STREAM_START) {
++            s->codec_idle_since_ms = 0;
++        } else if (out[i].type == APP_ACT_STREAM_STOP ||
++                   out[i].type == APP_ACT_STREAM_CANCEL) {
++            s->codec_idle_since_ms = now_ms ? now_ms : 1;   // 0 是"无需释放"的哨兵
++        }
++    }
+ }
 diff --git a/main/app_state.h b/main/app_state.h
-index 5ae5e29..af5cf4e 100644
+index 5ae5e29..037388b 100644
 --- a/main/app_state.h
 +++ b/main/app_state.h
-@@ -33,6 +33,7 @@ typedef struct {
+@@ -30,9 +30,16 @@ typedef struct {
+                                      // 按键)。CLICK 回调时刻用户已松手(mv 恒
+                                      // 2890),真假只能从 PRESS 读数区分 ——
+                                      // TRANSCRIBING 态单击退出判定用(见 state.c)
++    uint16_t       last_ok_press_mv; // OK 键最近 PRESS 回调读数,同上但档位不同
++                                     // (OK 档 447-1900)。速记会话的取消单击落在
++                                     // OK 上,同样得靠 PRESS 读数排除幽灵事件。
      uint64_t       ble_connect_ms;  // BLE 连接时刻(连接握手期密集射频 → 假长按,抑制 PTT)
-     uint64_t       toast_until_ms;
+-    uint64_t       toast_until_ms;
++    // codec 空闲释放(2026-09-02,见 APP_CODEC_IDLE_MS):最近一次录音结束的时刻。
++    // 0 = 没有待释放的 codec(从未录过,或已经关掉了)—— 兼作"是否还欠一次
++    // CODEC_RELEASE"的标志,省一个 bool。
++    uint64_t       codec_idle_since_ms;    uint64_t       toast_until_ms;
      bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)
 +    bool           note_session;    // 本会话是速记(OK 键起录):Mac 端只存不注入
      char           toast[APP_TOAST_MAX];
      char           agent_message[APP_AGENT_MSG_MAX];
      bool           transcript_final;   // false → agent_message 是转写预览(未定稿);true = 定稿/非转写
+diff --git a/main/app_types.h b/main/app_types.h
+index 62a8778..7cba073 100644
+--- a/main/app_types.h
++++ b/main/app_types.h
+@@ -162,10 +162,12 @@ typedef enum {
+     APP_ACT_SEND_VOICE_START,
+     APP_ACT_SEND_VOICE_END,
+     APP_ACT_SEND_KEY_ACTION,   // 上行按键动作(enter/clear,PC client 执行注入)
++    APP_ACT_SEND_SESSION_ABORT,  // 上行"用户放弃本次会话"(识别期单击退出),Mac 端撤销注入
+     APP_ACT_SEND_AGENT_ACTION,
+     APP_ACT_STREAM_START,
+     APP_ACT_STREAM_STOP,
+     APP_ACT_STREAM_CANCEL,   // 取消/断链:停采集 + 清空 ring + 丢弃在途帧(与 STOP 区别:不排空发送)
++    APP_ACT_CODEC_RELEASE,   // 久未说话 → 关 codec 断 5V 功放(见 APP_CODEC_IDLE_MS)
+     APP_ACT_PLAY_TONE,
+     APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
+ } app_action_type_t;
+@@ -173,10 +175,14 @@ typedef enum {
+ // 单事件最多产出的动作数。emit() 满了就静默丢弃,所以这个值必须 ≥ 最长的
+ // 那一条归约路径,否则丢的是尾部动作 —— 4 → 6(2026-08-29):息屏/断电态按
+ // 音量加开录音是最长路径,唤醒三连(UI_PANEL_ON + UI_SCREEN_ON + UI_REFRESH)
+-// 之后还有 PLAY_TONE + SEND_VOICE_START = 5 条,第 5 条正好被丢 —— 结果是
+-// 滴声照响、采集照开,而 Mac 侧从没收到 voice.start(整段话进不了 ASR)。
+-// 同长的还有"息屏 + 音量减长按清空"(唤醒三连 + SEND_KEY_ACTION + PLAY_TONE)
+-// 与离线 PTT(唤醒三连 + PLAY_TONE(ERROR) + UI_REFRESH)。取 6 留一条余量。
++// 之后还有两条,第 5 条正好被丢 —— 结果是采集照开,而 Mac 侧从没收到
++// voice.start(整段话进不了 ASR)。
++// 2026-09-02 全局静音后重新点算:最长路径仍是"面板断电 + 按 UP 开录",
++// 五条(唤醒三连 + STREAM_START + SEND_VOICE_START)—— PLAY_TONE 让位给了
++// STREAM_START,条数不变。同长的还有"息屏 + 音量减长按清空"(唤醒三连 +
++// SEND_KEY_ACTION + UI_REFRESH)与取消会话(SEND_SESSION_ABORT + UI_REFRESH)。
++// TICK 最多产出四条(toast 过期 + SCREEN_OFF + PANEL_OFF + CODEC_RELEASE)。
++// 取 6 留一条余量。改动任一路径请回来重算,这个上限没有编译期检查。
+ #define APP_ACT_MAX 6
+ 
+ typedef struct {
+@@ -221,13 +227,14 @@ typedef struct {
+ #define APP_TRANSCRIBE_TIMEOUT  30000u   // 转写等待超时
+ #define APP_AGENT_RUN_TIMEOUT   90000u   // Agent 执行超时
+ #define APP_TICK_MS             100u     // 应用任务心跳
+-// S3:START 音后未收 TONE_DONE 的最大等待(兜底开流)。500 → 200(2026-08-29):
+-// 滴声本身只有 80ms,500ms 的余量是给"声音任务被挤住"留的,可它同时也是 PTT 最
+-// 坏延迟 —— 真机抓到过一次按下到开录 622ms(= 本值 + APP_TICK_MS 粒度),用户已
+-// 在说话而设备还没开录。降到 200 仍有 2.5 倍余量;代价是滴声真被拖慢时会与采集
+-// 重叠(前几帧录进 440Hz),只发生在退化路径,可接受。兜底触发在串口留痕
+-// (main.c 心跳里辨认 STREAM_START),下次再慢可直接看日志而不是猜。
+-#define APP_TONE_PENDING_TIMEOUT_MS 200u
++// codec 空闲释放(2026-09-02):录音结束后不立刻关 codec,再等这么久没有新的
++// 录音才关 —— 关掉能断 5V 功放(持续毫安级),但重开要几十毫秒 codec 冷启动,
++// 用户实测"稍微慢一点点"。连续口述时每句间隔远小于本值,codec 保持热态、零
++// 延迟;真正放下设备走开才付一次关闭。这是省电与首字延迟之间的取舍点,不是
++// 阈值精度问题,所以取一个宽松的整数值。
++// 与息屏那两档(20s/60s)刻意不同量级:息屏是"看不看得见",这里是"说不说话",
++// 5 分钟内再开口是同一场口述的常态。
++#define APP_CODEC_IDLE_MS       300000u  // 5 分钟无录音 → 关 codec
+ // PTT 最长单次说话(2026-08-29 新增):LISTENING 原本是唯一没有退出超时的状态
+ // —— 松开事件一旦丢了(on_key 走 post_important(100ms),队列满仍可能丢),设备就
+ // 永久 LISTENING:一直采集、一直占着会话 PM 锁(进不了低功耗)、Mac 侧挂着永不
 diff --git a/main/app_ui.c b/main/app_ui.c
-index c29bd06..96776ed 100644
+index c29bd06..919771f 100644
 --- a/main/app_ui.c
 +++ b/main/app_ui.c
 @@ -3,6 +3,8 @@
@@ -338,22 +688,30 @@ index c29bd06..96776ed 100644
  }
  
  static void build_transcribing(void)
-@@ -227,9 +313,11 @@ static void build_transcribing(void)
+@@ -227,9 +313,19 @@ static void build_transcribing(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
 -    label(p->root, "Transcribing...", &lv_font_montserrat_20, UI_INK, 0, 96, W);
 -    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 140, 200);
 -    hint_label(p->root, "PLEASE WAIT");
-+    // 识别中:思考的表情。这一页用户什么都不用做,所以不给按键提示 —— 原先底部
-+    // 写 "PLEASE WAIT",既是命令句又占一行。
++    // 识别中:思考的表情。原先底部写 "PLEASE WAIT",既是命令句又占一行。
++    // 现在那一行给取消用(2026-09-02):这是唯一能放弃这句话的窗口,不写出来
++    // 用户就找不到 —— 三键共用一条分压梯,录音期间按第二颗键读不出来,所以
++    // 取消只可能发生在松开之后的这几秒里。
 +    pet_image(p->root, &pet_think, 96);
 +    label(p->root, "Transcribing", &lv_font_montserrat_14, UI_MUTED, 0, 212, W);
 +    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 236, 200);
++    // 转写文本最多 128B,默认 WRAP 会把标签一路撑高盖住下面的提示行(240 宽 /
++    // 14px 字体每行约 26 个 ASCII → 一条长句能占五行,越过 HINT_Y 甚至越过屏底)。
++    // 高度锁两行、超出打点:这里只是预览,完整文本在 Mac 上。
++    lv_obj_set_height(p->tr_message, 40);
++    lv_label_set_long_mode(p->tr_message, LV_LABEL_LONG_MODE_DOTS);
++    hint_label(p->root, "tap UP or OK to discard");
  }
  
  static void build_running(void)
-@@ -243,12 +331,11 @@ static void build_running(void)
+@@ -243,12 +339,11 @@ static void build_running(void)
      lv_obj_set_size(p->root, W, H);
      lv_obj_set_pos(p->root, 0, 0);
  
@@ -370,7 +728,7 @@ index c29bd06..96776ed 100644
  }
  
  static void build_approval(void)
-@@ -276,7 +363,7 @@ static void build_approval(void)
+@@ -276,7 +371,7 @@ static void build_approval(void)
      lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
      lv_obj_set_height(p->ap_diff, 88);
  
@@ -379,7 +737,7 @@ index c29bd06..96776ed 100644
  }
  
  static void set_hidden(lv_obj_t *o, bool hidden)
-@@ -368,14 +455,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
+@@ -368,14 +463,17 @@ void app_ui_render(const app_ui_snapshot_t *snap)
      }
  
      // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
@@ -402,6 +760,78 @@ index c29bd06..96776ed 100644
      if (snap->toast[0]) {
          label_set_if_changed(s_toast, snap->toast);
          set_hidden(lv_obj_get_parent(s_toast), false);
+diff --git a/main/audio_streamer.c b/main/audio_streamer.c
+index f4b0595..92f1bd7 100644
+--- a/main/audio_streamer.c
++++ b/main/audio_streamer.c
+@@ -250,6 +250,16 @@ esp_err_t audio_streamer_init(void) {
+ esp_err_t audio_streamer_start(void) {
+     if (!s_ready) return ESP_ERR_INVALID_STATE;   // init 失败:启动被拒(空转,不访问 NULL ring/sem)
+     if (s_active) return ESP_OK;                  // 幂等:已在会话中
++    // codec 按会话开关(2026-09-02 省电):esp_codec_dev_open 会把 5V 功放引脚
++    // 拉高并保持,原先开机播第一声提示音就打开、直到关机都不关 —— 持续毫安级。
++    // 提示音已全部取消,这里是唯一还需要 codec 的地方,所以开关跟着录音会话走。
++    // 几十毫秒的 open 开在 SEND_VOICE_START 之前,不吃掉用户的第一个字:Mac 侧
++    // 要等 voice.start 才建 ASR 连接,那条链路本身就比这慢。
++    esp_err_t e = bsp_audio_set_format(16000, 16, 1);
++    if (e != ESP_OK) {
++        ESP_LOGE(TAG, "codec 打开失败 (%s),不开流", esp_err_to_name(e));
++        return e;
++    }
+     // 会话 token:每个新会话取新值,环内残留/在途 item(旧 token)在 ble_worker
+     // 被静默丢弃 —— 残留绝不流入新会话,start 永不因残留拒绝(无排空门禁,
+     // 见 CHUNK_ITEM_BYTES 注释;cancel 后无需等环空即可立即重开)。
+@@ -278,6 +288,10 @@ void audio_streamer_stop(void) {
+                  (unsigned)uxTaskGetStackHighWaterMark(s_ble_task));
+     }
+     ESP_LOGI(TAG, "采集停止");
++    // 这里【不】关 codec:关掉能断 5V 功放,但重开要几十毫秒冷启动,用户实测
++    // "第一个字稍微慢一点点"。改由状态机在 APP_CODEC_IDLE_MS 无录音后发
++    // CODEC_RELEASE(2026-09-02)—— 连续口述时 codec 保持热态、零延迟,真正
++    // 放下设备走开才付一次关闭。释放入口见 audio_streamer_release_codec()。
+ }
+ 
+ void audio_streamer_cancel(void) {
+@@ -293,10 +307,22 @@ void audio_streamer_cancel(void) {
+     s_active = false;
+     wait_worker_exit(WORKER_EXIT_TIMEOUT_MS);
+     ESP_LOGI(TAG, "采集取消(残留由 token 失效丢弃)");
++    // 同 stop:codec 留着热,由状态机的空闲计时决定何时释放。
+ }
+ 
+-bool audio_streamer_active(void) { return s_active; }
++// 释放 codec:关 ES8311 + 断 5V 功放(见头文件)。采集进行中拒绝执行 ——
++// 空闲计时与"新一次录音开始"之间存在竞态窗口(计时到点的那一刻用户正好按下),
++// 真关下去就是把正在录的音掐成静音。这里挡住比在状态机里排队更可靠:唯一
++// 知道采集是否在跑的是本模块。
++void audio_streamer_release_codec(void) {
++    if (s_active) {
++        ESP_LOGW(TAG, "codec 释放被拒:采集进行中");
++        return;
++    }
++    bsp_audio_close();   // 幂等:未打开时空转
++}
+ 
++bool audio_streamer_active(void) { return s_active; }
+ uint16_t audio_streamer_peak(void) { return s_peak; }
+ 
+ uint32_t audio_streamer_take_drops(void) {
+diff --git a/main/audio_streamer.h b/main/audio_streamer.h
+index 14c6eaf..3f261a2 100644
+--- a/main/audio_streamer.h
++++ b/main/audio_streamer.h
+@@ -39,6 +39,11 @@ void audio_streamer_stop(void);        // 停止采集(发送 worker 继续排
+ // token 失效静默丢弃——快速返回(不等环空,无排空门禁)。
+ // 幂等:采集已停(STOP 后断链)时同样成立(残留 token 已作废)。
+ void audio_streamer_cancel(void);
++// 释放 codec(关 ES8311 + 断 5V 功放)。stop/cancel 【不】做这件事:重开 codec
++// 有几十毫秒冷启动,会吃掉下一句的第一个字。由状态机在 APP_CODEC_IDLE_MS 无
++// 录音后发 APP_ACT_CODEC_RELEASE 触发 —— 连续口述保持热态,走开才真正断电。
++// 幂等;采集进行中调用会被拒(不会把正在录的音掐掉)。
++void audio_streamer_release_codec(void);
+ // 等待环内残留数据发送完(最多 ms)。voice.end 前调用保证帧序。
+ void audio_streamer_drain(uint32_t ms);
+ bool audio_streamer_active(void);
 diff --git a/main/console_cmds.c b/main/console_cmds.c
 index 455a996..944ef81 100644
 --- a/main/console_cmds.c
@@ -458,7 +888,7 @@ index 455a996..944ef81 100644
      reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
      return ESP_OK;
 diff --git a/main/main.c b/main/main.c
-index 9afea03..24b5ac4 100644
+index 9afea03..03749fb 100644
 --- a/main/main.c
 +++ b/main/main.c
 @@ -215,7 +215,8 @@ static void run_actions(const app_action_t *acts, uint8_t n)
@@ -471,6 +901,80 @@ index 9afea03..24b5ac4 100644
              send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
              break;
          case APP_ACT_SEND_VOICE_END:
+@@ -240,6 +241,13 @@ static void run_actions(const app_action_t *acts, uint8_t n)
+                      len ? "sent" : "encode-fail");
+             send_event_line(buf, len);
+             break;
++        case APP_ACT_SEND_SESSION_ABORT:
++            len = app_protocol_session_abort(buf, sizeof(buf));
++            // 会话边界帧:不丢。丢了这一帧的后果不是"少一条日志",而是用户明确
++            // 放弃的那句话照样被 Mac 打进输入框 —— 与 voice.end 同等重要。
++            send_event_line_important(buf, len);
++            ESP_LOGW("key", "session.abort -> %s", len ? "sent" : "encode-fail");
++            break;
+         case APP_ACT_SEND_AGENT_ACTION:
+             len = app_protocol_agent_action(buf, sizeof(buf),
+                                             a->u.agent_action.task_id,
+@@ -272,29 +280,19 @@ static void run_actions(const app_action_t *acts, uint8_t n)
+             audio_streamer_cancel();
+             pm_session_unlock();
+             break;
++        case APP_ACT_CODEC_RELEASE:
++            // 久未说话 → 关 codec 断 5V 功放(见 APP_CODEC_IDLE_MS)。不碰 PM 锁:
++            // 会话锁早在 STREAM_STOP/CANCEL 就放了,这里只是迟到的硬件断电。
++            audio_streamer_release_codec();
++            break;
+         case APP_ACT_TIME_SET:
+             // 校时落地:写系统时间 + 置校时标志(app_task 上下文,单写点)
+             time_sync_set_epoch(a->u.time_set.epoch);
+             break;
+         case APP_ACT_PLAY_TONE:
+-            // S3:START 改异步播放,开流由 sound_worker 播完后的 TONE_DONE 事件驱动
+-            // (app_state 归约,分时语义保持:滴声先于采集)。app_task 不再阻塞 80ms。
+-            // 入队失败(队列满,罕见)兜底:无滴声,立即开流,防 PTT 卡死无声。
+-            if (a->u.tone == APP_TONE_START) {
+-                if (!app_sound_play(APP_TONE_START)) {
+-                    s_state.stream_started = true;   // 同任务上下文,与 reduce 一致
+-                    mode_select_audio_sender(s_state.link_channel);   // 兜底路径同样按通道选发送器
+-                    pm_session_lock();   // 与 STREAM_START 同语义(静音兜底开流)
+-                    if (audio_streamer_start() != ESP_OK) {
+-                        // 兜底路径同样检查:开流失败 → 回 READY + toast(REVIEW P2-C)
+-                        pm_session_unlock();
+-                        app_event_t ev = { .type = APP_EV_AUDIO_ERROR };
+-                        app_event_post(&ev);
+-                    }
+-                }
+-            } else {
+-                app_sound_play((app_tone_t)a->u.tone);
+-            }
++            // 全局静音(2026-09-02 用户要求):状态机不再产出这个动作,保留分支
++            // 只为 switch 穷尽。恢复出声要连带处理 codec 开关 —— app_sound_init
++            // 已不再打开 codec(省电),播放前得自己 set_format、播完 close。
+             break;
+         }
+     }
+@@ -396,18 +394,9 @@ static void app_task(void *arg)
+             app_event_t t = { .type = APP_EV_TICK };
+             uint8_t n = 0;
+             app_state_reduce(&s_state, &t, now_ms, acts, &n);
+-            // 诊断(2026-08-29):心跳里出现 STREAM_START 只有一个来源 ——
+-            // LISTENING 的滴声兜底超时(APP_TONE_PENDING_TIMEOUT_MS,TONE_DONE
+-            // 没来)。归约器是纯 C 不打日志,故在这里辨认并留痕:真机上"这一按
+-            // 开录音明显慢"就能一眼分清是兜底路径(慢 ≥200ms)还是正常路径
+-            // (~60ms),不必再靠时间戳反推(8-29 有一次 622ms 就是这么猜的)。
+-            for (uint8_t i = 0; i < n; i++) {
+-                if (acts[i].type == APP_ACT_STREAM_START) {
+-                    ESP_LOGW(TAG, "滴声兜底开流:等 TONE_DONE 超时 %ums",
+-                             (unsigned)APP_TONE_PENDING_TIMEOUT_MS);
+-                    break;
+-                }
+-            }
++            // 心跳里再也不会出现 STREAM_START(滴声兜底那条路径已随全局静音删除,
++            // 2026-09-02)。原先这里有一条诊断日志辨认它,现在留着只会对新增的
++            // CODEC_RELEASE 误报,故一并删除。
+             run_actions(acts, n);
+             tick_acted = (n > 0);      // TICK 产生动作(toast 过期/超时/息屏) → 需渲染
+             next_tick = now_ms + APP_TICK_MS;
 diff --git a/main/nvs_settings.c b/main/nvs_settings.c
 index 6f86eb4..6fa395d 100644
 --- a/main/nvs_settings.c
@@ -549,3 +1053,754 @@ index 5ce09b3..c2bb22d 100644
  void nvs_settings_factory_reset(void);   // 清 "app" 命名空间
  
  #ifdef __cplusplus
+diff --git a/tests/fake/fake_rtos.c b/tests/fake/fake_rtos.c
+index c9ae52e..18fbc74 100644
+--- a/tests/fake/fake_rtos.c
++++ b/tests/fake/fake_rtos.c
+@@ -472,6 +472,29 @@ esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
+     return ESP_OK;
+ }
+ 
++// --- codec 开关(2026-09-02 省电:开流时 open、停流时 close,断 5V 功放)---
++// 计数暴露给测试:一次会话应当恰好一开一关,不平衡就意味着功放被落在开着的
++// 状态(耗电)或提前关掉(录音无声)。
++int g_fake_codec_open_count = 0;
++int g_fake_codec_close_count = 0;
++int g_fake_codec_open_fail = 0;   // 非 0 → set_format 失败(测开流被拒路径)
++int g_fake_codec_open = 0;        // 当前是否处于打开态
++
++esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
++    (void)hz; (void)bits; (void)ch;
++    if (g_fake_codec_open_fail) return ESP_FAIL;
++    g_fake_codec_open_count++;
++    g_fake_codec_open = 1;
++    return ESP_OK;
++}
++
++esp_err_t bsp_audio_close(void) {
++    if (!g_fake_codec_open) return ESP_OK;   // 幂等,与真实实现一致
++    g_fake_codec_close_count++;
++    g_fake_codec_open = 0;
++    return ESP_OK;
++}
++
+ // --- app_event_post:记录投递(供断言取消/断链/丢帧事件) ---
+ #define FAKE_EVENT_CAP 64
+ app_event_t g_events[FAKE_EVENT_CAP];
+diff --git a/tests/test_app_protocol.c b/tests/test_app_protocol.c
+index 5182aa0..c286b1c 100644
+--- a/tests/test_app_protocol.c
++++ b/tests/test_app_protocol.c
+@@ -209,19 +209,29 @@ static void test_serialize(void) {
+     assert(strstr(buf, "\"event\":\"device.hello\""));
+     assert(strstr(buf, "\"proto\":1"));
+ 
+-    n = app_protocol_voice_start(buf, sizeof(buf), "ima_adpcm");
++    n = app_protocol_voice_start(buf, sizeof(buf), "ima_adpcm", false);
+     assert(n > 0);
+     assert(strstr(buf, "\"event\":\"voice.start\""));
+     assert(strstr(buf, "\"audio\":\"ima_adpcm\""));   // BLE:ADPCM block 流
+-    n = app_protocol_voice_start(buf, sizeof(buf), "pcm");
++    assert(!strstr(buf, "\"note\""));                 // 普通录音不带 note,向后兼容
++    n = app_protocol_voice_start(buf, sizeof(buf), "pcm", false);
+     assert(n > 0 && strstr(buf, "\"audio\":\"pcm\""));  // USB:PCM 直传
+-    n = app_protocol_voice_start(buf, sizeof(buf), NULL);
++    n = app_protocol_voice_start(buf, sizeof(buf), NULL, false);
+     assert(n > 0 && strstr(buf, "\"audio\":\"pcm\""));  // NULL 兜底 pcm
++    // 速记会话(OK 键起录):Mac 端据此只存历史、不注入
++    n = app_protocol_voice_start(buf, sizeof(buf), "pcm", true);
++    assert(n > 0 && strstr(buf, "\"note\":true"));
+ 
+     n = app_protocol_voice_end(buf, sizeof(buf));
+     assert(n > 0);
+     assert(strstr(buf, "\"event\":\"voice.end\""));
+ 
++    // 取消会话:Mac 端据此撤销注入(Type4MeTests/PassportProtocolTests 对同一
++    // 行做解析断言,两侧共享这个事件名)
++    n = app_protocol_session_abort(buf, sizeof(buf));
++    assert(n > 0);
++    assert(strstr(buf, "\"event\":\"session.abort\""));
++
+     n = app_protocol_key_action(buf, sizeof(buf), APP_KEY_ENTER);
+     assert(n > 0);
+     assert(strstr(buf, "\"event\":\"key.action\""));
+@@ -249,7 +259,7 @@ static void test_serialize_small_cap(void) {
+     // cap < 2:返回 0(不得下溢成超大 memcpy)
+     assert(app_protocol_device_hello(buf, 0, 1) == 0);
+     assert(app_protocol_device_hello(buf, 1, 1) == 0);
+-    assert(app_protocol_voice_start(buf, 1, "ima_adpcm") == 0);
++    assert(app_protocol_voice_start(buf, 1, "ima_adpcm", false) == 0);
+     // 小 cap:截断但仍以 \n 行分隔结尾、有 NUL
+     size_t n = app_protocol_device_hello(buf, 16, 1);
+     assert(n > 0 && n < 16);
+diff --git a/tests/test_app_state.c b/tests/test_app_state.c
+index 9fc6c92..94e48bd 100644
+--- a/tests/test_app_state.c
++++ b/tests/test_app_state.c
+@@ -79,19 +79,48 @@ static void reset(void) {
+     s.last_key_ms = now;
+ }
+ 
++// 开机后不再经过 HOME(app_state_init 直接进 READY,见该函数注释),但 HOME 仍是
++// 合法状态(Mac 侧场景可回退到它),所以要测它的键位就得自己摆进去。
++static void reset_home(void) {
++    reset();
++    s.state = APP_ST_HOME;
++}
++
++// 按下某颗键并带上 ADC 读数。幽灵事件(射频腐蚀造出的假按)与真按压只能靠
++// PRESS 时刻的 mv 区分,所以凡是要走 mv 门禁的路径都得用这两个而不是 reduce_btn。
++static void reduce_up_press(uint16_t mv, uint64_t ts) {
++    app_event_t ev = { .type = APP_EV_KEY_PRESS };
++    ev.u.key.btn = APP_BTN_UP;
++    ev.u.key.mv = mv;
++    now = ts;
++    app_state_reduce(&s, &ev, now, out, &on);
++}
++
++static void reduce_ok_press(uint16_t mv, uint64_t ts) {
++    app_event_t ev = { .type = APP_EV_KEY_PRESS };
++    ev.u.key.btn = APP_BTN_OK;
++    ev.u.key.mv = mv;
++    now = ts;
++    app_state_reduce(&s, &ev, now, out, &on);
++}
++
+ // ---- HOME:● 单击进入 READY;▼ 单击=回车 / 长按=清空;▲ 无空闲语义 ----
+ static void test_home_nav(void) {
++    // 开机即 READY:HOME 与 READY 都是待命,那一次 OK 单击对用户没有意义
+     reset();
++    assert(s.state == APP_ST_READY);
++
++    reset_home();
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+     assert(s.state == APP_ST_READY);
+ 
+-    reset();
++    reset_home();
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
+     assert(s.state == APP_ST_HOME);                // HOME 不切走
+     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+     assert(a && a->u.key_action.action == APP_KEY_ENTER);
+ 
+-    reset();
++    reset_home();
+     reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 10);
+     assert(s.state == APP_ST_HOME);                // DOWN 长按=清空,不切走
+     a = find_action(APP_ACT_SEND_KEY_ACTION);
+@@ -100,14 +129,14 @@ static void test_home_nav(void) {
+     // 三颗键的双击一律无语义(清空已从 UP 双击迁到 DOWN 长按,2026-08-29)
+     for (int i = 0; i < 3; i++) {
+         const app_btn_t b[] = { APP_BTN_UP, APP_BTN_DOWN, APP_BTN_OK };
+-        reset();
++        reset_home();
+         reduce_btn(APP_EV_KEY_DOUBLE, b[i], now + 10);
+         assert(s.state == APP_ST_HOME);
+         assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+     }
+ 
+     // ▲ 空闲:无切换、无动作
+-    reset();
++    reset_home();
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);
+     assert(s.state == APP_ST_HOME);
+     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+@@ -211,15 +240,16 @@ static void test_ptt_no_confirm_delay(void) {
+     assert(on == 0);
+ }
+ 
+-// ---- PTT:离线被拒 + 错误音;在线开流 ----
++// ---- PTT:离线被拒(屏幕 toast,无声);在线当场开流 ----
+ static void test_ptt_offline_online(void) {
+     reset();
+     s.link_up = false;
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 离线按下 ▲
+     assert(s.state == APP_ST_READY);                       // 原地不动
+-    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+-    assert(t && t->u.tone == APP_TONE_ERROR);
++    // 全局静音(2026-09-02):反馈只剩 toast + 一次刷新,不再有 180Hz 错误音。
++    assert(!has_action(APP_ACT_PLAY_TONE));
++    assert(has_action(APP_ACT_UI_REFRESH));                // toast 必须真的上屏
+     assert(strstr(s.toast, "OFFLINE"));
+ 
+     reset();
+@@ -227,110 +257,125 @@ static void test_ptt_offline_online(void) {
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 在线按下 ▲
+     assert(s.state == APP_ST_LISTENING);
+-    assert(has_action(APP_ACT_PLAY_TONE));                 // 440Hz 就绪音
++    assert(!has_action(APP_ACT_PLAY_TONE));                // 无就绪音
+     assert(has_action(APP_ACT_SEND_VOICE_START));
+-    assert(!has_action(APP_ACT_STREAM_START));             // S3:开流移出 PRESS 产出,由 TONE_DONE 驱动
+-    assert(!s.stream_started);
+-    // 顺序契约:就绪音先于 voice.start(动作顺序保证)
+-    assert_action_order(APP_ACT_PLAY_TONE, APP_ACT_SEND_VOICE_START);
+-    // 滴声播完 → TONE_DONE → 开流
+-    app_event_t ev = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &ev, now + 100, out, &on);
++    // 开流回到 PRESS 当场完成:没有滴声就没有 TONE_DONE,再等门禁只会白等
++    // 200ms 兜底、吞掉第一个字(那条兜底也已随之删除)。
+     assert(has_action(APP_ACT_STREAM_START));
+     assert(s.stream_started == true);
++    // 顺序契约:先开流再发 voice.start —— Mac 收到 voice.start 就开始等音频,
++    // 反过来会让首帧晚于宣告。
++    assert_action_order(APP_ACT_STREAM_START, APP_ACT_SEND_VOICE_START);
+ }
+ 
+-// ---- S3:READY+▲ 长按只产出滴声 + voice.start,开流等 TONE_DONE ----
+-static void test_tone_press_produce(void) {
++// ---- 静音后 TONE_DONE 成为惰性事件:迟到一条不得重复开流 ----
++static void test_stale_tone_done_ignored(void) {
+     reset();
+     s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
++    s.state = APP_ST_READY;
++    reduce_up_press(3, now + 20);
+     assert(s.state == APP_ST_LISTENING);
+-    assert(s.stream_started == false);
+-    assert(!has_action(APP_ACT_STREAM_START));
+-    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+-    assert(t && t->u.tone == APP_TONE_START);
+-    assert(has_action(APP_ACT_SEND_VOICE_START));
+-    assert_action_order(APP_ACT_PLAY_TONE, APP_ACT_SEND_VOICE_START);
+-}
+-
+-// ---- S3:TONE_DONE 在 LISTENING 且流未开时开流;重复到达幂等忽略 ----
+-static void test_tone_done_idempotent(void) {
+-    reset();
+-    s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录,未开流
+-    app_event_t ev = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完
+-    assert(has_action(APP_ACT_STREAM_START));
+     assert(s.stream_started == true);
+-    app_state_reduce(&s, &ev, now + 120, out, &on);        // 重复(异常重复投递)
+-    assert(on == 0);                                       // 幂等:无动作
+-}
+ 
+-// ---- S3:松开即发后,滴声期间迟到的 TONE_DONE 必须忽略(不误开流) ----
+-static void test_tone_done_late_after_send(void) {
+-    reset();
+-    s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 按下 #1:入 LISTENING,未开流
+-    assert(!has_action(APP_ACT_STREAM_START));
+-    // 松开:立即发送(≥ PTT_MIN_TALK_MS,否则算阈值误触被取消,见 test_ptt_no_confirm_delay)
+-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 500);
+-    assert(s.state == APP_ST_TRANSCRIBING);
++    // 队列里压着的旧 TONE_DONE 到达:必须什么都不做。再发一次 STREAM_START
++    // 就是一次会话开两次流。
++    on = 0;
+     app_event_t ev = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &ev, now + 210, out, &on);        // 滴声播完事件此刻才到
+-    assert(on == 0);                                       // 已离开 LISTENING → 忽略
++    app_state_reduce(&s, &ev, now + 100, out, &on);
+     assert(!has_action(APP_ACT_STREAM_START));
++    assert(on == 0);
++    assert(s.state == APP_ST_LISTENING);
+ }
+ 
+-// ---- S3:松开即发完整序列——先 TONE_DONE 开流,RELEASE 立即停流 ----
+-static void test_tone_release_sends_order(void) {
++// ---- 开流/停流的顺序契约(取代原先五个 TONE_DONE 握手测试)----
++// 全局静音后 START 音连同 TONE_DONE 门禁一起删除:开流回到 PRESS 当场完成。
++// 原先那五个测试(idempotent / late_after_send / release_sends_order /
++// tick_fallback / ignored_elsewhere)全部围绕"等滴声播完再开流"这个已不存在的
++// 时序,只留下这里的顺序契约 + 上面的 test_stale_tone_done_ignored。
++static void test_stream_start_stop_order(void) {
+     reset();
+     s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
+-    app_event_t ev = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完 → 开流
++    s.state = APP_ST_READY;
++    reduce_up_press(3, now + 20);                           // 按下即录
++    assert(s.state == APP_ST_LISTENING);
+     assert(has_action(APP_ACT_STREAM_START));
+-    assert(s.stream_started == true);
+-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000); // 松开:立即停流发送
++    // 开流必须先于 voice.start:Mac 收到宣告就开始等音频,反过来首帧会迟到。
++    assert_action_order(APP_ACT_STREAM_START, APP_ACT_SEND_VOICE_START);
++
++    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000); // 松开:停流 + 发送
+     assert(s.state == APP_ST_TRANSCRIBING);
+-    assert(has_action(APP_ACT_STREAM_STOP));               // 停流由 RELEASE 产出
++    assert(has_action(APP_ACT_STREAM_STOP));
++    // 停流必须先于 voice.end:main.c 在 voice.end 分支里 drain 环形缓冲取丢帧
++    // 计数,采集还开着的话那个计数不稳定。
+     assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
+ }
+ 
+-// ---- S3:兜底——TICK 满 APP_TONE_PENDING_TIMEOUT_MS 未收 TONE_DONE → 强制开流 ----
+-// 阈值用常量表达(2026-08-29 由 500 降到 200):这条断言卡的是"到点才开、早一毫秒
+-// 不开",与具体毫秒值无关,常量再调本测试自动跟随。
+-static void test_tone_tick_fallback(void) {
++// ---- codec 空闲释放(2026-09-02):连续口述保持热态,走开才断电 ----
++// 这条计时的失效方式是"什么都不发生",不测就只能靠万用表发现。
++static void test_codec_idle_release(void) {
++    // a. 一次录音后满 APP_CODEC_IDLE_MS → 发 CODEC_RELEASE,且只发一次
+     reset();
+     s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
+-    reduce(APP_EV_TICK, s.state_since_ms + APP_TONE_PENDING_TIMEOUT_MS - 1);   // 差 1ms
+-    assert(!has_action(APP_ACT_STREAM_START));
+-    assert(!s.stream_started);
+-    reduce(APP_EV_TICK, s.state_since_ms + APP_TONE_PENDING_TIMEOUT_MS);       // 到点兜底
+-    assert(has_action(APP_ACT_STREAM_START));
+-    assert(s.stream_started == true);
+-    // 兜底后迟到的 TONE_DONE:幂等忽略
+-    app_event_t ev = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &ev, now + 600, out, &on);
+-    assert(on == 0);
+-}
++    s.state = APP_ST_READY;
++    reduce_up_press(3, now + 20);
++    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 1000);   // 松开:开始计时
++    assert(s.codec_idle_since_ms != 0);
++    const uint64_t idle_from = s.codec_idle_since_ms;
++
++    reduce(APP_EV_TICK, idle_from + APP_CODEC_IDLE_MS - 1);   // 差 1ms:不释放
++    assert(!has_action(APP_ACT_CODEC_RELEASE));
++    reduce(APP_EV_TICK, idle_from + APP_CODEC_IDLE_MS);       // 到点
++    assert(has_action(APP_ACT_CODEC_RELEASE));
++    assert(s.codec_idle_since_ms == 0);                       // 已释放,不再欠
++    reduce(APP_EV_TICK, idle_from + APP_CODEC_IDLE_MS + 5000);
++    assert(!has_action(APP_ACT_CODEC_RELEASE));               // 不重复发
++
++    // b. 息屏后仍要释放 —— 走开不碰设备正是屏幕熄掉的场景。这条断言卡的是
++    //    "别把它放在 handle_tick 的 !screen_on 提前 return 之后"。
++    reset();
++    s.link_up = true;
++    s.state = APP_ST_READY;
++    reduce_up_press(3, now + 20);
++    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 1000);
++    const uint64_t t0 = s.codec_idle_since_ms;
++    s.screen_on = false;                                     // 息屏
++    s.panel_on = false;
++    reduce(APP_EV_TICK, t0 + APP_CODEC_IDLE_MS);
++    assert(has_action(APP_ACT_CODEC_RELEASE));
+ 
+-// ---- S3:TONE_DONE 在非 LISTENING 状态(HOME/READY)无动作 ----
+-static void test_tone_done_ignored_elsewhere(void) {
++    // c. 期间又说了一次话 → 计时重置,不在旧的到点时刻释放(连续口述零延迟)
+     reset();
+-    app_event_t ev = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &ev, now + 10, out, &on);         // HOME
+-    assert(on == 0);
++    s.link_up = true;
+     s.state = APP_ST_READY;
++    reduce_up_press(3, now + 20);
++    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 1000);
++    const uint64_t first = s.codec_idle_since_ms;
++    s.state = APP_ST_READY;                                  // 转写结束回到待命
++    reduce_up_press(3, first + APP_CODEC_IDLE_MS / 2);       // 半程再开一次录音
++    assert(s.state == APP_ST_LISTENING);
++    assert(s.codec_idle_since_ms == 0);                      // 录音中不该被释放
++    reduce(APP_EV_TICK, first + APP_CODEC_IDLE_MS);          // 旧的到点时刻
++    assert(!has_action(APP_ACT_CODEC_RELEASE));
++
++    // d. 录音中(LISTENING)即使计时残留也绝不释放 —— 真关下去会把正在录的音
++    //    掐成静音。防御性双保险:audio_streamer 侧也会拒绝。
++    reset();
++    s.state = APP_ST_LISTENING;
+     s.state_since_ms = now;
+-    app_state_reduce(&s, &ev, now + 20, out, &on);         // READY
+-    assert(on == 0);
++    s.codec_idle_since_ms = 1;                               // 人为残留
++    reduce(APP_EV_TICK, 1 + APP_CODEC_IDLE_MS);
++    assert(!has_action(APP_ACT_CODEC_RELEASE));
++
++    // e. 取消会话(STREAM_CANCEL 路径)同样开始计时 —— 断链/音频错误后功放
++    //    不能一直开着。
++    reset();
++    s.link_up = true;
++    s.state = APP_ST_LISTENING;
++    s.state_since_ms = now;
++    app_event_t ae = { .type = APP_EV_AUDIO_ERROR };
++    app_state_reduce(&s, &ae, now + 100, out, &on);
++    assert(has_action(APP_ACT_STREAM_CANCEL));
++    assert(s.codec_idle_since_ms != 0);
+ }
+ 
+ // ---- LISTENING:松开立即结束并发送 ----
+@@ -361,8 +406,11 @@ static void test_down_long_clears_input(void) {
+     reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 500);
+     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+-    app_action_t *tone = find_action(APP_ACT_PLAY_TONE);
+-    assert(tone && tone->u.tone == APP_TONE_REJECT);       // 阈值到点的确认音
++    // 阈值到点的确认从提示音改成屏幕 toast(2026-09-02 全局静音):用户凭手感
++    // 不知道 500ms 到了没有,这个确认必须留着,但它不必是声音。
++    assert(!has_action(APP_ACT_PLAY_TONE));
++    assert(strstr(s.toast, "Cleared"));
++    assert(has_action(APP_ACT_UI_REFRESH));                // toast 要真的上屏
+     assert(!has_action(APP_ACT_SEND_VOICE_START));         // 不开录音
+     assert(s.state == APP_ST_READY);
+     // 松开:长按态只报 LONG_UP,不补 CLICK → 不会再发一次回车
+@@ -417,9 +465,10 @@ static void test_down_long_clears_input(void) {
+     assert(s.state == APP_ST_TRANSCRIBING);                 // 会话不受影响
+ }
+ 
+-// ---- UP(音量加)= 按住说话:PRESS 当场开录(滴声同时响),松开发送 ----
++// ---- UP(音量加)= 按住说话:PRESS 当场开录,松开发送 ----
+ // 2026-08-29:开录事件由 LONG(0.5s 阈值)改为 PRESS —— 真机实测按下到 `采集开始`
+ // 要 ~1.01s(428ms 阈值 + 578ms 滴声门禁),用户第一秒的话被吞掉。
++// 2026-09-02:滴声连同它的门禁一起删除,开流也在 PRESS 当场完成。
+ static void test_up_press_ptt(void) {
+     reset();
+     s.link_up = true;
+@@ -427,8 +476,8 @@ static void test_up_press_ptt(void) {
+     assert(s.state == APP_ST_READY);
+     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 500);    // 按下即录
+     assert(s.state == APP_ST_LISTENING);
+-    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+-    assert(t && t->u.tone == APP_TONE_START);              // 滴声在按下时响
++    assert(!has_action(APP_ACT_PLAY_TONE));                // 全局静音,无滴声
++    assert(has_action(APP_ACT_STREAM_START));              // 当场开流
+     assert(has_action(APP_ACT_SEND_VOICE_START));
+     assert(!has_action(APP_ACT_STREAM_STOP));              // 未结束
+     assert(!has_action(APP_ACT_STREAM_CANCEL));
+@@ -440,15 +489,15 @@ static void test_up_press_ptt(void) {
+     // 转写期静音(用户需求 2026-08-28):松开不再播发送音
+     assert(!has_action(APP_ACT_PLAY_TONE));
+ 
+-    // 离线:按下 UP 被拒,error 音 + toast,不进 LISTENING
++    // 离线:按下 UP 被拒,toast 上屏(无声),不进 LISTENING
+     reset();
+     s.link_up = false;
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 500);
+     assert(s.state == APP_ST_READY);
+     assert(!has_action(APP_ACT_SEND_VOICE_START));
+-    t = find_action(APP_ACT_PLAY_TONE);
+-    assert(t && t->u.tone == APP_TONE_ERROR);
++    assert(!has_action(APP_ACT_PLAY_TONE));
++    assert(has_action(APP_ACT_UI_REFRESH));
+     assert(strstr(s.toast, "OFFLINE"));
+ 
+     // 只有补报单击、没有 PRESS(测试构造)时不触发任何动作、无提示音
+@@ -461,18 +510,19 @@ static void test_up_press_ptt(void) {
+     assert(!has_action(APP_ACT_PLAY_TONE));
+     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+ 
+-    // OK 键已退出 PTT:按住/松开都不再开录音
++    // OK 键 = 速记录音(2026-09-01):和 UP 一样按住说话,区别只在 voice.start
++    // 带 note 标记,Mac 端据此只存历史、不注入。OK 长按锁屏仍优先(在 handle_key
++    // 开头就被 APP_EV_KEY_LONG 截住,走不到这里)。
+     reset();
+     s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 100);   // 按住 OK
+-    assert(s.state == APP_ST_READY);
+-    assert(!has_action(APP_ACT_SEND_VOICE_START));
+-    assert(!has_action(APP_ACT_PLAY_TONE));
+-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 200); // 松开 OK
+-    assert(s.state == APP_ST_READY);
+-    assert(!has_action(APP_ACT_SEND_VOICE_END));
+-    assert(!has_action(APP_ACT_STREAM_STOP));
++    s.state = APP_ST_READY;
++    reduce_ok_press(600, now + 100);                       // 按住 OK(档内真按压)
++    assert(s.state == APP_ST_LISTENING);
++    assert(s.note_session == true);
++    assert(has_action(APP_ACT_SEND_VOICE_START));
++    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 1000);  // 说满阈值后松开
++    assert(s.state == APP_ST_TRANSCRIBING);
++    assert(has_action(APP_ACT_SEND_VOICE_END));
+ }
+ 
+ // ---- 按下即录的三道防线(2026-08-29)----
+@@ -595,8 +645,10 @@ static void test_approval(void) {
+                                        .risk = APP_RISK_HIGH } };
+     app_state_reduce(&s, &ev, now, out, &on);
+     assert(s.state == APP_ST_APPROVAL);
+-    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+-    assert(t && t->u.tone == APP_TONE_APPROVAL);
++    // 审批提醒音也在全局静音里(2026-09-02)。这是六声中唯一"值得响"的一声 ——
++    // 它要把注意力从别处拽回屏幕 —— 但语音输入用不到审批场景,Mac 端从不发
++    // approval.request。若将来接回 Agent 审批,这里应是第一个恢复出声的地方。
++    assert(!has_action(APP_ACT_PLAY_TONE));
+ 
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 100);   // ● 批准
+     app_action_t *a = find_action(APP_ACT_SEND_AGENT_ACTION);
+@@ -611,8 +663,7 @@ static void test_approval(void) {
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 200);
+     a = find_action(APP_ACT_SEND_AGENT_ACTION);
+     assert(a && a->u.agent_action.decision == APP_ACTION_REJECT);
+-    t = find_action(APP_ACT_PLAY_TONE);
+-    assert(t && t->u.tone == APP_TONE_REJECT);
++    assert(!has_action(APP_ACT_PLAY_TONE));   // 拒绝确认音同样静音
+ 
+     // ▼ 在 APPROVAL 下 = 回车(与全局 DOWN 语义统一;旧 approval_details
+     // 详情视图切换已随状态机演进移除 —— 基线测试过期,按当前语义修正)
+@@ -721,14 +772,6 @@ static void test_transcript_display(void) {
+ }
+ 
+ // ---- TRANSCRIBING:音量+单击退出转写场景(2026-08-28 用户需求);迟到文本丢弃 ----
+-static void reduce_up_press(uint16_t mv, uint64_t ts) {
+-    app_event_t ev = { .type = APP_EV_KEY_PRESS };
+-    ev.u.key.btn = APP_BTN_UP;
+-    ev.u.key.mv = mv;
+-    now = ts;
+-    app_state_reduce(&s, &ev, now, out, &on);
+-}
+-
+ static void test_transcribing_exit(void) {
+     // 真实单击退出:PRESS(mv=3,手指在键上)→ RELEASE → CLICK → READY
+     reset();
+@@ -739,6 +782,9 @@ static void test_transcribing_exit(void) {
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 250);
+     assert(s.state == APP_ST_READY);
+     assert(has_action(APP_ACT_UI_REFRESH));
++    // 必须告诉 Mac(2026-09-02):设备自己回 READY 只清了自己的屏,Mac 那边 ASR
++    // 还在跑,不发这一帧的话用户放弃掉的那句话照样被打进输入框 —— 取消是假的。
++    assert(has_action(APP_ACT_SEND_SESSION_ABORT));
+ 
+     // 退出后(READY)迟到的识别结果丢弃,不再上屏
+     app_event_t ev = { .type = APP_EV_TRANSCRIPT,
+@@ -755,6 +801,29 @@ static void test_transcribing_exit(void) {
+     reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 200);
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 250);
+     assert(s.state == APP_ST_TRANSCRIBING);
++    assert(!has_action(APP_ACT_SEND_SESSION_ABORT));   // 幽灵事件不得撤销真实会话
++
++    // OK 单击同样退出(2026-09-02):速记从 OK 键起录,手指本来就在 OK 上,
++    // 只留 UP 可取消会逼用户换键。OK 档 447-1900,真实按压落在档内。
++    reset();
++    s.state = APP_ST_TRANSCRIBING;
++    s.state_since_ms = now;
++    s.note_session = true;
++    reduce_ok_press(600, now + 100);
++    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 200);
++    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 250);
++    assert(s.state == APP_ST_READY);
++    assert(has_action(APP_ACT_SEND_SESSION_ABORT));
++
++    // OK 幽灵事件同样不退出:回调时刻 mv 已回松开电平(2890,在 OK 档之外)
++    reset();
++    s.state = APP_ST_TRANSCRIBING;
++    s.state_since_ms = now;
++    reduce_ok_press(2890, now + 100);
++    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 200);
++    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 250);
++    assert(s.state == APP_ST_TRANSCRIBING);
++    assert(!has_action(APP_ACT_SEND_SESSION_ABORT));
+ 
+     // HOME 态迟到文本同样丢弃
+     reset();
+@@ -864,10 +933,15 @@ static void test_keys_ignored_in_running(void) {
+     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+     assert(s.state == APP_ST_AGENT_RUNNING);
+ 
++    // TRANSCRIBING 下 OK 单击 = 取消本次会话(2026-09-02),不再是"忽略"。
++    // 但幽灵事件仍必须被挡:这里 reduce_btn 不带 mv(=0,落在 OK 档 447-1900 之外),
++    // 等同于"没有真实 PRESS 的补报单击" → 不取消。
++    reset();
+     s.state = APP_ST_TRANSCRIBING;
++    s.state_since_ms = now;
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 40);
+     assert(s.state == APP_ST_TRANSCRIBING);
+-    assert(on == 0);                                       // 本次 CLICK 无动作
++    assert(!has_action(APP_ACT_SEND_SESSION_ABORT));
+ }
+ 
+ // ---- LISTENING 中 ▲/▼ 无效(不打断录音) ----
+@@ -1057,9 +1131,12 @@ static void test_panel_off_longest_paths(void) {
+     assert(s.state == APP_ST_LISTENING);
+     assert(has_action(APP_ACT_UI_PANEL_ON));
+     assert(has_action(APP_ACT_UI_SCREEN_ON));
+-    assert(has_action(APP_ACT_PLAY_TONE));
+-    assert(has_action(APP_ACT_SEND_VOICE_START));   // ← APP_ACT_MAX=4 时被丢
+-    assert_action_order(APP_ACT_PLAY_TONE, APP_ACT_SEND_VOICE_START);
++    // 全局静音后滴声那一条换成了 STREAM_START(开流从 TONE_DONE 挪到当场),
++    // 动作条数不变,仍是这条最长路径 —— 溢出的话丢的还是最后一条 voice.start,
++    // 症状依旧是"设备照样录音而 Mac 从没收到宣告"(2026-09-02)。
++    assert(has_action(APP_ACT_STREAM_START));
++    assert(has_action(APP_ACT_SEND_VOICE_START));   // ← APP_ACT_MAX 不足时被丢
++    assert_action_order(APP_ACT_STREAM_START, APP_ACT_SEND_VOICE_START);
+ 
+     // b. 面板断电 + ▼ 长按清空:唤醒三连 + 清空上行 + 确认音
+     reset();
+@@ -1069,9 +1146,10 @@ static void test_panel_off_longest_paths(void) {
+     reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 500);
+     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+-    assert(has_action(APP_ACT_PLAY_TONE));
++    assert(!has_action(APP_ACT_PLAY_TONE));      // 确认音改 toast
++    assert(strstr(s.toast, "Cleared"));
+ 
+-    // c. 面板断电 + 离线按 ▲:唤醒三连 + error 音 + 刷新(toast 要能显示出来)
++    // c. 面板断电 + 离线按 ▲:唤醒三连 + 刷新(toast 要能显示出来)
+     reset();
+     s.link_up = false;
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);              // → READY
+@@ -1079,7 +1157,7 @@ static void test_panel_off_longest_paths(void) {
+     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);
+     assert(s.state == APP_ST_READY);                                 // 离线不进 LISTENING
+     assert(has_action(APP_ACT_UI_PANEL_ON));
+-    assert(has_action(APP_ACT_PLAY_TONE));
++    assert(!has_action(APP_ACT_PLAY_TONE));
+     assert(has_action(APP_ACT_UI_REFRESH));
+     assert(s.toast[0] != '\0');
+ }
+@@ -1088,33 +1166,21 @@ static void test_panel_off_longest_paths(void) {
+ // 旧版只 toast + 回 READY:管线残留帧流进下一会话、Mac 侧 voice 永不收束(挂到
+ // STT 超时)、STREAM_START 取的 PM 会话锁没人放(设备再回不到低功耗)。
+ static void test_audio_error_closes_session(void) {
+-    // a. LISTENING(已开流):CANCEL + voice.end + 回 READY + toast
++    // a. LISTENING(按下即开流):CANCEL + voice.end + 回 READY + toast
++    // 原先这里分 a/b 两档("滴声播完已开流" vs "滴声未播完流还没开"),全局静音
++    // 后开流与入 LISTENING 同时发生,第二档不复存在(2026-09-02)。
+     reset();
+     s.link_up = true;
+     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+-    app_event_t td = { .type = APP_EV_TONE_DONE };
+-    app_state_reduce(&s, &td, now + 100, out, &on);
+     assert(s.state == APP_ST_LISTENING && s.stream_started);
+     app_event_t ae = { .type = APP_EV_AUDIO_ERROR };
+     app_state_reduce(&s, &ae, now + 200, out, &on);
+     assert(has_action(APP_ACT_STREAM_CANCEL));
+-    assert(has_action(APP_ACT_SEND_VOICE_END));
++    assert(has_action(APP_ACT_SEND_VOICE_END));   // voice.start 发过了,必须配 end
+     assert(s.state == APP_ST_READY);
+     assert(s.toast[0] != '\0');
+ 
+-    // b. LISTENING 但滴声未播完(流还没开):同样收束 —— 两条动作幂等,
+-    //    执行器侧 CANCEL 无副作用,voice.start 已经发出去了必须配 voice.end
+-    reset();
+-    s.link_up = true;
+-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+-    assert(!s.stream_started);
+-    app_state_reduce(&s, &ae, now + 50, out, &on);
+-    assert(has_action(APP_ACT_STREAM_CANCEL));
+-    assert(has_action(APP_ACT_SEND_VOICE_END));
+-    assert(s.state == APP_ST_READY);
+-
+     // c. 非 LISTENING(READY):不发收束动作(没有会话可收)
+     reset();
+     s.link_up = true;
+@@ -1261,7 +1327,8 @@ static void test_relock_cycle(void) {
+     assert(s.locked == false);
+     assert(s.screen_on == true);
+     assert(s.panel_on == true);
+-    assert(s.state == APP_ST_HOME);                           // 状态自始至终不变
++    // 锁屏只动显示,不动状态机 —— 开机态现在是 READY(见 app_state_init)
++    assert(s.state == APP_ST_READY);
+ }
+ 
+ // 回归:LISTENING 中长按 OK 不锁定;APPROVAL 中 OK 单击仍批准、长按不锁定
+@@ -1555,12 +1622,9 @@ int main(void) {
+     test_home_nav();
+     test_down_enter_clear();
+     test_ptt_offline_online();
+-    test_tone_press_produce();
+-    test_tone_done_idempotent();
+-    test_tone_done_late_after_send();
+-    test_tone_release_sends_order();
+-    test_tone_tick_fallback();
+-    test_tone_done_ignored_elsewhere();
++    test_stale_tone_done_ignored();
++    test_stream_start_stop_order();
++    test_codec_idle_release();
+     test_listening_end();
+     test_up_press_ptt();
+     test_ptt_press_start_guards();
+diff --git a/tests/test_audio_streamer.c b/tests/test_audio_streamer.c
+index afafc05..1b8d791 100644
+--- a/tests/test_audio_streamer.c
++++ b/tests/test_audio_streamer.c
+@@ -32,6 +32,10 @@ extern uint32_t g_fake_ring_residue_token;  // 非 0 → 环创建时预置旧 t
+ extern int g_fake_sem_fail;      // 非 0 → xSemaphoreCreateBinary 失败(init 失败注入)
+ extern int g_fake_task_fail_at;  // N>0 → 第 N 次 xTaskCreate 失败(1=audio, 2=ble 回滚)
+ extern int g_sem_live;           // 存活信号量计数(断言 init 失败路径零泄漏)
++extern int g_fake_codec_open_count;   // codec open 次数(会话级开关计数)
++extern int g_fake_codec_close_count;  // codec close 次数(应与 open 相等)
++extern int g_fake_codec_open_fail;    // 非 0 → set_format 失败(开流被拒路径)
++extern int g_fake_codec_open;         // 当前是否处于打开态
+ extern app_event_t g_events[];
+ extern int g_event_count;
+ extern void fake_reset(void);
+@@ -353,6 +357,56 @@ static void test_token_pass_through(void) {
+     audio_streamer_stop();
+ }
+ 
++// 12) codec 生命周期(2026-09-02 省电 + 冷启动取舍):开流时 open;stop/cancel
++//     【不】关(重开有几十毫秒冷启动,会吃掉下一句第一个字 —— 用户实测);
++//     真正的关闭由状态机在 5 分钟无录音后调 release_codec。
++//     两头都可能出错:不关 → 5V 功放常开耗电(用户反馈的根因);关早了 →
++//     每句话第一个字慢。所以这两件事都得钉住。
++static void test_codec_lifecycle(void) {
++    fake_reset();
++    ensure_init();
++    g_fake_codec_open_count = 0;
++    g_fake_codec_close_count = 0;
++
++    assert(audio_streamer_start() == ESP_OK);
++    assert(g_fake_codec_open_count == 1);
++    assert(g_fake_codec_open == 1);            // 录音中必须开着,否则无声
++    assert(wait_notify(1, 500));
++    audio_streamer_stop();
++    // 停流后保持热态:这条断言防的是"顺手把 close 加回 stop 里"的回归
++    assert(g_fake_codec_close_count == 0);
++    assert(g_fake_codec_open == 1);
++
++    // 紧接着的第二次会话复用已打开的 codec(同格式 → set_format 廉价复用),
++    // 这正是"连续口述零延迟"的落点
++    assert(audio_streamer_start() == ESP_OK);
++    audio_streamer_cancel();
++    assert(g_fake_codec_close_count == 0);     // 取消同样不关
++
++    // 空闲释放:这才是断电的唯一入口
++    audio_streamer_release_codec();
++    assert(g_fake_codec_close_count == 1);
++    assert(g_fake_codec_open == 0);
++    audio_streamer_release_codec();            // 幂等:重复调用不再计数
++    assert(g_fake_codec_close_count == 1);
++
++    // 采集进行中拒绝释放 —— 空闲计时到点与用户按下开录存在竞态,真关下去
++    // 会把正在录的音掐成静音
++    assert(audio_streamer_start() == ESP_OK);
++    assert(g_fake_codec_open == 1);
++    audio_streamer_release_codec();
++    assert(g_fake_codec_open == 1);            // 仍开着
++    assert(g_fake_codec_close_count == 1);     // 未新增
++    audio_streamer_stop();
++
++    // codec 打不开 → 拒绝开流(否则录出来是一片静音,用户以为设备坏了)
++    audio_streamer_release_codec();
++    g_fake_codec_open_fail = 1;
++    assert(audio_streamer_start() != ESP_OK);
++    assert(audio_streamer_active() == 0);
++    g_fake_codec_open_fail = 0;
++}
++
+ int main(void) {
+     // 失败注入用例放最前:s_ready 初始 false 时注入才真正触发 init 的创建路径
+     // (成功 init 后幂等早返回,注入不再生效)。test_token_drops_stale 是首次
+@@ -370,6 +424,7 @@ int main(void) {
+     test_drain_with_token();
+     test_audio_error_event();
+     test_token_pass_through();
++    test_codec_lifecycle();
+     printf("test_audio_streamer: all assertions passed\n");
+     return 0;
+ }
+diff --git a/tests/test_ble_audio.c b/tests/test_ble_audio.c
+index 38e440c..5298cc9 100644
+--- a/tests/test_ble_audio.c
++++ b/tests/test_ble_audio.c
+@@ -200,7 +200,7 @@ static void test_event_chunks(void) {
+     char line[EVENT_LINE_MAX];
+     size_t n;
+ 
+-    n = app_protocol_voice_start(line, sizeof(line), "ima_adpcm");
++    n = app_protocol_voice_start(line, sizeof(line), "ima_adpcm", false);
+     assert_reassembly_line(line, n, 247);
+     assert_reassembly_line(line, n, 23);     // 最小 MTU 下跨多片
+ 

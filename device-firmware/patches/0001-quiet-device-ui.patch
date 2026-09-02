@@ -11,7 +11,7 @@ index e7295c1..fb4ff7b 100644
           "adpcm.c"
           "audio_streamer.c"
 diff --git a/main/app_ui.c b/main/app_ui.c
-index c29bd06..40c8220 100644
+index c29bd06..e18a220 100644
 --- a/main/app_ui.c
 +++ b/main/app_ui.c
 @@ -3,6 +3,8 @@
@@ -166,10 +166,10 @@ index c29bd06..40c8220 100644
 +        // 没设名字:副标题升为主标题占住名牌的位置,避免上方留一块空白。
 +        label(p->root, "Voice Input", &lv_font_montserrat_20, UI_PAPER, 0, CONTENT_Y + 20, W);
 +    }
-+    pet_image(p->root, &pet_idle, 122);
++    pet_image(p->root, &pet_idle, 96);
 +    // 只说下一步做什么。原先底部还列着 ENTER/CLEAR 两个此刻用不到的键,读起来
 +    // 像调试输出。
-+    label(p->root, "hold OK to begin", &lv_font_montserrat_14, UI_MUTED, 0, 208, W);
++    hint_label(p->root, "hold OK to begin");
  }
  
  static void build_ready(void)
@@ -182,7 +182,7 @@ index c29bd06..40c8220 100644
 -    hint_label(p->root, "HOLD VOL+: SPEAK   DOWN: ENTER   DBL-VOL+: CLEAR");
 +    // 就绪页:待机表情 + 一句话。表情告诉你设备醒着在等,文字说怎么开始。
 +    pet_image(p->root, &pet_idle, 96);
-+    label(p->root, "Ready", &lv_font_montserrat_20, UI_PAPER, 0, 208, W);
++    label(p->root, "Ready", &lv_font_montserrat_20, UI_PAPER, 0, 212, W);
 +    hint_label(p->root, "hold the top key and speak");
  }
  
@@ -199,9 +199,9 @@ index c29bd06..40c8220 100644
 -    hint_label(p->root, "RELEASE VOL+: SEND");
 +    // 录音中:举手的表情 + 两侧声波。计时是这一页唯一需要读的数字,放大居中;
 +    // "在听"这件事由表情说,不再占一行文字。
-+    pet_image(p->root, &pet_listen, 88);
-+    icon_waves(p->root, W / 2, 120, UI_YELLOW);
-+    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_PAPER, 0, 204, W);
++    pet_image(p->root, &pet_listen, 96);
++    icon_waves(p->root, W / 2, 140, UI_YELLOW);
++    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_PAPER, 0, 212, W);
 +    hint_label(p->root, "release to send");
  }
  
@@ -215,9 +215,9 @@ index c29bd06..40c8220 100644
 -    hint_label(p->root, "PLEASE WAIT");
 +    // 识别中:思考的表情。这一页用户什么都不用做,所以不给按键提示 —— 原先底部
 +    // 写 "PLEASE WAIT",既是命令句又占一行。
-+    pet_image(p->root, &pet_think, 88);
-+    label(p->root, "Transcribing", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
-+    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 224, 200);
++    pet_image(p->root, &pet_think, 96);
++    label(p->root, "Transcribing", &lv_font_montserrat_14, UI_MUTED, 0, 212, W);
++    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 236, 200);
  }
  
  static void build_running(void)

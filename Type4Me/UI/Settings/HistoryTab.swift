@@ -263,6 +263,36 @@ struct HistoryTab: View {
 
     // MARK: - Body
 
+    /// Underline tabs rather than a two-item dropdown: with only two choices, a menu
+    /// hides half the interface behind a click, and these are different views of the
+    /// list rather than a setting being adjusted.
+    private var kindTabs: some View {
+        HStack(spacing: 20) {
+            ForEach([KindFilter.all, .quickNote], id: \.self) { filter in
+                let isSelected = kindFilter == filter
+                Button {
+                    guard kindFilter != filter else { return }
+                    kindFilter = filter
+                } label: {
+                    VStack(spacing: 6) {
+                        Text(filter.label)
+                            .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(isSelected ? TF.settingsText : TF.settingsTextSecondary)
+                        // The underline is always present so switching tabs does not
+                        // shift the row's height by a pixel.
+                        Rectangle()
+                            .fill(isSelected ? TF.settingsNavActive : .clear)
+                            .frame(height: 2)
+                    }
+                    .fixedSize()
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsSectionHeader(
@@ -270,6 +300,9 @@ struct HistoryTab: View {
                 title: L("识别历史", "History"),
                 description: L("浏览和管理语音识别记录。", "Browse and manage speech recognition records.")
             )
+
+            kindTabs
+                .padding(.bottom, TF.spacingMD)
 
             // Statistics Section
             if let stats = statistics, stats.recordCount > 0 {
@@ -303,32 +336,6 @@ struct HistoryTab: View {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(TF.settingsTextTertiary.opacity(0.2), lineWidth: 1)
                 )
-
-                // Kind filter: All / Notes
-                Menu {
-                    ForEach([KindFilter.all, .quickNote], id: \.self) { filter in
-                        Button {
-                            kindFilter = filter
-                        } label: {
-                            if kindFilter == filter {
-                                Label(filter.label, systemImage: "checkmark")
-                            } else {
-                                Text(filter.label)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: kindFilter == .quickNote ? "square.and.pencil" : "tray.full")
-                            .font(.system(size: 11))
-                        Text(kindFilter.label).font(.system(size: 12, weight: .medium))
-                    }
-                    .foregroundStyle(
-                        kindFilter == .all ? TF.settingsTextSecondary : TF.settingsNavActive)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
 
                 // Date filter menu
                 Menu {

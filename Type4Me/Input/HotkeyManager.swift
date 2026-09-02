@@ -665,10 +665,17 @@ final class HotkeyManager: NSObject {
     ///
     /// Routes through the real binding for `modeId` rather than calling the session
     /// directly, so the external trigger inherits everything the hotkey path does:
-    /// provider-specific mode resolution, the toggle-desync guard that redirects a
-    /// second start into a stop, the idle wait before starting, and the safety
-    /// timers. Returns false when no binding matches, which happens if the mode was
-    /// deleted or its hotkey unassigned.
+    /// provider-specific mode resolution, the toggle-desync guard, the idle wait
+    /// before starting, and the safety timers.
+    ///
+    /// The binding is forced to `.hold` regardless of what the user picked for the
+    /// keyboard. A hardware push-to-talk key reports its own press and release, so
+    /// interpreting the press as a toggle would make every second recording a stop —
+    /// the device opens an audio stream and the host closes its source at the same
+    /// moment, and that session records nothing.
+    ///
+    /// Returns false when no binding matches, which happens if the mode was deleted
+    /// or its hotkey unassigned.
     @discardableResult
     func triggerBinding(modeId: UUID, pressed: Bool) -> Bool {
         guard let binding = bindings.first(where: { $0.modeId == modeId }) else {
@@ -676,7 +683,16 @@ final class HotkeyManager: NSObject {
             DebugFileLogger.log("external trigger no binding mode=\(modeId)")
             return false
         }
-        handleBindingEvent(binding: binding, pressed: pressed)
+        let pushToTalk = ModeBinding(
+            bindingId: binding.bindingId,
+            modeId: binding.modeId,
+            keyCode: binding.keyCode,
+            modifiers: binding.modifiers,
+            style: .hold,
+            onStart: binding.onStart,
+            onStop: binding.onStop
+        )
+        handleBindingEvent(binding: pushToTalk, pressed: pressed)
         return true
     }
 

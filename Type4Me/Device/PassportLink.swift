@@ -82,8 +82,8 @@ actor PassportLink {
     /// unplugging and replugging otherwise lets a stale reader drive live state.
     private var linkGeneration = 0
     private var intentionalDisconnect = false
-    private var reconnectAttempts = 0
-    private static let maxReconnectAttempts = 3
+    /// Last open failure, so discovery retries do not repeat one message forever.
+    private var lastOpenFailure: String?
 
     /// Per-session recording state.
     private var sessionEncoding: PassportAudioEncoding = .pcm
@@ -98,6 +98,38 @@ actor PassportLink {
     private static let finishTimeout = Duration.seconds(20)
 
     private init() {}
+
+    /// Watch for the device appearing, so plugging in after launch connects and a
+    /// port that was busy at startup is retried.
+    ///
+    /// Polling rather than `IOServiceAddMatchingNotification`: the check is a
+    /// registry query costing microseconds, and it also recovers from the
+    /// port-busy case, where the device never re-enumerates and so no matching
+    /// notification would ever fire.
+    private var discoveryTask: Task<Void, Never>?
+    private static let discoveryInterval = Duration.seconds(3)
+
+    func startDiscovery() {
+        guard discoveryTask == nil else { return }
+        discoveryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.connectIfDevicePresent()
+                try? await Task.sleep(for: Self.discoveryInterval)
+            }
+        }
+    }
+
+    func stopDiscovery() {
+        discoveryTask?.cancel()
+        discoveryTask = nil
+    }
+
+    /// One discovery tick: attach if nothing is attached and a device is there.
+    private func connectIfDevicePresent() async {
+        guard transport == nil, PassportSerialDiscovery.preferredPort() != nil else { return }
+        await connect()
+    }
 
     // MARK: - Connect / disconnect
 
@@ -124,14 +156,21 @@ actor PassportLink {
         do {
             try usb.open()
         } catch {
-            logger.warning("open failed: \(error.localizedDescription, privacy: .public)")
-            DebugFileLogger.log("passport link open failed error=\(error.localizedDescription)")
+            // Discovery retries every few seconds, so only log a change of reason —
+            // otherwise a device left plugged into a busy port fills the log.
+            let description = error.localizedDescription
+            if description != lastOpenFailure {
+                lastOpenFailure = description
+                logger.warning("open failed: \(description, privacy: .public)")
+                DebugFileLogger.log("passport link open failed error=\(description)")
+            }
             return
         }
+        lastOpenFailure = nil
 
         transport = usb
         intentionalDisconnect = false
-        reconnectAttempts = 0
+
         publish { state in
             state.isConnected = true
             state.deviceName = usb.displayName
@@ -189,15 +228,9 @@ actor PassportLink {
         DebugFileLogger.log("passport link disconnected intentional=\(intentionalDisconnect)")
         eventContinuation?.yield(.disconnected)
 
-        guard !intentionalDisconnect, reconnectAttempts < Self.maxReconnectAttempts else { return }
-        reconnectAttempts += 1
-        let attempt = reconnectAttempts
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard let self else { return }
-            DebugFileLogger.log("passport link reconnect attempt=\(attempt)")
-            await self.connect()
-        }
+        // Reconnection is discovery's job: it already polls for the port and covers
+        // both unplugging and a port that was busy. A second retry loop here would
+        // race it for the exclusive open.
     }
 
     // MARK: - Inbound frames

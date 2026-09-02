@@ -944,7 +944,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
 
       let events = await PassportLink.shared.events()
-      await PassportLink.shared.connect()
+      // Discovery both connects now and keeps watching, so plugging in later works
+      // and a port that was momentarily busy is retried.
+      await PassportLink.shared.startDiscovery()
 
       for await event in events {
         switch event {

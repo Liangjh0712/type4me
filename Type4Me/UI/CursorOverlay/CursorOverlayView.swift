@@ -100,12 +100,6 @@ struct CursorOverlayView<S: FloatingBarState>: View {
   /// Delays the hover row's dismissal so the pointer can travel to its
   /// buttons without them vanishing en route.
   @State private var hoverDismiss: DispatchWorkItem?
-  /// Trailing typewriter buffer. ASR partials arrive in bursts of several
-  /// characters, and rendering the raw string makes them pop in as chunks.
-  /// Pure appends (the common case for cumulative partials) are revealed one
-  /// character at a time; corrections that rewrite earlier text swap at once.
-  @State private var revealedText = ""
-  @State private var revealTask: Task<Void, Never>?
 
   private enum Tone {
     /// Placeholder copy ("Listening…") — dimmed.
@@ -169,34 +163,8 @@ struct CursorOverlayView<S: FloatingBarState>: View {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
     }
     .onAppear {
-      revealedText = displayText
-      withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+      withAnimation(TF.breathe) {
         pulsing = true
-      }
-    }
-    .onChange(of: displayText) { _, newText in
-      revealTask?.cancel()
-      let current = revealedText
-      // Typewriter only a pure append on top of what's already visible;
-      // anything else (correction, reset, phase label) swaps instantly.
-      guard newText != current, newText.hasPrefix(current) else {
-        revealedText = newText
-        return
-      }
-      let suffix = newText.dropFirst(current.count)
-      revealTask = Task { @MainActor in
-        var text = current
-        var remaining = suffix
-        while !remaining.isEmpty {
-          try? await Task.sleep(for: .milliseconds(24))
-          if Task.isCancelled { return }
-          // Catch-up gradient: the further behind the ASR stream, the more
-          // characters per tick — smooth acceleration instead of one jump.
-          let take = remaining.count > 30 ? 3 : remaining.count > 12 ? 2 : 1
-          text.append(contentsOf: remaining.prefix(take))
-          remaining = remaining.dropFirst(take)
-          revealedText = text
-        }
       }
     }
   }
@@ -252,18 +220,24 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     .fixedSize()
   }
 
-  /// Transcript tail. The leading-edge fade is only applied once the text
-  /// actually overflows the width cap and head-truncation kicks in — an
-  /// always-on mask shades the first glyphs of every short utterance. (The
-  /// old marked-text underline was removed: it never changed with state, so
-  /// it communicated nothing; liveness is the dot's job now.)
+  /// Transcript tail, rendered per character so each glyph develops into
+  /// place and corrections touch only the characters that actually changed.
+  /// The leading-edge fade is only applied once the text overflows the width
+  /// cap and head-truncation kicks in — an always-on mask shades the first
+  /// glyphs of every short utterance. (The old marked-text underline was
+  /// removed: it never changed with state, so it communicated nothing;
+  /// liveness is the dot's job now.)
   @ViewBuilder private var transcriptText: some View {
-    let base = Text(revealedText)
-      .font(.system(size: 13.5, weight: .regular))
-      .foregroundStyle(textColor)
-      .lineLimit(1)
-      .truncationMode(.head)
-      .frame(maxWidth: CursorOverlayMetrics.textMaxWidth, alignment: .leading)
+    let base = StreamingTranscriptText(
+      text: displayText,
+      font: .system(size: 13.5, weight: .regular),
+      measuringFont: cursorTranscriptFont,
+      color: textColor,
+      maxWidth: CursorOverlayMetrics.textMaxWidth,
+      // Frozen phases shouldn't re-develop settled text just because the
+      // color changed.
+      animates: tone == .live || tone == .hint
+    )
     if needsHeadFade {
       base.mask {
         HStack(spacing: 0) {
@@ -283,7 +257,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
 
   private var needsHeadFade: Bool {
     ceil(
-      (revealedText as NSString).size(withAttributes: [.font: cursorTranscriptFont]).width
+      (displayText as NSString).size(withAttributes: [.font: cursorTranscriptFont]).width
     ) > CursorOverlayMetrics.textMaxWidth
   }
 

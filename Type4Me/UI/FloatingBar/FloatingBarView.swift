@@ -1098,13 +1098,13 @@ struct FloatingBarView<S: FloatingBarState>: View {
       processingStartDate = nil
       doneStartDate = nil
       breathe = false
-      withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+      withAnimation(TF.breathe) {
         breathe = true
       }
     case .recording:
       recordingPeakWidth = TF.barHeight
       breathe = false
-      withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
+      withAnimation(TF.breathe) {
         breathe = true
       }
     case .processing:
@@ -1160,7 +1160,7 @@ struct FloatingBarView<S: FloatingBarState>: View {
 
 struct PreparingDot: View {
 
-  var color: Color = TF.recording
+  var color: Color = TF.signalTeal
   @State private var rotation = 0.0
 
   var body: some View {
@@ -1197,12 +1197,12 @@ struct TallyDot: View {
 
   var body: some View {
     Circle()
-      .fill(TF.recording)
+      .fill(TF.signalTeal)
       .frame(width: 8, height: 8)
-      .shadow(color: TF.recording.opacity(0.9), radius: pulse ? 5 : 2)
+      .shadow(color: TF.signalTeal.opacity(0.9), radius: pulse ? 5 : 2)
       .opacity(pulse ? 1 : 0.55)
       .onAppear {
-        withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+        withAnimation(TF.breathe) {
           pulse = true
         }
       }
@@ -1238,7 +1238,7 @@ struct StatusLED: View {
       return
     }
     lit = false
-    withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+    withAnimation(TF.breathe) {
       lit = true
     }
   }
@@ -1311,32 +1311,35 @@ struct RecordingDot: View {
       ZStack {
         // Outer slow pulse ring
         Circle()
-          .fill(TF.recording.opacity(outerPulse ? 0.0 : 0.25))
+          .fill(TF.signalTeal.opacity(outerPulse ? 0.0 : 0.25))
           .frame(width: outerPulse ? 24 : 10, height: outerPulse ? 24 : 10)
 
         // Audio-reactive ring (smooth following)
         Circle()
-          .fill(TF.recording.opacity(0.18))
+          .fill(TF.signalTeal.opacity(0.18))
           .frame(width: levelSize, height: levelSize)
 
         // Inner faster pulse ring (offset phase)
         Circle()
-          .stroke(TF.recording.opacity(innerPulse ? 0.2 : 0.0), lineWidth: 1)
+          .stroke(TF.signalTeal.opacity(innerPulse ? 0.2 : 0.0), lineWidth: 1)
           .frame(width: innerPulse ? 18 : 12, height: innerPulse ? 18 : 12)
 
         // Core dot
         Circle()
-          .fill(TF.recording)
+          .fill(TF.signalTeal)
           .frame(width: 10, height: 10)
-          .shadow(color: TF.recording.opacity(0.4), radius: 3)
+          .shadow(color: TF.signalTeal.opacity(0.4), radius: 3)
       }
     }
     .frame(width: 24, height: 24)
     .onAppear {
-      withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+      // Two rings radiating from one source: they share the breathing period
+      // so they stay in phase with every other live indicator, and differ only
+      // by a small offset so the rings read as successive, not simultaneous.
+      withAnimation(TF.breathe) {
         outerPulse = true
       }
-      withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true).delay(0.15)) {
+      withAnimation(TF.breathe.delay(0.15)) {
         innerPulse = true
       }
     }
@@ -1434,7 +1437,7 @@ struct ScreenBottomIndicatorView<S: FloatingBarState>: View {
     .fixedSize(horizontal: true, vertical: false)
     .frostSurface(Capsule(), backlight: pillTone)
     .onAppear {
-      withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+      withAnimation(TF.breathe) {
         pulsing = true
       }
     }

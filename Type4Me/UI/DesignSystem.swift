@@ -171,6 +171,14 @@ enum TF {
 
   // MARK: Animation
 
+  /// One breathing period for every "this is live" indicator. There used to
+  /// be five (0.8/0.9/1.0/1.1/1.2/1.6/2.0s) and with four onscreen at once
+  /// they beat against each other — the panel shimmered instead of breathing.
+  static let breathPeriod: Double = 1.1
+  static var breathe: Animation {
+    .easeInOut(duration: breathPeriod).repeatForever(autoreverses: true)
+  }
+
   static let springSnappy = Animation.spring(response: 0.35, dampingFraction: 0.8)
   static let springGentle = Animation.spring(response: 0.5, dampingFraction: 0.75)
   static let springBouncy = Animation.spring(response: 0.4, dampingFraction: 0.65)

@@ -20,6 +20,59 @@ index 126df79..c9b0286 100644
  // 播放 / 录音。bytes 为字节数(16bit 单声道时 = 采样数 x 2)。
  esp_err_t bsp_audio_write(const void *pcm, size_t bytes);
  esp_err_t bsp_audio_read(void *pcm, size_t bytes);
+diff --git a/components/bsp/include/bsp_battery.h b/components/bsp/include/bsp_battery.h
+index cebd1d9..545ee1b 100644
+--- a/components/bsp/include/bsp_battery.h
++++ b/components/bsp/include/bsp_battery.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include "esp_err.h"
++#include <stddef.h>
+ 
+ // 初始化。内部会调 bsp_i2c_init()(幂等)。
+ // 芯片不应答时返回 ESP_ERR_NOT_FOUND —— 上层可据此在 UI 上标记该项不可用。
+@@ -14,3 +15,8 @@ int bsp_battery_soc(void);
+ 
+ // 电池电压 mV;读失败返回 -1。
+ int bsp_battery_mv(void);
++
++// 原始寄存器转储(诊断用):把 VERSION/VCELL/SOC/CONFIG 写进 buf。
++// 存在的理由:SOC 返回 -1 时,光看这个返回值分不清"芯片没应答"、"芯片在睡眠"
++// 还是"芯片醒着但还没算出电量"——三者的修法完全不同。
++void bsp_battery_dump(char *buf, size_t cap);
+diff --git a/components/bsp/include/bsp_button.h b/components/bsp/include/bsp_button.h
+index fd12688..2021b2c 100644
+--- a/components/bsp/include/bsp_button.h
++++ b/components/bsp/include/bsp_button.h
+@@ -35,3 +35,12 @@ int bsp_button_read_mv(void);
+ // 刷新期 SPI 活动与 ADC1_CH0 耦合,ADC 持续读 ~0mV → UP 假按 → 假 PTT
+ // (真机取证 2026-08-28)。窗口内按键判定直接返回"未按下"。
+ void bsp_button_suppress_panel_glitch(void);
++
++// 停掉按键扫描并把引脚交还给 GPIO(深睡眠前专用,不可逆:之后只能重启恢复)。
++//
++// 为什么必须有这一步:按键走 ADC 轮询(iot_button 每 5ms 一次),引脚因此处于
++// 【模拟模式】—— 数字输入缓冲器关闭,深睡眠的唤醒逻辑读到的恒为 0,一进睡眠
++// 就秒醒。而如果只是在 ADC 底下 gpio_reset_pin,下一次轮询会踩空,真机表现是
++// int_wdt 复位(2026-09-03 两次踩坑,复位原因 5)。顺序只能是:先停扫描,
++// 再改引脚,最后睡。
++void bsp_button_release_for_sleep(void);
+diff --git a/components/bsp/include/bsp_pins.h b/components/bsp/include/bsp_pins.h
+index b37ba22..d7b8872 100644
+--- a/components/bsp/include/bsp_pins.h
++++ b/components/bsp/include/bsp_pins.h
+@@ -52,6 +52,10 @@
+ // ============================================================================
+ #define BSP_BTN_ADC_UNIT     ADC_UNIT_1
+ #define BSP_BTN_ADC_CHANNEL  ADC_CHANNEL_0    // GPIO0
++// 同一个引脚的 GPIO 编号。深睡眠唤醒要按数字 IO 配它(ADC 模拟模式下数字输入
++// 缓冲器是关的,唤醒逻辑读不到电平),而那条路径只认 GPIO 号不认 ADC 通道 ——
++// 两个常量必须同时改,写在一起是为了别漏。
++#define BSP_BTN_GPIO_NUM     0                // = ADC1_CH0
+ #define BSP_BTN_COUNT        3
+ 
+ // 每键的电压窗口 {min_mV, max_mV};边界取相邻档中点。
 diff --git a/components/bsp/src/bsp_audio.c b/components/bsp/src/bsp_audio.c
 index 822f5e3..6ed81b9 100644
 --- a/components/bsp/src/bsp_audio.c
@@ -47,6 +100,118 @@ index 822f5e3..6ed81b9 100644
  esp_err_t bsp_audio_write(const void *pcm, size_t bytes) {
      if (!s_dev) return ESP_ERR_INVALID_STATE;
      return esp_codec_dev_write(s_dev, (void *)pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
+diff --git a/components/bsp/src/bsp_battery.c b/components/bsp/src/bsp_battery.c
+index 4feac2b..b41eae5 100644
+--- a/components/bsp/src/bsp_battery.c
++++ b/components/bsp/src/bsp_battery.c
+@@ -7,6 +7,7 @@
+ #include "esp_log.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
++#include <stdio.h>
+ 
+ static const char *TAG = "bsp_batt";
+ 
+@@ -59,12 +60,41 @@ esp_err_t bsp_battery_init(void) {
+     return ESP_OK;
+ }
+ 
++// 单节锂聚合物开路电压 → 剩余电量查表。
++//
++// 为什么不用 CW2017 自己的 SOC 寄存器:它返回 0xFE.E8(254.9%),不是 0xFF 的
++// "未就绪"而是【未标定】—— CW2017 必须写入与电芯匹配的 profile 才会输出合法
++// 百分比,而上游文档把"电池型号与容量、CW2017 profile"列在"尚未补充"清单里
++// (docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md:419)。驱动原注释说"用芯片自带
++// Li-Poly profile"是错的:没有可用的出厂默认 profile,不写就永远出不了数。
++// 猜一份 profile 写进去比不写更糟(标定错的电量比没有电量更误导)。
++//
++// 曲线取通用 LiPo 放电特性。中段(3.6-3.9V)平坦是锂电的物理特性,那一段的
++// 估算天然粗糙 —— 这是电压法的固有限制,不是实现缺陷。真要准确 SOC 需要电芯
++// 参数 + 厂商 profile + 完整充放电验证,见上述文档同一行。
++// ⚠ 带负载时电压会被内阻拉低(录音瞬间尤其明显),所以这里的读数偏保守。
++static const struct { uint16_t mv; uint8_t pct; } LIPO_CURVE[] = {
++    { 4200, 100 }, { 4100,  94 }, { 4000,  85 }, { 3950,  76 },
++    { 3900,  67 }, { 3850,  58 }, { 3800,  48 }, { 3750,  38 },
++    { 3700,  29 }, { 3650,  20 }, { 3600,  13 }, { 3500,   6 },
++    { 3400,   2 }, { 3300,   0 },
++};
++
+ int bsp_battery_soc(void) {
+-    uint8_t b[2] = { 0 };
+-    if (cw_read(CW_REG_SOC_H, b, 2) != 0) return -1;
+-    int soc = b[0];                       // 高字节即整数百分比
+-    if (soc > 100) return -1;             // 芯片未就绪时可能读到 0xFF
+-    return soc;
++    const int mv = bsp_battery_mv();
++    if (mv < 0) return -1;
++    const size_t n = sizeof(LIPO_CURVE) / sizeof(LIPO_CURVE[0]);
++    if (mv >= LIPO_CURVE[0].mv) return 100;
++    if (mv <= LIPO_CURVE[n - 1].mv) return 0;
++    for (size_t i = 1; i < n; i++) {
++        if (mv >= LIPO_CURVE[i].mv) {
++            // 两点间线性插值,避免百分比跳变
++            const int hi_mv = LIPO_CURVE[i - 1].mv, lo_mv = LIPO_CURVE[i].mv;
++            const int hi_p = LIPO_CURVE[i - 1].pct, lo_p = LIPO_CURVE[i].pct;
++            return lo_p + (mv - lo_mv) * (hi_p - lo_p) / (hi_mv - lo_mv);
++        }
++    }
++    return 0;
+ }
+ 
+ int bsp_battery_mv(void) {
+@@ -73,3 +103,18 @@ int bsp_battery_mv(void) {
+     uint32_t raw = ((uint32_t)b[0] << 8 | b[1]) & 0x3FFF;   // 14bit
+     return (int)((raw * 3125) / 10000);                     // raw * 312.5uV → mV
+ }
++
++void bsp_battery_dump(char *buf, size_t cap) {
++    if (!buf || cap == 0) return;
++    if (!s_dev) { snprintf(buf, cap, "cw2017: absent (init failed)\n"); return; }
++    uint8_t ver = 0, cfg = 0, soc[2] = { 0 }, vc[2] = { 0 };
++    int rv = cw_read(CW_REG_VERSION, &ver, 1);
++    int rc = cw_read(CW_REG_CONFIG, &cfg, 1);
++    int rs = cw_read(CW_REG_SOC_H, soc, 2);
++    int rw = cw_read(CW_REG_VCELL_H, vc, 2);
++    snprintf(buf, cap,
++             "cw2017: ver=%s0x%02X cfg=%s0x%02X soc=%s%02X.%02X vcell=%s0x%04X\n",
++             rv ? "ERR" : "", ver, rc ? "ERR" : "", cfg,
++             rs ? "ERR " : "", soc[0], soc[1],
++             rw ? "ERR " : "", (unsigned)(((uint32_t)vc[0] << 8 | vc[1]) & 0x3FFF));
++}
+diff --git a/components/bsp/src/bsp_button.c b/components/bsp/src/bsp_button.c
+index 8c69ef6..91402e3 100644
+--- a/components/bsp/src/bsp_button.c
++++ b/components/bsp/src/bsp_button.c
+@@ -125,6 +125,29 @@ void bsp_button_suppress_panel_glitch(void) {
+     button_adc_set_ignore_until(esp_timer_get_time() + BSP_BTN_PANEL_GLITCH_US);
+ }
+ 
++void bsp_button_release_for_sleep(void) {
++    // 顺序是本函数存在的全部理由,别调换(见头文件注释里的两次真机踩坑):
++    // ① 停扫描 —— iot_button 的 5ms 定时器还在跑的时候动引脚,下一次采样
++    //    踩空,真机是 int_wdt 复位而不是报错。
++    iot_button_stop();
++    for (int i = 0; i < BSP_BTN_COUNT; i++) {
++        if (s_btn[i]) { iot_button_delete(s_btn[i]); s_btn[i] = NULL; }
++    }
++    // ② 释放 ADC 单元 —— 不释放的话引脚仍被登记为模拟功能。
++    if (s_cali) {
++#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
++        adc_cali_delete_scheme_curve_fitting(s_cali);
++#endif
++        s_cali = NULL;
++    }
++    if (s_adc) { adc_oneshot_del_unit(s_adc); s_adc = NULL; }
++    // ③ 引脚回到数字输入。上拉靠板上外部 10k(bsp_pins.h 电路图),不开内部的。
++    gpio_reset_pin((gpio_num_t)BSP_BTN_GPIO_NUM);
++    gpio_set_direction((gpio_num_t)BSP_BTN_GPIO_NUM, GPIO_MODE_INPUT);
++    gpio_set_pull_mode((gpio_num_t)BSP_BTN_GPIO_NUM, GPIO_FLOATING);
++    ESP_LOGI(TAG, "按键已释放,引脚回到数字输入(深睡眠准备)");
++}
++
+ int bsp_button_read_mv(void) {
+     // 读的是 bsp_button_init() 建好、并与 iot_button 共用的那一路 ADC。
+     // 单次采样与组件的按键轮询互不干扰(oneshot 内部自带锁)。
 diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
 index e7295c1..fb4ff7b 100644
 --- a/main/CMakeLists.txt
@@ -833,10 +998,19 @@ index 14c6eaf..3f261a2 100644
  void audio_streamer_drain(uint32_t ms);
  bool audio_streamer_active(void);
 diff --git a/main/console_cmds.c b/main/console_cmds.c
-index 455a996..944ef81 100644
+index 455a996..82314f9 100644
 --- a/main/console_cmds.c
 +++ b/main/console_cmds.c
-@@ -193,6 +193,34 @@ static int cmd_time(int argc, char **argv)
+@@ -27,6 +27,8 @@
+ #include <string.h>
+ 
+ bool app_pm_gate_state(uint32_t *idle_ms);   /* main.c:活动门禁状态 */
++uint32_t app_pm_unused_ms(void);             /* main.c:距上次真实使用(深睡眠计时) */
++uint32_t app_pm_deep_sleep_ms(void);         /* main.c:深睡眠阈值 */
+ 
+ static const char *TAG = "console";
+ 
+@@ -193,6 +195,34 @@ static int cmd_time(int argc, char **argv)
      return 1;
  }
  
@@ -871,7 +1045,31 @@ index 455a996..944ef81 100644
  // ---- log:导出 USB 模式日志环(REPL 模式下日志直接上屏,环为空) ----
  // 可选 <offset>:SYS_RESP 载荷上限 2048B(USB_RESP_MAX),环(16KB)超限时
  // 首块恰在中间截断。`log 2048` / `log 4096` … 按游标分多次取回全量 ——
-@@ -333,6 +361,7 @@ static int cmd_factory(int argc, char **argv)
+@@ -261,6 +291,11 @@ static int cmd_st(int argc, char **argv)
+         bool held = app_pm_gate_state(&idle_ms);
+         out("gate: %s  idle: %ums\n", held ? "normal(常态功耗)" : "saving(省电)",
+             (unsigned)idle_ms);
++        // 深睡眠倒计时:与 idle 是两条线 —— idle 被任意链路事件刷新,这条只认
++        // 用户真实按键(见 main.c 的 pm_use_mark)。
++        out("unused: %us (deep sleep at %us)\n",
++            (unsigned)(app_pm_unused_ms() / 1000),
++            (unsigned)(app_pm_deep_sleep_ms() / 1000));
+     }
+     out("--- link ---\n");
+     // 双通道常开:聚合链路 + 两通道独立状态。会话路由 = 最近连接/使用通道。
+@@ -282,6 +317,11 @@ static int cmd_st(int argc, char **argv)
+     int soc = bsp_battery_soc();
+     int mv = bsp_battery_mv();
+     out("soc: %d%% mv: %d\n", soc < 0 ? -1 : soc, mv < 0 ? -1 : mv);
++    {
++        char dump[96];
++        bsp_battery_dump(dump, sizeof(dump));
++        out("%s", dump);
++    }
+     return 0;
+ }
+ 
+@@ -333,6 +373,7 @@ static int cmd_factory(int argc, char **argv)
  static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
      { "log",     cmd_log },
      { "time",    cmd_time },
@@ -879,7 +1077,7 @@ index 455a996..944ef81 100644
      { "st",      cmd_st },
      { "rst",     cmd_rst },
      { "reboot",  cmd_reboot },
-@@ -417,6 +446,7 @@ esp_err_t console_cmds_register(void)
+@@ -417,6 +458,7 @@ esp_err_t console_cmds_register(void)
      reg("st", "系统状态一览(双链路/MTU/掉帧/堆)", NULL, cmd_st);
      reg("rst", "复位原因(无线自动重启诊断)", NULL, cmd_rst);
      reg("time", "校时:time | time set <epoch> | time tz <±hh>", NULL, cmd_time);
@@ -888,10 +1086,124 @@ index 455a996..944ef81 100644
      reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
      return ESP_OK;
 diff --git a/main/main.c b/main/main.c
-index 9afea03..03749fb 100644
+index 9afea03..2cb2e6e 100644
 --- a/main/main.c
 +++ b/main/main.c
-@@ -215,7 +215,8 @@ static void run_actions(const app_action_t *acts, uint8_t n)
+@@ -19,9 +19,12 @@
+ #include "bsp_button.h"
+ #include "bsp_display.h"
+ #include "bsp_i2c.h"
++#include "bsp_pins.h"                   // BSP_BTN_GPIO_NUM(深睡眠唤醒脚)
+ #include "esp_log.h"
+ #include "lvgl.h"                       // lv_obj_invalidate:面板唤醒后全屏重绘
+-#include "esp_pm.h"                     // 空闲 light sleep + 录音会话 PM 锁
++#include "esp_pm.h"
++#include "esp_sleep.h"                  // 深睡眠 + 按键唤醒(见 deep_sleep_check)
++#include "driver/gpio.h"              // 深睡眠前把按键脚从 ADC 模拟模式切回数字输入
+ #include "driver/usb_serial_jtag.h"     // usb_serial_jtag_is_connected:USB 在位检测
+ #include "esp_system.h"
+ #include "esp_timer.h"
+@@ -89,9 +92,28 @@ static void pm_session_unlock(void)
+ // 这时才交给 esp_pm 变频 + light sleep。开机也算一次活动(先给 1 分钟常态)。
+ // 录音会话另有 pm_session_lock(APB 也锁,I2S 不能降频),两者独立叠加。
+ #define PM_IDLE_GATE_MS 60000
++// 深睡眠门禁(2026-09-03 用户需求:"20 分钟没活动就该休眠"):比 light sleep
++// 那一档远得多 —— light sleep 只是 CPU 打盹,BLE 广播、按键轮询、100ms 心跳
++// 全都还在跑,放一晚上照样耗完。深睡眠把这些全停掉,只留 GPIO 唤醒。
++//
++// 唤醒电路(bsp_pins.h 的分压梯):松开时外部 10k 上拉到 3300mV,按任意键都会
++// 把 GPIO0 拉到 0/300/595mV —— 三档全是低电平,所以低电平触发不需要分辨
++// 是哪颗键(醒来是整机重启,ADC 恢复后正常流程自己会读)。
++#define PM_DEEP_SLEEP_MS (20 * 60 * 1000)
+ static esp_pm_lock_handle_t s_pm_act_cpu, s_pm_act_ls;
+ static bool s_pm_act_held;
+ static uint64_t s_pm_act_ms;
++// 深睡眠有【独立】的空闲时间线,不复用 s_pm_act_ms(2026-09-03)。
++// 后者被"任意链路事件"刷新 —— BLE 连断、Mac 下行的转写文本、校时都算,而这些
++// 在电脑常开、Type4Me 常驻的日常里几分钟就来一次,深睡眠会永远等不到。
++// 这条只认"用户真的在用设备":按键操作与录音会话,见 pm_use_mark。
++static uint64_t s_pm_use_ms;
++
++// 用户真实使用的时刻(按键/录音),深睡眠计时的唯一依据。
++static void pm_use_mark(uint64_t now_ms)
++{
++    s_pm_use_ms = now_ms;
++}
+ 
+ // 哪些事件算"链路/主机活动"(与按键无关,天然无假事件问题)
+ static bool pm_ev_is_link(uint8_t t)
+@@ -133,6 +155,70 @@ static void pm_idle_gate_check(uint64_t now_ms)
+     ESP_LOGI(TAG, "空闲 %ds:进入省电(变频 + light sleep)", PM_IDLE_GATE_MS / 1000);
+ }
+ 
++// 深睡眠:20 分钟没说过话 → 关机级功耗,按任意键唤醒(整机重启)。
++//
++// "连着 Mac"【不】阻止睡眠(2026-09-03 用户明确):电脑常开、Type4Me 常驻是
++// 日常状态,拿连接当门禁等于这条路永远走不到,续航问题原样留着。用户不会为了
++// 省电特意去断开设备 —— 判据只能是"有没有在用",而不是"有没有连着"。
++// 睡下去 BLE 自然断开,Mac 侧 didDisconnectPeripheral 会重新扫描,醒来重新
++// 广播后自动重连(代价:回来按第一下多等一两秒)。
++//
++// 剩下两道门禁,都是"睡下去会坏事"而不是"睡下去不划算":
++//  1. USB 在位 —— 有线供电不需要省电,而且深睡眠会掐断数据通道,Mac 侧看到的
++//     是设备无故消失。
++//  2. 不在待机态 —— 录音/转写/审批中途睡下去会丢会话。
++static void deep_sleep_check(uint64_t now_ms)
++{
++    if (now_ms - s_pm_use_ms < PM_DEEP_SLEEP_MS) return;
++    if (usb_serial_jtag_is_connected()) return;
++    if (s_state.state != APP_ST_HOME && s_state.state != APP_ST_READY) return;
++
++    ESP_LOGW(TAG, "空闲 %d 分钟:进入深睡眠(按任意键唤醒)",
++             PM_DEEP_SLEEP_MS / 60000);
++    // 屏幕先真正断电再睡:面板停在 SLPIN 之外的状态会留着残影,而深睡眠期间
++    // 没有任何代码能再去关它。
++    bsp_display_backlight(0);
++    bsp_display_power(false);
++    // 提示音早已取消,codec 可能还开着(会话结束后 5 分钟才释放)——不等它,
++    // 直接断,深睡眠本来就会切掉电。
++    audio_streamer_release_codec();
++
++    // 按任意键唤醒:三颗键任一按下都把 GPIO0 拉低(松开是外部 10k 上拉到
++    // 3300mV),所以低电平触发不需要分辨是哪颗键 —— 醒来是整机重启,ADC 恢复
++    // 后正常流程自己会读。
++    //
++    // ⚠ 两次真机踩坑的顺序要求(2026-09-03),细节见 bsp_button_release_for_sleep:
++    //   ① 按键走 ADC 轮询,引脚处于【模拟模式】—— 数字输入缓冲器关闭,唤醒
++    //      逻辑读到的恒为 0,一进睡眠就秒醒(每 60 秒重启一轮,比不睡更费电)。
++    //      我当时按"松开是 3300mV 高电平"推断可行,错在那是 ADC 看到的模拟
++    //      电压,唤醒电路走另一条通路,根本不看模拟值。
++    //   ② 只是在 ADC 底下 gpio_reset_pin 同样不行:iot_button 的 5ms 定时器
++    //      下一次采样踩空 → int_wdt 复位(复位原因 5,真机取证)。
++    //   所以必须"先停扫描、再释放 ADC、最后改引脚",封装在 BSP 里。
++    bsp_button_release_for_sleep();
++    // 读一次确认引脚确实回到高电平:仍是 0 就说明切换没生效,这时候睡下去
++    // 必然秒醒 —— 与其进死循环,不如放弃这次睡眠。按键已经释放,恢复不了了,
++    // 只能重启:比悄悄进入 62 秒重启循环好,至少日志说得清为什么。
++    if (gpio_get_level((gpio_num_t)BSP_BTN_GPIO_NUM) == 0) {
++        ESP_LOGE(TAG, "放弃深睡眠:GPIO0 仍读低(按键按住?)—— 重启恢复按键");
++        esp_restart();
++    }
++
++    // 用 esp_deep_sleep_enable_gpio_wakeup 而不是 ext1:C3 的
++    // SOC_RTCIO_PIN_COUNT 为 0(没有独立 RTC IO),ext1 那套 API 在这颗芯片上
++    // 不存在,编译期就会报 undeclared。
++    esp_deep_sleep_enable_gpio_wakeup(1ULL << 0, ESP_GPIO_WAKEUP_GPIO_LOW);
++    esp_deep_sleep_start();   // 不返回
++}
++
++// 供 console `st` 展示深睡眠倒计时(诊断用;同上,单写多读容忍撕裂)
++uint32_t app_pm_unused_ms(void)
++{
++    return (uint32_t)(esp_timer_get_time() / 1000 - s_pm_use_ms);
++}
++
++uint32_t app_pm_deep_sleep_ms(void) { return PM_DEEP_SLEEP_MS; }
++
+ // 供 console `st` 展示门禁状态(诊断用;app_task 单写,读侧容忍撕裂)
+ bool app_pm_gate_state(uint32_t *idle_ms)
+ {
+@@ -215,7 +301,8 @@ static void run_actions(const app_action_t *acts, uint8_t n)
          case APP_ACT_SEND_VOICE_START:
              // 会话通道决定音频格式(voice.start 上报,App 据此分发解码)
              len = app_protocol_voice_start(buf, sizeof(buf),
@@ -901,7 +1213,7 @@ index 9afea03..03749fb 100644
              send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
              break;
          case APP_ACT_SEND_VOICE_END:
-@@ -240,6 +241,13 @@ static void run_actions(const app_action_t *acts, uint8_t n)
+@@ -240,6 +327,13 @@ static void run_actions(const app_action_t *acts, uint8_t n)
                       len ? "sent" : "encode-fail");
              send_event_line(buf, len);
              break;
@@ -915,7 +1227,7 @@ index 9afea03..03749fb 100644
          case APP_ACT_SEND_AGENT_ACTION:
              len = app_protocol_agent_action(buf, sizeof(buf),
                                              a->u.agent_action.task_id,
-@@ -272,29 +280,19 @@ static void run_actions(const app_action_t *acts, uint8_t n)
+@@ -272,29 +366,19 @@ static void run_actions(const app_action_t *acts, uint8_t n)
              audio_streamer_cancel();
              pm_session_unlock();
              break;
@@ -953,7 +1265,30 @@ index 9afea03..03749fb 100644
              break;
          }
      }
-@@ -396,18 +394,9 @@ static void app_task(void *arg)
+@@ -338,6 +422,7 @@ static void app_task(void *arg)
+     uint64_t next_tick = esp_timer_get_time() / 1000;
+     uint64_t now_ms = next_tick;
+     pm_activity_mark(now_ms, 255);   // 开机 = 活动,先跑 1 分钟常态功耗
++    pm_use_mark(now_ms);             // 开机也起算深睡眠计时(0 会让首个 tick 立刻睡)
+ 
+     for (;;) {
+         app_event_t ev;
+@@ -381,6 +466,14 @@ static void app_task(void *arg)
+                 || pm_ev_is_link(ev.type)) {
+                 pm_activity_mark(now_ms, ev.type);
+             }
++            // 深睡眠计时只认"用户在用":真实按键(经过上面同一套假事件过滤)。
++            // 链路事件刻意排除 —— Mac 推一条转写、BLE 抖一次连接都不代表用户
++            // 在场,把它们算进去这条计时就永远不会到点。
++            if (!pm_ev_is_link(ev.type)
++                && (n > 0 || (uint8_t)s_state.state != st_before
++                    || s_state.screen_on != scr_before || s_state.locked != lock_before)) {
++                pm_use_mark(now_ms);
++            }
+             run_actions(acts, n);
+             if (++n_batch >= APP_EVENT_BATCH_MAX) {
+                 vTaskDelay(pdMS_TO_TICKS(2));
+@@ -396,22 +489,14 @@ static void app_task(void *arg)
              app_event_t t = { .type = APP_EV_TICK };
              uint8_t n = 0;
              app_state_reduce(&s_state, &t, now_ms, acts, &n);
@@ -975,6 +1310,11 @@ index 9afea03..03749fb 100644
              run_actions(acts, n);
              tick_acted = (n > 0);      // TICK 产生动作(toast 过期/超时/息屏) → 需渲染
              next_tick = now_ms + APP_TICK_MS;
+             pm_idle_gate_check(now_ms);   // 满 1 分钟无事件才放手省电
++            deep_sleep_check(now_ms);     // 满 20 分钟且无人连着才真正睡死
+         }
+ 
+         // 渲染判定(S1 降频):有事件/动作、或距上次渲染 ≥1s(顶栏/电量/
 diff --git a/main/nvs_settings.c b/main/nvs_settings.c
 index 6f86eb4..6fa395d 100644
 --- a/main/nvs_settings.c
@@ -1053,6 +1393,18 @@ index 5ce09b3..c2bb22d 100644
  void nvs_settings_factory_reset(void);   // 清 "app" 命名空间
  
  #ifdef __cplusplus
+diff --git a/sdkconfig.defaults b/sdkconfig.defaults
+index 5d86d4e..7131660 100644
+--- a/sdkconfig.defaults
++++ b/sdkconfig.defaults
+@@ -96,3 +96,7 @@ CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+ # BLE 连接事件错过 → esp_restart 复位循环(复位原因 4)。开启后主晶振在
+ # light sleep 期间保持供电,BT 参考时钟不断(代价:睡眠多耗几百 µA,可接受)。
+ CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
++
++# 深睡眠按键唤醒(2026-09-03):板上按键脚已有外部 10k 上拉(bsp_pins.h 电路图),
++# 内部上拉会与之叠加干扰 —— esp_sleep.h 对外部电阻的情形明确要求关掉这一项。
++CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS=n
 diff --git a/tests/fake/fake_rtos.c b/tests/fake/fake_rtos.c
 index c9ae52e..18fbc74 100644
 --- a/tests/fake/fake_rtos.c

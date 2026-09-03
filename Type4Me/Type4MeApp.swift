@@ -71,6 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// Which mode the device's current recording started under, so the release goes
   /// to the same binding even if the selected mode changed meanwhile.
   private var deviceRecordingModeId: UUID?
+  /// The mode that was selected before a Quick Note took over, so it can be put
+  /// back. Quick Note is a gesture, not a mode change: starting one rewrites
+  /// `appState.currentMode` (every recording does), and without restoring it the
+  /// card's UP key would keep reading "Quick Note" as the current mode and jot
+  /// every later recording down instead of typing it.
+  private var modeBeforeQuickNote: ProcessingMode?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSLog("[Type4Me] applicationDidFinishLaunching")
@@ -995,17 +1001,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .disconnected:
           NSLog("[Passport] disconnected")
           await self.session.setExternalAudioSource(nil)
+          // Unplugged mid-note: the release that would have restored the mode is
+          // never coming, so the selection would stay stuck on Quick Note.
+          await MainActor.run { self.restoreModeAfterQuickNote() }
 
         case .recordingRequested(let isNote):
           await MainActor.run {
             // The OK key means Quick Note regardless of which mode is selected —
-            // it is a distinct gesture, not a variation on the current one.
-            let modeId = isNote ? ProcessingMode.quickNoteId : self.appState.currentMode.id
+            // it is a distinct gesture, not a variation on the current one. The
+            // converse has to hold too: UP must never mean Quick Note. Starting a
+            // recording rewrites `currentMode`, so remember what was selected and
+            // put it back when the note ends — otherwise one note turns every
+            // later UP press into a note as well.
+            let modeId: UUID
+            if isNote {
+              self.modeBeforeQuickNote = self.appState.currentMode
+              modeId = ProcessingMode.quickNoteId
+            } else {
+              modeId = self.appState.currentMode.id
+            }
             self.deviceRecordingModeId = modeId
             guard self.hotkeyManager.triggerBinding(modeId: modeId, pressed: true) else {
               // No binding for this mode means the hotkey path cannot run, so
               // there is nothing sane to start; tell the device so it does not
               // sit in TRANSCRIBING.
+              self.modeBeforeQuickNote = nil
               Task { await PassportLink.shared.finishSession(state: .error, reason: "no mode") }
               return
             }
@@ -1019,6 +1039,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let modeId = self.deviceRecordingModeId ?? self.appState.currentMode.id
             self.deviceRecordingModeId = nil
             _ = self.hotkeyManager.triggerBinding(modeId: modeId, pressed: false)
+            self.restoreModeAfterQuickNote()
           }
 
         case .submitRequested:
@@ -1032,6 +1053,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
       }
     }
+  }
+
+  /// Put back the mode a Quick Note displaced.
+  ///
+  /// Safe to call as soon as the note's recording ends: `RecognitionSession` keeps
+  /// its own copy of the mode from when the recording started, so restoring the
+  /// selection here does not disturb the note still being recognized. It only puts
+  /// the UI — and the card's UP key, which reads `currentMode` — back where the
+  /// user left them.
+  @MainActor
+  private func restoreModeAfterQuickNote() {
+    let displaced = modeBeforeQuickNote
+    modeBeforeQuickNote = nil
+    guard
+      let previous = ProcessingMode.modeToRestoreAfterQuickNote(
+        displaced: displaced, current: appState.currentMode)
+    else { return }
+    appState.currentMode = previous
+    DebugFileLogger.log("quick note ended, mode restored to \(previous.name)")
   }
 
   /// Throw away the recording the device just rejected.
@@ -1059,6 +1099,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.hotkeyManager.isProcessing = false
       self.safeResetHotkeyState()
       self.deviceRecordingModeId = nil
+      self.restoreModeAfterQuickNote()
       let pending = self.panelModeSessionTask
       self.panelModeSessionTask = nil
       return pending

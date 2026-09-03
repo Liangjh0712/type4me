@@ -879,6 +879,24 @@ struct ProcessingMode: Codable, Identifiable, Equatable, Hashable {
     )
   }
 
+  /// Which mode the selection should return to once a Quick Note ends.
+  ///
+  /// Quick Note is a gesture, not a mode change — but starting any recording rewrites
+  /// `AppState.currentMode`, so a note leaves the selection sitting on Quick Note.
+  /// The card's UP key reads that selection, so one note would turn every later
+  /// recording into a note too (shipped bug, 2026-09-03).
+  ///
+  /// Returns nil when there is nothing to restore: no note was displaced, or the
+  /// selection has already moved on by itself (the user picked something mid-note,
+  /// and their choice outranks what we remembered).
+  static func modeToRestoreAfterQuickNote(
+    displaced: ProcessingMode?, current: ProcessingMode
+  ) -> ProcessingMode? {
+    guard let displaced else { return nil }
+    guard current.executionKind == .quickNote else { return nil }
+    return displaced
+  }
+
   static let agentModePromptTemplate = #"""
     # Role
     你是一个"直接交付"型 AI 助手。用户通过语音口述一个需求，你的任务是**直接给出最终成品**，让用户能立即粘贴到目标场景使用。

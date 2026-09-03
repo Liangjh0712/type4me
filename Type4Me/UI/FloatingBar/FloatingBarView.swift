@@ -276,15 +276,43 @@ struct FloatingBarView<S: FloatingBarState>: View {
     return false
   }
 
+  /// The mode name to show inside the capsule while capturing, or nil for the
+  /// default mode.
+  ///
+  /// Without this, a Quick Note started from the card's OK key looks exactly like a
+  /// normal recording — and since Quick Note deliberately types nothing, the only
+  /// way to find out which one you started was to go looking in the history
+  /// afterwards. The card's own screen cannot serve here: it is held up to the
+  /// mouth, not read.
+  private var captureModeLabel: String? {
+    guard state.barPhase == .preparing || state.barPhase == .recording else { return nil }
+    let mode = state.currentMode
+    guard mode.id != ProcessingMode.direct.id else { return nil }
+    return mode.name
+  }
+
+  /// Width the mode chip needs, including its leading gap. Zero when absent.
+  ///
+  /// `capsuleWidth` must account for this or the chip is silently clipped — the
+  /// capsule is a fixed frame, and the empty-transcript case is only `barHeight`
+  /// (40pt) wide, which is a dot and nothing else.
+  private var captureModeChipWidth: CGFloat {
+    guard let label = captureModeLabel else { return 0 }
+    return measureChipText(label) + 14  // chip padding (5+5) + gap to the dot
+  }
+
   private var capsuleWidth: CGFloat {
     switch state.barPhase {
     case .preparing:
-      return TF.barHeight
+      return TF.barHeight + captureModeChipWidth
     case .recording:
       if state.segments.isEmpty {
-        return state.isQwen3OnlyMode ? 110 : TF.barHeight
+        let base = state.isQwen3OnlyMode ? 110 : TF.barHeight
+        // The dot-only capsule has no room for a chip, so widen it by exactly
+        // what the chip needs (measured, not guessed).
+        return base + captureModeChipWidth
       }
-      return recordingPeakWidth
+      return recordingPeakWidth + captureModeChipWidth
     case .processing:
       return measureText(state.effectiveProcessingLabel) + 66.0
     case .recovering:
@@ -396,8 +424,11 @@ struct FloatingBarView<S: FloatingBarState>: View {
   }
 
   private var preparingContent: some View {
-    HStack(spacing: 0) {
+    HStack(spacing: 8) {
       PreparingDot()
+      if let label = captureModeLabel {
+        captureModeChip(label)
+      }
     }
     .frame(maxWidth: .infinity)
   }
@@ -406,6 +437,12 @@ struct FloatingBarView<S: FloatingBarState>: View {
     HStack(spacing: 10) {
       // Module 1: dot (fixed position, 14pt from left edge)
       RecordingDot(meter: state.audioLevel)
+
+      // Module 1b: which mode this recording is, when it is not the default one.
+      // Sits next to the dot so it stays put as the transcript grows.
+      if let label = captureModeLabel {
+        captureModeChip(label)
+      }
 
       // Module 2: text container (fills remaining space, grows with frame)
       // Uses overlay so text sizing never affects HStack layout
@@ -1137,6 +1174,35 @@ struct FloatingBarView<S: FloatingBarState>: View {
   /// Measure actual rendered width using the same font as the floating bar text.
   private func measureText(_ string: String) -> CGFloat {
     ceil((string as NSString).size(withAttributes: [.font: floatingBarFont]).width)
+  }
+
+  /// Measured at the chip's own size, not the capsule body font — using the wrong
+  /// font here is how a chip ends up clipped despite the width being "accounted for".
+  private func measureChipText(_ string: String) -> CGFloat {
+    ceil(
+      (string as NSString).size(withAttributes: [
+        .font: NSFont.systemFont(ofSize: 10, weight: .semibold)
+      ]).width)
+  }
+
+  /// Amber chip naming the active mode. Amber because teal is already the capture
+  /// accent — a second teal element would read as two accents, and the point here is
+  /// "this recording is not the usual one".
+  @ViewBuilder
+  private func captureModeChip(_ label: String) -> some View {
+    Text(label)
+      .font(.system(size: 10, weight: .semibold))
+      .foregroundStyle(TF.lampAmber)
+      .lineLimit(1)
+      .fixedSize()
+      .padding(.horizontal, 5)
+      .padding(.vertical, 2)
+      .background(
+        Capsule().fill(TF.lampAmber.opacity(0.14))
+      )
+      .overlay(
+        Capsule().strokeBorder(TF.lampAmber.opacity(0.30), lineWidth: 0.5)
+      )
   }
 
   // MARK: - Transcript Popup View

@@ -13,6 +13,25 @@ enum CursorOverlayMetrics {
   /// The clock and action buttons moved to the hover row, so the transcript
   /// gets the whole line instead of the 66% it had while sharing it.
   static let textMaxWidth: CGFloat = 410
+  /// Mode chip metrics. The capsule is a fixed 460pt and `textMaxWidth` already
+  /// consumes every remaining point, so anything added to this row has to be taken
+  /// back off the text — otherwise the chip or the transcript is silently clipped.
+  /// Both numbers come from here so they cannot drift apart.
+  static let modeChipFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+  static let modeChipHorizontalPadding: CGFloat = 5
+  static let modeChipGap: CGFloat = 7
+
+  /// Total horizontal space a chip for `name` occupies, gap included.
+  static func modeChipWidth(_ name: String?) -> CGFloat {
+    guard let name, !name.isEmpty else { return 0 }
+    let text = ceil((name as NSString).size(withAttributes: [.font: modeChipFont]).width)
+    return text + modeChipHorizontalPadding * 2 + modeChipGap
+  }
+
+  /// Text cap once a chip is present.
+  static func textMaxWidth(modeName: String?) -> CGFloat {
+    textMaxWidth - modeChipWidth(modeName)
+  }
   /// Per-item cap for the secondary cluster (device / mode names).
   static let secondaryItemMaxWidth: CGFloat = 90
   /// Item separator in the secondary cluster.
@@ -47,6 +66,18 @@ enum CursorOverlayCopy {
     case .processing, .recovering: return state.effectiveProcessingLabel
     default: return ""
     }
+  }
+
+  /// The active mode's name, or nil when it is the default (whose name would be
+  /// noise on every single recording).
+  ///
+  /// Rendered as a chip beside the dot rather than folded into the status line,
+  /// because the status line is replaced by the transcript on the first word — and
+  /// the whole point is that a Quick Note stays identifiable for the entire take.
+  static func nonDefaultModeName<S: FloatingBarState>(for state: S) -> String? {
+    let mode = state.currentMode
+    guard mode.id != ProcessingMode.direct.id else { return nil }
+    return mode.name
   }
 
   /// Bottom meta strip content (device · mode · length · timer · speed).
@@ -186,6 +217,12 @@ struct CursorOverlayView<S: FloatingBarState>: View {
         // A failed state holds steady — a breathing red dot reads as "still
         // working on it" when the opposite is true.
         .opacity(pulsing && tone != .failed ? 0.35 : 1.0)
+      // Which mode this recording is, when it is not the default. Stays put as the
+      // transcript grows, and survives text arriving — the status line does not,
+      // because the transcript replaces it on the first word.
+      if let mode = activeModeName {
+        modeChip(mode)
+      }
       transcriptText
       Spacer(minLength: 0)
     }
@@ -194,6 +231,27 @@ struct CursorOverlayView<S: FloatingBarState>: View {
     .padding(.vertical, 8)
     .frame(width: CursorOverlayMetrics.capsuleWidth)
     .frostSurface(Capsule(), backlight: dotColor)
+  }
+
+  /// The mode to name inside the capsule, or nil for the default mode (whose name
+  /// would be noise on every recording) and for phases where it no longer matters.
+  private var activeModeName: String? {
+    guard state.barPhase == .preparing || state.barPhase == .recording else { return nil }
+    return CursorOverlayCopy.nonDefaultModeName(for: state)
+  }
+
+  /// Amber chip: teal is already the capture accent, and a second teal element would
+  /// read as two accents. Amber says "this is not the usual recording".
+  @ViewBuilder private func modeChip(_ name: String) -> some View {
+    Text(name)
+      .font(.system(size: 9.5, weight: .semibold))
+      .foregroundStyle(TF.lampAmber)
+      .lineLimit(1)
+      .fixedSize()
+      .padding(.horizontal, CursorOverlayMetrics.modeChipHorizontalPadding)
+      .padding(.vertical, 1.5)
+      .background(Capsule().fill(TF.lampAmber.opacity(0.14)))
+      .overlay(Capsule().strokeBorder(TF.lampAmber.opacity(0.30), lineWidth: 0.5))
   }
 
   /// Phase readout for the hover row: elapsed clock while capturing, the
@@ -233,7 +291,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
       font: .system(size: 13.5, weight: .regular),
       measuringFont: cursorTranscriptFont,
       color: textColor,
-      maxWidth: CursorOverlayMetrics.textMaxWidth,
+      maxWidth: CursorOverlayMetrics.textMaxWidth(modeName: activeModeName),
       // Frozen phases shouldn't re-develop settled text just because the
       // color changed.
       animates: tone == .live || tone == .hint
@@ -258,7 +316,7 @@ struct CursorOverlayView<S: FloatingBarState>: View {
   private var needsHeadFade: Bool {
     ceil(
       (displayText as NSString).size(withAttributes: [.font: cursorTranscriptFont]).width
-    ) > CursorOverlayMetrics.textMaxWidth
+    ) > CursorOverlayMetrics.textMaxWidth(modeName: activeModeName)
   }
 
   /// Hover row: device · mode · length · speed · clock, then the two actions.

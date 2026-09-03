@@ -631,6 +631,37 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.selectablePanelModes.contains { $0.id == ProcessingMode.quickNoteId })
   }
 
+  // MARK: - Quick Note does not stick
+
+  /// Shipped bug (2026-09-03): one Quick Note from the card's OK key turned every
+  /// later UP press into a note as well. Starting any recording rewrites
+  /// `currentMode`, and the card reads that selection to decide what UP means — so
+  /// the note has to hand the selection back when it ends.
+  func testQuickNoteRestoresThePreviousMode() {
+    let restored = ProcessingMode.modeToRestoreAfterQuickNote(
+      displaced: .direct, current: .quickNote)
+
+    XCTAssertEqual(restored?.id, ProcessingMode.directId)
+  }
+
+  /// A mode the user picked mid-note outranks what we remembered — restoring would
+  /// undo their choice.
+  func testQuickNoteDoesNotOverrideAModeChosenMidNote() {
+    let chosenMidNote = ProcessingMode.formalWriting
+
+    let restored = ProcessingMode.modeToRestoreAfterQuickNote(
+      displaced: .direct, current: chosenMidNote)
+
+    XCTAssertNil(restored)
+  }
+
+  /// Nothing was displaced, so there is nothing to put back. Guards the paths that
+  /// call this unconditionally (disconnect, discard) after a normal recording.
+  func testNoRestoreWhenNoQuickNoteRan() {
+    XCTAssertNil(
+      ProcessingMode.modeToRestoreAfterQuickNote(displaced: nil, current: .direct))
+  }
+
   private func makeTranscript(_ text: String, revision: Int = 1) -> RecognitionTranscript {
     RecognitionTranscript(
       confirmedSegments: [text],
